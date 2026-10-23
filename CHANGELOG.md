@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.1
+
+**Crash safety**
+- A mod whose own update, render, shutdown or options file ends the game is now blamed and kept off at the next launch
+  (before, only its start was traced, so it could crash the game on every launch).
+- One mod's error can no longer stop the other mods: start-up, render, the boot scripts' update, timers, events and
+  shutdown each run every mod on its own, and an error that can't be turned into text is still logged.
+- Shutdown always writes the clean marker and saves settings, even when a mod's shutdown fails, and runs only once.
+- A mod's bad number (NaN or infinity) in a drawing call is refused instead of being able to switch off the loader's own
+  menu; a call the loader skipped after a crash gets another try after a loader update, with a notice while it's skipped.
+- Shapes (triangles, arcs) are clipped to the screen and capped, so a huge or infinite shape can't freeze the game.
+- A mod's fingerprint now covers its whole source, so a same-size hotfix turns a crashed mod back on. What 1.0.0
+  learned carries over: mods it kept off stay off until they're updated, and other mods' boot scripts keep their
+  skipped calls.
+- A crash during a mission can no longer be blamed on the loader's drawing (two such launches switched drawing off for
+  good).
+- A mod can set or replace its `update`, `render` or `shutdown` after it started, and the new one runs.
+
+**Lockdown**
+- File handles, other mods' boot environments, and the `CowboyBingusModLoader` and `ModOptionsMenu` look-alikes are
+  sealed: each mod gets its own look-alikes, and a stopped mod's `on_change` and `after_startup` no longer run.
+- Saved-table files have one name per mod and table, so two mods can't share one (old files are moved over once).
+- Device names (`con.log`, `clock$` ...) are refused, and `string.dump` is gone.
+- `chef.call` also finds engine tables the game keeps among its globals, and never anything the locked-down space takes
+  away.
+
+**Saved data**
+- Settings, the crash state and saved tables are written to a `.tmp` file first and only then replace the old one, so a
+  full or locked disk no longer wipes them; a failed settings write is tried again. Saved tables from 1.0.0 move to
+  their new names the first time the mod loads them.
+- Saved strings with `\n` or `\t` after a backslash (`C:\new\tab`) come back intact.
+- `save_table`: reserved-word keys (`end`) and large numbers (3e9) save correctly, and it returns false when the write
+  fails.
+
+**Fixes**
+- A `-- HD2-Requires:` line without a version no longer swallows the next line.
+- No more stray mission end and start in the middle of a mission.
+- Sliders snap within their range, and a slider with no default and a bad value no longer stops the mod.
+- The menu key can't be set to none or to a navigation key, and the menu hint shows the real key.
+- `chef.title` works after `chef.option`; `chef.bind` accepts upper-case key names.
+- The performance monitor counts boot-style mods' timers and spread work, events, `on_change` and `after_startup` time
+  to the mod, not the loader.
+- More log lines when something is skipped (a missing world, a file over 4 MB, a byte-order mark, a bad name).
+
+**Performance**
+- Faster drawing, unit scans, guarded calls and `world_to_screen`; the menu costs less than half as much, and the
+  performance monitor about a third, with almost no garbage.
+- Less idle work: trace time stamps only while they matter, fewer clock calls for spread work, no garbage from `bit`
+  calls with three or more values, and a unit watch scans at most twice a second.
+
 ## 1.0.0
 
 The first release on its own (Treasure Radar 0.5.x carried an earlier copy built in).

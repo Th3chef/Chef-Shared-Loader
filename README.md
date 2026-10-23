@@ -2,19 +2,22 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.0.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.0.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
-**Install:** add the zip in your mod manager and enable it, **put it last in your load order** so it deploys after every
-other mod (in a mod manager that lists the highest priority at the top, that means first), then Purge and Deploy. A mod
-deployed after it that replaces the game's `boot` script takes its place, and then no loader mod runs
-(see [Other mods' boot scripts](#other-mods-boot-scripts)).
+**Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
+mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
+the bottom), then Purge and Deploy. If a mod that replaces the game's `boot` script has a higher priority, it takes the
+loader's place and no loader mod runs (see [Other mods' boot scripts](#other-mods-boot-scripts)).
+
+**Mods that need memory access won't work:** since the October 20, 2026 update (7.2.0) the game runs plain Lua 5.1, with
+no `ffi`, so no Lua mod can read or write game memory. No loader can bring that back.
 
 A Lua mod loader for Helldivers 2 on the Lua 5.1 game build (PUC Lua 5.1, no LuaJIT, no `ffi`, Easy Anti-Cheat on).
 It replaces the game's `boot` script, finds every loader mod in the deployed patch archives, and runs each one in its
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.0.0
+- **Version:** 1.0.1
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
 - **Files on the player's computer:** `%APPDATA%\Arrowhead\Helldivers2\` (see [Files](#files-on-the-players-computer))
@@ -173,7 +176,8 @@ Some engine calls end the game with a native fault (a null read on a stale handl
 `pcall` can't catch. So the loader learns from the crash instead.
 
 - **Breadcrumbs** go to `chef_loader_trace.txt`, flushed as they are written:
-  - `> owner|call` / `< owner|call`: the first time each engine call is made, and its return.
+  - `> owner|call` / `< owner|call`: the first time each engine call is made, and its return. A mod's own hooks count
+    too (`<mod>|update`, `|render`, `|shutdown`, `|options`), so a mod whose own code ends the game is blamed.
   - `>> owner|job @<s>` / `<< owner|job`: a per-frame job starting and ending.
   - `#### clean shutdown`: written when the game reaches `shutdown()`.
 - **Next launch (rule 3):**
@@ -254,7 +258,7 @@ All in `%APPDATA%\Arrowhead\Helldivers2\`.
 | `chef_loader_trace.txt` | This launch's breadcrumbs (written again with only what's open whenever it passes 200 KB). |
 | `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. |
 | `chef_loader_dev.txt` | Made by hand: dev mode's file list (`reload = <key>` optional; test builds only). |
-| `chef_data_<author>_<mod>_<name>.lua` | A mod's saved table. It is text only and is loaded with an empty environment. |
+| `chef_data_<author>_<mod>__<name>.lua` | A mod's saved table (characters other than `a-z 0-9 -` are written as `_` and two hex digits). It is text only and is loaded with an empty environment. |
 | `<name>.log` | A mod's own log (`chef.own_log`). |
 
 **Moving from `%LOCALAPPDATA%`** (where older builds kept these files): on the first launch, the state, settings,
@@ -270,11 +274,11 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.0.0 starting`
+- `==== Chef Shared Loader 1.0.1 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
-- `mods run locked down: ... (sandbox 1.0.0)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.0.1)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`.
 
 **Per mod:**
@@ -313,7 +317,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.0.0 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.0.1 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
