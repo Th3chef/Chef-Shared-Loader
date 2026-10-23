@@ -1,11 +1,11 @@
 -- Chef Shared Loader - the game's `boot` script, replaced
--- Loads my Lua addons on the Lua 5.1 game build (7.2.0 and later), where the older loaders and LuaJIT's ffi are gone.
+-- Runs Lua mods on the game's plain Lua 5.1 (no LuaJIT, no ffi).
 -- What it's built on:
 --   * the game runs `boot` at start-up and calls its init/update/render/shutdown; its own boot does nothing
 --   * Lua can read the deployed patch files (io), so I find addons myself: Lua resources whose text starts with
 --     "-- HD2-Addon: mods/<author>/<name>", option resources starting with "-- HD2-Options: mods/<author>/<name>",
 --     and boot-style scripts starting with "-- HD2-Boot: mods/<author>/<name>" (open to every mod author; see
---     docs/MODDING.md in the source kit)
+--     docs/MODDING.md)
 --   * loadstring runs them; every addon gets its own environment and a `chef` table of helpers
 --   * some engine calls crash the whole game (a null read, not a Lua error) when given the wrong kind of unit or
 --     a stale handle; a Lua pcall can't catch that. So every engine call the helpers make is guarded: the first
@@ -15,12 +15,12 @@
 --     made in one world is used in the next.
 --   * on a menu quit the game calls shutdown() and then often crashes by itself (a known game bug), so a run that
 --     reached shutdown() is never blamed.
---   * the game's Lua may be plain 5.1 now rather than LuaJIT: I put back the pure-Lua parts addons lean on (bit,
+--   * the game's Lua is plain 5.1, not LuaJIT: I put back the pure-Lua parts addons lean on (bit,
 --     table.new/clear, xpcall passing arguments, load taking a string; only what's missing) and log once a launch
 --     what the game's Lua really has. ffi, the JIT and LuaJIT bytecode can't come back from a script.
 -- Idle: nothing runs outside what an addon asked for. The unit scan only runs while an addon watches unit kinds, in a
 -- settled world, spread over frames (1,500 units a frame). Drawing objects are made only when something draws.
--- Files (in %LOCALAPPDATA%), named after FILES below (chef_loader for Chef Shared Loader): .log (what happened),
+-- Files (in %APPDATA%\Arrowhead\Helldivers2), named after FILES below (chef_loader): .log (what happened),
 -- _state.txt (calls that crashed the game, addons turned off), _trace.txt (this launch's breadcrumbs).
 
 function init() end
@@ -67,7 +67,7 @@ local frame_no = 0
 -- @@BEGIN compat.lua@@ (copied from src/chef_loader/compat.lua by tools/splice.py; edit that file, not this)
 local compat = (function()
 -- Chef Shared Loader: compat layer
--- I add back the pure-Lua parts of LuaJIT that mods lean on, for a game that now runs plain Lua 5.1.
+-- I add back the pure-Lua parts of LuaJIT that mods lean on, for the game's plain Lua 5.1.
 -- I only fill in what's missing: if the game still has LuaJIT's own bit library, I leave it alone.
 -- What a script can't bring back: ffi, the JIT compiler and LuaJIT bytecode. Those need native code.
 -- This file sticks to Lua 5.1 syntax on purpose (no goto, no \x escapes, no LL literals, no bit ops).
@@ -272,7 +272,7 @@ local function xpcall_args(f, handler, ...)
 end
 
 -- LuaJIT's load takes a string or a reader function (plus a mode and an environment, 5.2 style).
--- The game has no load at all (7.2.0 probe: has.load=no), so I build it on loadstring alone: a reader's
+-- The game has no load at all, so I build it on loadstring alone: a reader's
 -- pieces get joined first, then it's the same as a string.
 local loadstring, setfenv = loadstring, setfenv
 local function load_compat(chunk, name, mode, env)
@@ -497,8 +497,8 @@ end)()
 -- @@BEGIN services.lua@@ (copied from src/chef_loader/services.lua by tools/splice.py; edit that file, not this)
 local services = (function()
 -- Chef Shared Loader: shared services
--- What every mod gets on top of the basic helpers, so mods can lean on the loader the way they leaned on Bingus Shared
--- Loader and its menus before the game went to plain Lua 5.1:
+-- What every mod gets on top of the basic helpers, so a mod doesn't have to build these
+-- itself:
 --   * after_startup(fn), a read-only capabilities table, has(name)
 --   * a log file of its own per mod (own_log), saved settings per mod (one file next to the log), shared values and
 --     events between mods, require() of another mod's exports with version requirements ("-- HD2-Requires:" lines)
@@ -530,7 +530,7 @@ function M.version_at_least(have, want)
   return true
 end
 
--- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 0.2"; "chef-loader" works too), any number of lines near the top
+-- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 1.0", also "chef-loader"), lines near the top
 function M.requirements(src)
   local out = {}
   for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)%s*>?=?%s*([%d%.]*)') do
@@ -815,7 +815,7 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
-    -- a log of the same name in the old folder (%LOCALAPPDATA%, in older builds) gets one last line saying
+    -- a log of the same name in the old folder (%LOCALAPPDATA%) gets one last line saying
     -- where the log went, once
     if ctx.OLD_DIR then
       local old = ctx.OLD_DIR .. name .. '.log'
@@ -918,7 +918,7 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
-    -- where the loader's folder was in older builds (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- the loader's old folder (%LOCALAPPDATA%), so a mod can pick up its own old files
     -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
@@ -1089,7 +1089,7 @@ function M.install(ctx)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and pressed('enter') then menu.capture = r end
   end
-  -- The look (the same as the loader's release art): a dark panel in a yellow frame, the title on a yellow bar, the
+  -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
   -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
   local function menu_draw(ls)
     local w, h = ctx.screen()
@@ -1190,9 +1190,9 @@ function M.install(ctx)
     menu_draw(ls)
   end
 
-  -- ---------------------------------------------------------------- the Bingus Shared Loader / Mod Options Menu look-alikes
-  -- Only when nothing of that name exists. Lua-only mods written for them (the parts that need ffi can't come back) see
-  -- what they used: CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
+  -- ---------------------------------------------- the CowboyBingusModLoader / ModOptionsMenu look-alikes
+  -- Only when nothing of that name exists. A Lua-only mod that calls these globals gets:
+  -- CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
   -- register_option(id, spec) / get / set / on_change / ready, with its rows in this menu under spec.mod.
   function svc.install_shims(G)
     if rawget(G, 'CowboyBingusModLoader') == nil then
@@ -1506,7 +1506,7 @@ function M.install(ctx, L)
   local log, guarded, fn_of, api, xyz = ctx.log, ctx.guarded, ctx.fn_of, L.api, L.xyz
   local world = ctx.world
 
-  -- the calls known to end the game (Boot Probe 2, Oct 21 2026): refused before they reach the engine
+  -- the calls known to end the game, refused before they reach the engine:
   -- runtime-built units (not a unit file; e.g. #ID[46cab355bd8d4d37], about 1,400 a mission): asking their position,
   -- rotation or meshes, or setting them, ends the game. The set is the loader's, so its unit scan skips them too.
   local BAD_KINDS = L.bad_kinds
@@ -1516,8 +1516,8 @@ function M.install(ctx, L)
                       ['Unit.set_local_rotation'] = true, ['Unit.set_local_scale'] = true,
                       ['Unit.set_local_pose'] = true, ['Unit.set_mesh_visibility'] = true }
   -- (and every Unit.teleport_..., below)
-  -- whole engine tables that aren't for mods: the Localizer (Localizer.lookup ended the game in my tests; the game
-  -- doesn't use the engine's Localizer, so there's nothing to look up), native code and the network
+  -- whole engine tables that aren't for mods: the Localizer (Localizer.lookup ends the game, and the game doesn't use
+  -- the engine's Localizer, so there's nothing to look up), native code and the network
   local NEVER_TABLES = { Localizer = 'it ends the game', PluginManager = 'native code', Http = 'the network',
                          WebSocket = 'the network' }
   -- and single calls: writing other players' game
@@ -2229,7 +2229,7 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
-      -- the saved tables of older builds were in %LOCALAPPDATA%: read from there until the mod saves again
+      -- a table saved in the old folder (%LOCALAPPDATA%) is read from there until the mod saves again
       if not f and ctx.OLD_DIR then
         local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
         f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
@@ -2290,7 +2290,7 @@ function M.install(ctx, L)
     for _, b in ipairs(L.boots()) do b.pm_base, b.pm_max = b.pm_ms or 0, 0 end
   end
   local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
-  -- a boot script's name: its first comment line up to a bracket ("HD2 file-mod installer 1"), else its patch file
+  -- a boot script's name: its first comment line up to a bracket, else its patch file
   local function boot_name(b)
     local t = b.title and b.title:match('^([^%(%[]+)')
     t = t and t:gsub('%s+$', '') or ''
@@ -2308,8 +2308,8 @@ function M.install(ctx, L)
     for _, b in ipairs(L.boots()) do
       local avg = ((b.pm_ms or 0) - (b.pm_base or 0)) / n
       total = total + avg
-      -- the HD2 file-mod installer (a helper boot the settings-file mods share, not a mod a player picks) gets no row
-      -- of its own; its time still counts in All Mods
+      -- a file-mod installer boot (a helper several mods ship, not a mod a player picks) gets no row of its own; its
+      -- time still counts in All Mods
       local name = boot_name(b)
       if not name:lower():find('file%-mod installer') then
         rows[#rows + 1] = { name = name, avg = avg, worst = b.pm_max or 0, on = b.on ~= false }
@@ -2403,7 +2403,7 @@ services.sandbox = (function()
 --   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
 --     and writes only .log .txt .json .csv .dat files in the loader's folder, never the loader's own files or another
 --     mod's saved tables
--- It still can, as before: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
+-- It still can use: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
 -- os.clock/time/date/getenv, reading and writing its own files.
 -- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, so one mod changing a library
 -- function changes it only for itself. The checks below use functions taken before any mod runs, so no mod can bend
@@ -2457,7 +2457,7 @@ local function names_of(rest)
 end
 
 -- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
--- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where older builds kept my files, or nil),
+-- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, my files' old folder, or nil),
 -- FILES ('chef_loader'), overrides (compat's xpcall and load)
 function M.install(ctx)
   local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
@@ -2586,8 +2586,8 @@ function M.install(ctx)
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
         -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
-        -- (%LOCALAPPDATA%, in older builds) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
-        -- its next write lands in the new place
+        -- (%LOCALAPPDATA%) if it's there: a mod's saved settings carry over,
+        -- and its next write lands in the new place
         if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
           and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then
           local g = real_open(ctx.OLD_DIR .. names[1], mode or 'r')
@@ -2704,9 +2704,9 @@ local overrides = {}                     -- what each addon's environment gets o
 
 -- ------------------------------------------------------------------ files
 -- In the game's own folder, %APPDATA%\Arrowhead\Helldivers2: every player has it (the game keeps its settings there),
--- the game's Lua can't make a folder of its own (only a command window could, and I won't start one under Easy
--- Anti-Cheat), and Mod Lag Watchdog logs there too. Older builds kept everything at the root of %LOCALAPPDATA%; the
--- move below brings the files over once. If the game's folder can't be written, %LOCALAPPDATA% it stays.
+-- and the game's Lua can't make a folder of its own (only a command window could, and I won't start one under Easy
+-- Anti-Cheat). Any of my files still at the root of %LOCALAPPDATA% (their old place) are brought over once, below.
+-- If the game's folder can't be written, they stay in %LOCALAPPDATA%.
 -- (services.OLD_DIR / GAME_DIR: fields, not locals, to spare the loader's main function locals.)
 local DIR = ''
 if type(os_) == 'table' and type(os_.getenv) == 'function' then
@@ -3064,7 +3064,7 @@ end
 -- the ship into the world the mission ran in). world.instance: a new one only for a new engine world; handles made in
 -- one instance (GUIs) can be kept across an id change, never across an instance change.
 -- Is it a mission? A world over MISSION_UNITS always is. A smaller one is a mission when the loot probe finds mission
--- loot in it (kinds my addons named with chef.mission_kinds: samples, medals and the like, which the ship never has);
+-- loot in it (kinds addons name with chef.mission_kinds: samples, medals and the like, which the ship never has);
 -- small missions exist (one came in at 4,896 units with the ship at 3,558). Leaving: when a mission's unit count drops
 -- PROBE_DROP below its peak I stop calling it a mission at once (no drawing on what may be the ship) and probe: loot
 -- still there means it was only the mission thinning out, and it carries on as the same mission.
@@ -3285,10 +3285,10 @@ local function pos_keys_of(k)
   return pk
 end
 
--- The lookup by resource: World.units_by_resource asked for each kind, with the kind's id as an IdString64 (a
--- player's tip; the id as text, '#ID[hash]', finds nothing), instead of walking every unit in the world and asking its
--- name. I only trust it once it has matched a full scan in a mission: the first scans of a launch do both and compare
--- what each found of every kind. Until then, and if it ever fails, the full scan goes on as before. Its first call is
+-- The lookup by resource: World.units_by_resource asked for each kind, with the kind's id as an IdString64 (the id
+-- as text, '#ID[hash]', finds nothing), instead of walking every unit in the world and asking its name. I only
+-- trust it once it has matched a full scan in a mission: the first scans of a launch do both and compare what each
+-- found of every kind. Until then, and if it ever fails, the full scan runs instead. Its first call is
 -- breadcrumbed like any other, so a game that dies in it skips it from the next launch on.
 -- res.bad: kinds no watch ever gets (runtime-built units: asking where one is ends the game; the utilities refuse the
 -- same set)
@@ -3560,14 +3560,14 @@ local function color(r, g, b, a)
   return c or nil
 end
 -- Below native the colors go to the UI world, which shows them differently from the game's world (native): measured
--- (in my Treasure Radar tests: swatches of 16 steps per channel drawn both ways, 3440x1440 with HDR on), the game's
+-- on my screen (swatches of 16 steps per channel drawn both ways, 3440x1440 with HDR on), the game's
 -- world puts them through its tone mapping (N: a steep curve, 136 already comes out 204-255) and the UI world through
 -- a near-straight one (U: 17 -> 35, 255 -> 255); both blend before their curve. So a color I'm handed (as it should
 -- look, the native look) is stored below native as U^-1(N(c)) per channel, and a see-through one gets the alpha and
 -- color that fit best over three backgrounds (a dark panel, dark ground, mid ground). A tint on a texture that has a UI
--- copy (the copy already carries the conversion) is only scaled so white stays white. The same tables and rule are in
--- Treasure Radar's ui_calib.py, which makes the textures' UI copies. These are one screen's curves: another screen or
--- HDR setting may differ a little.
+-- copy (the copy already carries the conversion) is only scaled so white stays white. A mod's build can make UI
+-- copies of its textures with the same tables and rule. These are one screen's curves: another screen or HDR setting
+-- may differ a little.
 local ui_conv = {}                -- color key (negated for a tint) -> { a, r, g, b } below native, kept
 local ui_convert
 do
@@ -3650,12 +3650,12 @@ end
 
 -- Render Scale. Below native (Ultra Quality and lower) the game renders its world at a smaller size and upscales it.
 -- A screen GUI in the game's world is still placed in screen pixels, but only the render size's worth of the screen
--- (its top-left part) reaches the picture: at Ultra Quality the radar at the bottom right was cut in half, at Quality
--- and below it was gone. A screen GUI in the UI world (the top world: Treasure Map 1.x's markers, the spore cloud) is
--- placed in screen pixels too and covers the whole screen at any Render Scale. So below native I draw the screen
--- there instead; at native I keep the game's world, as before. The UI world is drawn after the game's own HUD and
--- map (their own UI system, not GUI layers), so below native the open map can't cover the radar: no layer and no
--- other world put it under (I tried them). A GUI placed in the game's world in front of the camera
+-- (its top-left part) reaches the picture: at Ultra Quality a panel at the bottom right is cut in half, at Quality
+-- and below it's gone. A screen GUI in the UI world (the top world, where the game draws effects like the spore
+-- cloud) is placed in screen pixels too and covers the whole screen at any Render Scale. So below native I draw the
+-- screen there instead; at native I keep the game's world. The UI world is drawn after the game's own HUD and map
+-- (their own UI system, not GUI layers), so below native the open map can't cover what I draw: no layer and no
+-- other world puts it under. A GUI placed in the game's world in front of the camera
 -- (World.create_world_gui) is clipped to the same render-size rectangle as a screen GUI there (and lags the camera when it turns),
 -- so the UI world is the only way to the bottom right below native. The render scale comes from the game's settings file.
 -- The settings file (about 8 KB): one cache for the Render Scale here and chef.setting, read again on a world change
@@ -3688,7 +3688,7 @@ local function file_scale()
   cfg.scale = (s > 0.2 and s < 0.98 and math.abs(rw / rh - sw / sh) < 0.03 * (sw / sh)) and s or nil
   return cfg.scale
 end
--- In the UI world my layer L is drawn at UI_BASE + L - 900 (the radar's 880-960 at -120 to -40: under whatever the
+-- In the UI world my layer L is drawn at UI_BASE + L - 900 (880-960 at -120 to -40: under whatever the
 -- game itself draws there with GUI layers)
 local UI_BASE = -100
 draw.ui, draw.ui_base = false, UI_BASE
@@ -3737,7 +3737,7 @@ local function gui()
   return draw.gui or nil
 end
 
--- The top: the first world that isn't the main one. Treasure Map 1.x drew its map markers there, on top
+-- The top: the first world that isn't the main one, drawn on top
 -- of the game's map. Anything drawn at layer 2000 or up goes there (at its layer - 1000). I check every frame that
 -- something is drawn there that it's still the same world (and the world count hasn't changed); if not, I drop my
 -- GUIs without touching them, because a GUI used after its world went away crashes the game.
@@ -3799,7 +3799,7 @@ local function rect(x, y, w, h, c, layer)
 end
 
 -- A filled triangle through the engine (Gui.triangle, the same GUI and layers as rect): points given as Vector3(x, 0, y)
--- plus the layer, the way HD2 HUD+ drew them on the September build. If the engine refuses it, draw.tri_ok goes false
+-- plus the layer. If the engine refuses it, draw.tri_ok goes false
 -- and the shapes (utilities.lua) use rects. A field of draw, not a local: the loader is near Lua 5.1's 200 locals.
 draw.tri_ok = nil
 function draw.tri(x1, y1, x2, y2, x3, y3, c, layer)
@@ -3981,15 +3981,15 @@ local function line(x1, y1, z1, x2, y2, z2, c)
   if a and b then api('LineObject.add_line', draw.lines, c, a, b) end
 end
 
--- Bitmaps (icons): Treasure Map 1.x's recipe, all engine functions. The game's UI material
--- content/ui/shared/misc/yellow_logo (still in 7.2.0) has one texture slot; every texture gets its own screen GUI whose
+-- Bitmaps (icons), all engine functions. The game's UI material
+-- content/ui/shared/misc/yellow_logo has one texture slot; every texture gets its own screen GUI whose
 -- copy of that material has the texture bound (Gui.material + Material.set_texture), and Gui.bitmap draws it.
--- Textures shipped in a mod's patch are loaded with the game's boot archive (1.x's icons were). If the material or a
+-- Textures shipped in a mod's patch are loaded with the game's boot archive. If the material or a
 -- texture isn't loaded, or a call is refused, bitmap() returns false and the caller draws something else.
 local UI_MATERIAL, UI_SLOT = 'e2d6ed90906c1e8b', '3aa8b87e00000000'
 local ui_textures = {}            -- texture -> its copy for the UI world (an addon's chef.ui_textures)
 -- The UI material has no mipmaps, so a texture drawn at half its size or less skips texels and its edges come out as
--- stair steps (my Treasure Radar icons looked "kinda pixely": 48 px icons drawn at 25 px). An addon can ship each
+-- stair steps (48 px icons drawn at 25 px look pixely). An addon can ship each
 -- texture pre-shrunk to a ladder of sizes (chef.texture_sizes): texture -> { width, id, width, id, ... } from the
 -- smallest up, and bitmap() draws the smallest one at least as wide as it's drawn (only ever shrunk a little, never
 -- stretched), else the biggest.
@@ -4044,7 +4044,7 @@ local function bitmap(tex, x, y, w, h, c, layer, u0, v0, u1, v1)
   end
   if not e then return false end
   if e.frame ~= frame_no then
-    -- the texture is bound once a frame, like 1.x did before every redraw
+    -- the texture is bound once a frame
     e.frame = frame_no
     local mh = api('Gui.material', e.gui, id64(UI_MATERIAL))
     local _, err = nil, 'no material'
@@ -4108,7 +4108,7 @@ end
 -- ------------------------------------------------------------------ addons
 local addons, notices = {}, {}
 -- the shared services every mod gets (src/chef_loader/services.lua): after_startup, capabilities, saved settings, shared
--- values and events, require, key bindings, the options menu, the Bingus look-alikes, dev mode (test builds)
+-- values and events, require, key bindings, the options menu, the look-alikes, dev mode (test builds)
 local svc = services.install({ log = log, guarded = guarded, fn_of = fn_of, open = open, DIR = DIR, FILES = FILES, LOADER = LOADER,
   OLD_DIR = services.OLD_DIR ~= DIR and services.OLD_DIR or nil,
   VERSION = VERSION, ALLOW = ALLOW, TOP = TOP_FROM, world = world, color = color, rect = rect, text = text, text_width = text_width,
@@ -4157,7 +4157,7 @@ local function options_for(name)
 end
 
 local function make_api(a)
-  local owner = a.name                   -- crash keys carry the full addon name, e.g. mods/chef/treasure_radar|Unit.alive
+  local owner = a.name                   -- crash keys carry the full addon name, e.g. mods/me/my_mod|Unit.alive
   -- api: the documented helper set's level (docs/MODDING.md); it only goes up when something is added
   local chef = { loader = LOADER, loader_version = VERSION, api = 1, name = a.name }
   chef.options = a.options
@@ -4348,7 +4348,7 @@ function starter.addon(r)
               on = true, errors = 0, ms = 0, max_ms = 0, dev = r.dev }
   addons[#addons + 1] = a
   local was = off[a.name]
-  -- A Tester probe can ask to stay on after a crash ("-- HD2-Keep-On-Crash: yes" in its first lines): then only
+  -- A mod can ask to stay on after a crash ("-- HD2-Keep-On-Crash: yes" in its first lines): then only
   -- the call that crashed is skipped.
   local keep = r.src:sub(1, 400):match('\n%-%- HD2%-Keep%-On%-Crash: yes') ~= nil
   if was and keep then
@@ -4394,8 +4394,8 @@ function starter.addon(r)
         a.module = m
         log(fmt('started %s %s (%s)', a.name, tostring(m.version or ''), a.file))
       elseif ok and m == nil then
-        -- a file that does its work when it runs and returns nothing (the Bingus Shared Loader style) ran
-        -- fine: it simply has no update or shutdown of mine to call
+        -- a file that does its work when it runs and returns nothing ran fine: it simply has no update or
+        -- shutdown of mine to call
         a.module = {}
         log(fmt('started %s (%s; it returned nothing, so it has no update or shutdown)', a.name, a.file))
       else
@@ -4507,11 +4507,11 @@ end
 
 -- ------------------------------------------------------------------ other mods' boot scripts
 -- The game runs only one `boot`: whichever deployed patch has it last. Mods that need boot for something of their own
--- (the HD2 file-mod installer in Stratagem Balls Stay Put and Consistent Vaulting swaps game files when the game
--- exits) would stop working next to me, and I next to them. So each other boot found in the patches runs too, in its
--- own environment (its init/update/render/shutdown and anything else it defines stay in there; _G is that environment
--- too, so it can't replace mine), with each of its callbacks called after mine. Identical copies (every mod using the
--- installer ships the same one) run once. Each callback's first call is breadcrumbed like an engine call, so one that
+-- (a file-mod installer boot, say, that swaps game files when the game exits) would stop working next to me, and I
+-- next to them. So each other boot found in the patches runs too, in its own environment (its init/update/render/
+-- shutdown and anything else it defines stay in there; _G is that environment too, so it can't replace mine), with
+-- each of its callbacks called after mine. Identical copies (several mods can ship the same one) run
+-- once. Each callback's first call is breadcrumbed like an engine call, so one that
 -- ends the game is skipped from the next launch on; one that keeps raising Lua errors is turned off for the session.
 local boots = {}
 svc.ctx.boots = boots
@@ -4521,8 +4521,8 @@ svc.ctx.boots = boots
 -- lines under its name, and if it ends the game it stays off (named on screen) until the mod is updated, as an addon.
 -- An environment alone doesn't hold a boot script in: on Lua 5.1 a function made by loadstring (or load, or
 -- dofile) gets the game's globals, not the environment of the script that made it. A boot script that loads code
--- (Boot Mod Loader runs the game's own boot that way) wrote init/update/render/shutdown straight into the game's
--- globals and replaced mine, and from then on I never ran again. So every other mod's boot script gets its own
+-- would write init/update/render/shutdown straight into the game's globals and replace mine, and I'd never run
+-- again. So every other mod's boot script gets its own
 -- loadstring, load and dofile, and whatever they load lands in that script's environment too (unless it hands load an
 -- environment). (HD2-Boot scripts get the same from the locked-down space in sandbox.lua instead.)
 function starter.seal(env)
@@ -4551,8 +4551,8 @@ function starter.seal(env)
     end
   end
 end
--- Another mod loader's boot script (it reads the deployed patches for "-- HD2-Addon:" mods itself, like
--- Boot Mod Loader) isn't run: its init would start every addon a second time, outside my crash guard and without the
+-- Another mod loader's boot script (one that reads the deployed patches for "-- HD2-Addon:" mods itself)
+-- isn't run: its init would start every addon a second time, outside my crash guard and without the
 -- `chef` helpers my mods need. Copies of this loader are already left out when the patches are read.
 function starter.other_loader(src)
   if src:find('__boot_mod_loader', 1, true) then return true end
