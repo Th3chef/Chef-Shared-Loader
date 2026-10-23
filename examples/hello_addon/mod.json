@@ -1,0 +1,9 @@
+{
+  "name": "Hello Addon",
+  "version": "1.0.0",
+  "guid": "6f1d2c3a-7b4e-4c55-9a1e-2d8b6c0f4a11",
+  "description": "A Chef Shared Loader example: a label at the top of the screen in missions. Needs Chef Shared Loader 0.2.0 or newer.",
+  "lua": [ { "resource": "mods/example/hello_addon", "file": "hello_addon.lua" } ],
+  "options": [ { "folder": "shout", "name": "Shout", "description": "A louder label.", "addon": "mods/example/hello_addon",
+                 "table": "{ label = 'hello, helldivers!' }" } ]
+}
