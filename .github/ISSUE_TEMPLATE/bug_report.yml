@@ -1,0 +1,38 @@
+name: Bug report
+description: Chef Shared Loader, its options menu or a mod running on it doesn't work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report! Please attach chef_loader.log from %LOCALAPPDATA% (type %LOCALAPPDATA% into the File Explorer address bar and press Enter). It shows that the loader started, which mods it found, any Lua errors and its timings.
+  - type: input
+    id: version
+    attributes:
+      label: Loader version
+      description: The first line of chef_loader.log says it (or the mod it's built into, e.g. Treasure Radar 0.6.0).
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version / date of the last game update
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected and what happened instead (a screenshot helps).
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: Mods
+      description: The mods running on Chef Shared Loader, and anything else that replaces the game's boot script; your mod manager.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag chef_loader.log here (and the mod's own log, if it has one).
