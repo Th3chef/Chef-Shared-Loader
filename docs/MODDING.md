@@ -1,7 +1,7 @@
 # Making mods for Chef Shared Loader
 
 Chef Shared Loader replaces the game's empty `boot` script and runs Lua mods on the current game build (Lua 5.1, with Easy
-Anti-Cheat). Since 0.2.0 any mod author can use it. Your mod ships a Lua file with a one-line header, and Chef Shared Loader:
+Anti-Cheat), for any mod author. Your mod ships a Lua file with a one-line header, and Chef Shared Loader:
 
 - finds it in the installed mods and runs it;
 - keeps it apart from every other mod;
@@ -71,14 +71,14 @@ python3 tools/pack_addon.py examples/hello_addon/mod.json out
   script for the format.
 - **The patch header:** pass `--header-from <a Lua patch that works on the current game>` if a game update changes
   the patch format.
-- **Your mod page:** say "Needs Chef Shared Loader 0.2.0 or newer" in the mod's description and on its page.
+- **Your mod page:** say "Needs Chef Shared Loader 1.0.0 or newer" in the mod's description and on its page.
 
 **Examples:** `examples/hello_addon` (an addon with an option), `examples/hello_boot` (a boot-style script) and
 `examples/utilities_test` (every api 3 utility, each result in its own log, util_test.log).
 
 ## The `chef` helpers (api 1)
 
-`chef.api` is 3 in 0.2.0 (api 2 and 3 are the next two sections); everything in this one is api 1. It goes up only
+`chef.api` is 3 in 1.0.0 (api 2 and 3 are the next two sections); everything in this one is api 1. It goes up only
 when something is added, never for a change that breaks a mod. `chef.loader_version` is the loader's
 version, `chef.name` your mod's name.
 
@@ -179,7 +179,7 @@ The loader's own events:
 
 ```lua
 -- HD2-Addon: mods/you/my_mod
--- HD2-Requires: chef-shared-loader >= 0.2.0
+-- HD2-Requires: chef-shared-loader >= 1.0.0
 -- HD2-Requires: mods/you/my_lib >= 1.2
 ```
 
@@ -190,11 +190,14 @@ why (for example `not started: mods/you/my_mod needs mods/you/my_lib 1.2 or newe
 ### The options menu and key bindings
 
 The loader draws one menu for every mod's options, over everything, anywhere in the game. **F9** opens and
-closes it (players can change that key in the menu itself). **Up/Down** (Page Up/Down) picks a row, **Left/Right**
-changes it, **Enter** toggles or starts a key capture, **Backspace** puts the default back, **Escape** closes. In a key
-capture, any key binds it, **Delete** sets none and **Escape** cancels. **/** starts a search: type part of a
-mod's or a row's name, **Backspace** takes a letter off, **Enter** keeps the search, **Escape** clears it. Values are
-saved between launches.
+closes it (players can change that key in the menu itself). It opens on the list of mods, always in alphabetical
+order by title (your `chef.title`); **Up/Down** picks a mod and **Enter** (or **Right**) opens its options, in the
+order your mod registered them. Every screen under the list starts with a **< Back** row (Enter on it returns to the
+list, where the cursor was; **Backspace** does the same from anywhere). In a mod's options, **Up/Down** (Page Up/Down)
+picks a row, **Left/Right** changes it, **Enter** toggles or starts a key capture, and **Delete** puts the default
+back. **Escape** closes the whole menu. In a key capture, any key binds it, **Delete** sets none and **Escape**
+cancels. **/** starts a search across every mod: type part of a mod's or a row's name, **Backspace** takes a letter
+off, **Enter** keeps the search, **Escape** clears it. Values are saved between launches. A mod with no options isn't listed.
 
 | Helper | What it does |
 |---|---|
@@ -356,6 +359,7 @@ jobs made inside a timer or job start on the next frame.
 |---|---|
 | Open this menu | The menu key (F9). |
 | Budget warning (ms) | The default frame budget behind `chef.budget`. |
+| Performance monitor | Off by default. On, a panel in the top right shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
 
 ## Rules that keep the game alive
 
