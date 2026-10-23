@@ -15,9 +15,24 @@
 local M = { version = '0.1.0' }
 
 local pairs, ipairs, pcall, type, tostring, tonumber = pairs, ipairs, pcall, type, tostring, tonumber
-local loadstring, setfenv, setmetatable = loadstring, setfenv, setmetatable
+local loadstring, setfenv, setmetatable, rawget = loadstring, setfenv, setmetatable, rawget
 local floor, ceil, max, min, sqrt, sin, cos, pi = math.floor, math.ceil, math.max, math.min, math.sqrt, math.sin, math.cos, math.pi
 local fmt, concat, sort = string.format, table.concat, table.sort
+local huge = math.huge
+
+-- A mod's error as text for the log (tostring alone can raise: an error object whose __tostring errors)
+local function err_text(e)
+  if type(e) == 'string' then return e end
+  local ok, s = pcall(tostring, e)
+  if ok and type(s) == 'string' then return s end
+  return '(an error that can not be shown as text)'
+end
+local function finite(n) return type(n) == 'number' and n == n and n > -huge and n < huge end
+-- a file write or close went through: pcall's ok, then what the call answered (nil and why when it failed)
+local function io_ok(ok, r, e)
+  if not ok or r == false then return false end
+  return not (r == nil and e ~= nil)
+end
 
 -- ------------------------------------------------------------------ the game's settings file (SJSON)
 -- Stingray's simplified JSON: key = value lines, bare keys, { } objects, [ ] arrays without commas, // and /* */
@@ -112,14 +127,21 @@ end
 -- ------------------------------------------------------------------ saving tables
 -- Plain data only: booleans, numbers (no NaN or infinity), strings, and tables of them with string or number keys; no
 -- functions, no cycles, at most 16 deep. Written as a Lua table, keys sorted, so the file reads well and diffs well.
+-- Whole numbers are written with %.0f up to 2^53 (%d is 32 bits in the game's Lua on Windows: 3e9 would come back
+-- as -2147483648), anything else with 17 digits so it reads back exactly. A key that is a Lua word (end, nil, ...) or
+-- not a name is written as ["..."].
+local RESERVED = {}
+for w in ('and break do else elseif end false for function if in local nil not or repeat return then true until while'):gmatch('%a+') do
+  RESERVED[w] = true
+end
 function M.serialize(v)
   local out, seen = {}, {}
   local function put(x, depth, indent)
     local t = type(x)
     if t == 'boolean' then out[#out + 1] = tostring(x)
     elseif t == 'number' then
-      if x ~= x or x == math.huge or x == -math.huge then error('a number that can not be saved', 0) end
-      out[#out + 1] = (x == floor(x) and x > -1e15 and x < 1e15) and fmt('%d', x) or fmt('%.17g', x)
+      if not finite(x) then error('a number that can not be saved', 0) end
+      out[#out + 1] = (x == floor(x) and x >= -9007199254740992 and x <= 9007199254740992) and fmt('%.0f', x) or fmt('%.17g', x)
     elseif t == 'string' then out[#out + 1] = fmt('%q', x)
     elseif t == 'table' then
       if seen[x] then error('a table inside itself', 0) end
@@ -139,7 +161,7 @@ function M.serialize(v)
       out[#out + 1] = '{\n'
       for _, k in ipairs(keys) do
         out[#out + 1] = indent .. '  '
-        if type(k) == 'string' and k:match('^[%a_][%w_]*$') then out[#out + 1] = k
+        if type(k) == 'string' and not RESERVED[k] and k:match('^[%a_][%w_]*$') then out[#out + 1] = k
         else out[#out + 1] = '['; put(k, depth + 1, indent); out[#out + 1] = ']' end
         out[#out + 1] = ' = '
         put(x[k], depth + 1, indent .. '  ')
@@ -153,6 +175,20 @@ function M.serialize(v)
   end
   put(v, 0, '')
   return concat(out)
+end
+
+-- A mod's saved-table file: chef_data_<owner without mods/>__<name>.lua, where every character that isn't a lower-case
+-- letter, a digit or - is written as _ and its two hex digits (_ is _5f, / is _2f, A is _41). So each owner and name
+-- pair has its own file, on Windows too (where file names ignore case), and no pair can make another's: "__" only
+-- ever stands between the two. Owners are always mods/<author>/<name>; anything else gets no file.
+local function data_enc(s) return (s:gsub('[^a-z0-9%-]', function(ch) return fmt('_%02x', ch:byte()) end)) end
+function M.data_name(owner, name)
+  if type(owner) ~= 'string' or owner:sub(1, 5) ~= 'mods/' or #owner < 6 then return nil end
+  return 'chef_data_' .. data_enc(owner:sub(6)) .. '__' .. data_enc(name) .. '.lua'
+end
+-- the file name before 1.0.1 (not one to one: two pairs could share one), read once to move a table over
+function M.old_data_name(owner, name)
+  return 'chef_data_' .. owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_' .. name .. '.lua'
 end
 
 -- ------------------------------------------------------------------ install
@@ -206,11 +242,11 @@ function M.install(ctx, L)
   -- unit -> its kind (the resource id in its debug name), or false; forgotten at every world change, so a handle the
   -- engine hands out again can't keep an old kind across worlds
   local kind_of = setmetatable({}, { __mode = 'k' })
-  local function unit_kind(u)
+  local function unit_kind(u, owner)
     if u == nil then return nil end
     local k = kind_of[u]
     if k == nil then
-      local nm = api('Unit.debug_name', u)
+      local nm = guarded(owner or 'loader', 'Unit.debug_name', fn_of('Unit.debug_name'), u)
       k = type(nm) == 'string' and nm:match('#ID%[(%x+)%]') or false
       if k then k = k:lower() end
       kind_of[u] = k
@@ -252,7 +288,7 @@ function M.install(ctx, L)
     if c == 'unit' then
       local u = ...
       if not current(u) then return GONE end
-      local k = unit_kind(u)
+      local k = unit_kind(u, owner)
       if k and BAD_KINDS[k] then
         local why = bad_why[k]
         if not why then why = 'a runtime-built unit (' .. k .. '): asking it that ends the game'; bad_why[k] = why end
@@ -313,20 +349,66 @@ function M.install(ctx, L)
   -- The timers are only walked when one is due (or one was cancelled), each list compacted in place.
   local timers, jobs, incoming, incoming_jobs = {}, {}, {}, {}
   local tsched = { next_at = math.huge, dirty = false }
-  local function run(a, what, fn, ...)
-    local t0 = L.clock()
-    local ok, err = pcall(fn, ...)
-    local ms = (L.clock() - t0) * 1000
+  local function account(a, ms)
     a.ms = (a.ms or 0) + ms
     if ms > (a.max_ms or 0) then a.max_ms = ms end
     a.pm_ms = (a.pm_ms or 0) + ms
     if ms > (a.pm_max or 0) then a.pm_max = ms end
-    if not ok then
-      a.timer_errors = (a.timer_errors or 0) + 1
-      if a.timer_errors <= 3 then log(fmt('[%s] %s error: %s', a.short, what, tostring(err))) end
-    end
+  end
+  local function failed(a, what, err)
+    a.timer_errors = (a.timer_errors or 0) + 1
+    if a.timer_errors <= 3 then log(fmt('[%s] %s error: %s', tostring(a.short or a.name), what, err_text(err))) end
+  end
+  local function run(a, what, fn, ...)
+    local t0 = L.clock()
+    local ok, err = pcall(fn, ...)
+    account(a, (L.clock() - t0) * 1000)
+    if not ok then failed(a, what, err) end
     return ok
   end
+  -- for services: a mod's callback (an event, on_change, after_startup) timed as that mod's own; and a mod's own
+  -- call that ran other mods' callbacks, whose time already went to them
+  function util.timed(a, fn, ...)
+    local t0 = L.clock()
+    local ok, err = pcall(fn, ...)
+    account(a, (L.clock() - t0) * 1000)
+    return ok, err
+  end
+  function util.discount(a, ms)
+    a.ms = (a.ms or 0) - ms
+    a.pm_ms = (a.pm_ms or 0) - ms
+  end
+  util.clock = L.clock
+  -- a file written whole as tmp put in place of path. Windows' rename won't replace a file, so the old one goes first
+  -- (a crash in between leaves the .tmp, which is read when the file isn't there); os.rename answers nil and why
+  -- when it fails, so its answer is checked, not just the pcall.
+  -- Without os.rename, or when it fails, the .tmp's text is written in place instead, so path ends up whole (and the
+  -- .tmp stays as a second copy until the next save).
+  function util.replace(tmp, path)
+    local o = L.os
+    local why = 'no os.rename'
+    if o and o.rename then
+      if o.remove then pcall(o.remove, path) end
+      local okr, renamed, rerr = pcall(o.rename, tmp, path)
+      if okr and renamed then return true end
+      why = 'rename failed: ' .. tostring(okr and rerr or renamed)
+    end
+    local f = ctx.open(tmp, 'r')
+    if not f then return false, why end
+    local okr, text = pcall(f.read, f, '*a')
+    pcall(f.close, f)
+    if not (okr and type(text) == 'string') then return false, why end
+    local g = ctx.open(path, 'w')
+    if not g then return false, why end
+    local okw = io_ok(pcall(g.write, g, text))
+    local okc = io_ok(pcall(g.close, g))
+    if okw and okc then return true end
+    -- a cut-off copy would be read before the whole .tmp: it goes
+    if o and o.remove then pcall(o.remove, path) end
+    return false, why
+  end
+  -- is this a key name the keyboard knows
+  function util.known_key(name) return type(name) == 'string' and L.key_index ~= nil and L.key_index(name) ~= nil end
 
   -- ---------------------------------------------------------------- the frame, world changes, mods stopping
   local frame_cache = { n = -1 }
@@ -357,16 +439,22 @@ function M.install(ctx, L)
       tsched.dirty = true
     end
     if #timers == 0 or (now < tsched.next_at and not tsched.dirty) then return end
-    tsched.dirty = false
-    local n, j, nxt = #timers, 0, math.huge
+    -- Compacted in place: a timer kept moves down to j (never past where the walk is), and the tail is cleared after
+    -- the walk, so the list stays whole while timers run. Each runs in its own pcall (run), and its error is logged
+    -- through err_text, so one mod's timer can't stop the others'.
+    tsched.dirty = false                   -- (a mod stopping while they run sets it again)
+    local n, j, nxt = #timers, 0, huge
     for i = 1, n do
       local t = timers[i]
-      timers[i] = nil
       if t.on and t.a.on then
         if now >= t.at then
+          -- (an after timer is done before it runs: a raise can't make it run twice)
+          if not t.every then t.on = false end
           local ok = run(t.a, t.every and 'every' or 'after', t.fn)
           if not ok then t.errors = t.errors + 1 end
-          if t.every and t.errors < 20 then t.at = max(t.at + t.every, now) else t.on = false end
+          if t.every then
+            if t.errors < 20 then t.at = max(t.at + t.every, now) else t.on = false end
+          end
         end
         if t.on then
           j = j + 1; timers[j] = t
@@ -374,6 +462,7 @@ function M.install(ctx, L)
         end
       end
     end
+    for i = n, j + 1, -1 do timers[i] = nil end
     tsched.next_at = nxt
   end
   local function jobs_frame()
@@ -388,10 +477,15 @@ function M.install(ctx, L)
       jobs[i] = nil
       if j.on and j.a.on then
         local last = min(#j.list, j.i + j.per)
+        -- one time stamp pair for the frame's batch, not one per item (two clock calls and the sums per item would be
+        -- most of a cheap item's cost); each item still runs in its own pcall
+        local t0, list, fn = L.clock(), j.list, j.fn
         for x = j.i + 1, last do
-          if not run(j.a, 'spread', j.fn, j.list[x], x) then j.errors = j.errors + 1 end
+          local ok, err = pcall(fn, list[x], x)
+          if not ok then j.errors = j.errors + 1; failed(j.a, 'spread', err) end
           if j.errors >= 20 then j.on = false; break end
         end
+        account(j.a, (L.clock() - t0) * 1000)
         j.i = last
         if j.on and j.i >= #j.list then
           j.on = false
@@ -507,37 +601,53 @@ function M.install(ctx, L)
   end
 
   -- ---------------------------------------------------------------- shapes
-  -- Engine triangles when the game draws them (L.tri: true when one was drawn); else rows of rects.
-  local function tri_spans(rect, x1, y1, x2, y2, x3, y3, c, layer, step)
-    -- sort by y, then fill one row of `step` pixels at a time
+  -- Engine triangles when the game draws them (L.tri: true when one was drawn); else rows of rects. A mod's numbers
+  -- drive these, so anything that isn't a finite number draws nothing, and the rects only cover the screen: a shape
+  -- far bigger than the screen costs what one the size of the screen does, never millions of rects.
+  -- a span x0..x1 of one row, cut to the screen's width
+  local function clip_rect(x0, x1, y, hgt, sw, c, layer)
+    if x0 < 0 then x0 = 0 end
+    if x1 > sw then x1 = sw end
+    local l, r = floor(x0 + 0.5), floor(x1 + 0.5)
+    if r > l then L.rect(l, y, r - l, hgt, c, layer) end
+  end
+  local function tri_spans(x1, y1, x2, y2, x3, y3, c, layer, step)
+    -- sort by y, then fill one row of `step` pixels at a time, only the rows on the screen
     if y1 > y2 then x1, y1, x2, y2 = x2, y2, x1, y1 end
     if y1 > y3 then x1, y1, x3, y3 = x3, y3, x1, y1 end
     if y2 > y3 then x2, y2, x3, y3 = x3, y3, x2, y2 end
     if y3 - y1 < 0.5 then return end
+    local sw, sh = ctx.screen()
+    if not (finite(sw) and finite(sh)) then return end
     local function at(ya, xa, yb, xb, y) if yb == ya then return xa end return xa + (xb - xa) * (y - ya) / (yb - ya) end
-    local y = floor(y1)
-    while y < y3 do
+    local y, top = max(floor(y1), 0), min(y3, sh)
+    step = max(step, ceil((top - y) / 4096))       -- (a screen taller than 4096 px gets thicker rows)
+    while y < top do
       local ym = y + step / 2
       local xa = at(y1, x1, y3, x3, ym)
       local xb = ym < y2 and at(y1, x1, y2, x2, ym) or at(y2, x2, y3, x3, ym)
       if xa > xb then xa, xb = xb, xa end
-      if xb - xa >= 0.5 then rect(floor(xa + 0.5), y, floor(xb + 0.5) - floor(xa + 0.5), step, c, layer) end
+      if xb - xa >= 0.5 then clip_rect(xa, xb, y, step, sw, c, layer) end
       y = y + step
     end
   end
   local function triangle(x1, y1, x2, y2, x3, y3, c, layer)
     if not c then return end
+    if not (finite(x1) and finite(y1) and finite(x2) and finite(y2) and finite(x3) and finite(y3)) then return false end
     if L.tri(x1, y1, x2, y2, x3, y3, c, layer) then return true end
-    tri_spans(L.rect, x1, y1, x2, y2, x3, y3, c, layer, 1)
+    tri_spans(x1, y1, x2, y2, x3, y3, c, layer, 1)
     return false
   end
   util.triangle = triangle
-  -- angles in degrees, 0 = up, clockwise (like a compass and the radar)
+  -- angles in degrees, 0 = up, clockwise (like a compass)
   local function polar(cx, cy, r, deg) local a = deg * pi / 180; return cx + r * sin(a), cy + r * cos(a) end
   local function segments(r, sweep_deg) return max(3, min(96, ceil(max(12, r * 0.6) * sweep_deg / 360))) end
   -- an annulus piece from a0 to a1 (degrees), r_in may be 0
   local function arc(cx, cy, r_in, r_out, a0, a1, c, layer)
-    if not c or r_out <= 0 then return end
+    if not c then return end
+    if not (finite(cx) and finite(cy) and finite(r_in) and finite(r_out) and finite(a0) and finite(a1)) then return end
+    if r_in < 0 then r_in = 0 end
+    if r_out <= 0 or r_in >= r_out then return end
     if a1 < a0 then a0, a1 = a1, a0 end
     local span = min(360, a1 - a0)
     local n = segments(r_out, span)
@@ -562,29 +672,36 @@ function M.install(ctx, L)
       end
       if drew then return end
     end
-    -- rects: a full disc or ring row by row; a part of one as small squares along its middle
+    -- rects: a full disc or ring row by row (about 96 rows, the ones on the screen); a part of one as small squares
+    -- along its middle (720 at most, the ones on the screen)
+    local sw, sh = ctx.screen()
+    if not (finite(sw) and finite(sh)) then return end
     local step = max(1, ceil(r_out / 48))
     if span >= 360 then
-      local y = -r_out
-      while y < r_out do
+      local y, last = -r_out, min(r_out, sh - cy)
+      if y < -cy - step then y = -r_out + floor((r_out - cy - step) / step) * step end
+      while y < last do
         local ym = y + step / 2
         local wo = sqrt(max(0, r_out * r_out - ym * ym))
         if r_in > 0 and math.abs(ym) < r_in then
           local wi = sqrt(max(0, r_in * r_in - ym * ym))
-          L.rect(floor(cx - wo + 0.5), floor(cy + y), floor(wo - wi + 0.5), step, c, layer)
-          L.rect(floor(cx + wi + 0.5), floor(cy + y), floor(wo - wi + 0.5), step, c, layer)
+          clip_rect(cx - wo, cx - wi, floor(cy + y), step, sw, c, layer)
+          clip_rect(cx + wi, cx + wo, floor(cy + y), step, sw, c, layer)
         elseif wo >= 0.5 then
-          L.rect(floor(cx - wo + 0.5), floor(cy + y), floor(2 * wo + 0.5), step, c, layer)
+          clip_rect(cx - wo, cx + wo, floor(cy + y), step, sw, c, layer)
         end
         y = y + step
       end
     else
       local th = max(1, r_out - r_in)
       local rm = (r_out + r_in) / 2
-      local k = max(2, ceil(rm * span * pi / 180 / max(1, th * 0.6)))
+      local k = min(720, max(2, ceil(rm * span * pi / 180 / max(1, th * 0.6))))
+      local half = th / 2
       for i = 0, k do
         local x, y = polar(cx, cy, rm, a0 + span * i / k)
-        L.rect(floor(x - th / 2 + 0.5), floor(y - th / 2 + 0.5), ceil(th), ceil(th), c, layer)
+        if x + half >= 0 and x - half <= sw and y + half >= 0 and y - half <= sh then
+          L.rect(floor(x - half + 0.5), floor(y - half + 0.5), ceil(th), ceil(th), c, layer)
+        end
       end
     end
   end
@@ -615,14 +732,14 @@ function M.install(ctx, L)
     end
 
     -- 1 units
-    function chef.unit_kind(u) if current(u) then return unit_kind(u) end end
+    function chef.unit_kind(u) if current(u) then return unit_kind(u, owner) end end
     function chef.unit_alive(u)
       if not current(u) then return false end
       return base_call('Unit.alive', u) == true
     end
     local function asked(name, u, ...)
       if not current(u) then return nil end
-      local k = unit_kind(u)
+      local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call('Unit.alive', u) ~= true then return nil end
       return base_call_kind(name, k, u, ...)
@@ -638,7 +755,7 @@ function M.install(ctx, L)
     end
     function chef.unit_node(u, name)
       if type(name) ~= 'string' or not current(u) then return nil end
-      local k = unit_kind(u)
+      local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call_kind('Unit.has_node', k, u, name) ~= true then return nil end
       return base_call_kind('Unit.node', k, u, name)
@@ -683,14 +800,16 @@ function M.install(ctx, L)
 
     -- 2 spawning, linking, particles, lights
     local function id_of(res)
-      if type(res) == 'string' and #res == 16 and res:match('^%x+$') then return api('IdString64.from_hex', res:lower()) end
+      if type(res) == 'string' and #res == 16 and res:match('^%x+$') then
+        return guarded(owner, 'IdString64.from_hex', fn_of('IdString64.from_hex'), res:lower())
+      end
       return res
     end
     function chef.spawn(res, x, y, z)
       if not world.stable then return nil, 'no world yet' end
       local id = id_of(res)
       if id == nil then return nil, 'no id' end
-      if api('Application.can_get', 'unit', id) ~= true then return nil, 'unit ' .. tostring(res) .. ' is not loaded' end
+      if guarded(owner, 'Application.can_get', fn_of('Application.can_get'), 'unit', id) ~= true then return nil, 'unit ' .. tostring(res) .. ' is not loaded' end
       local p = api('Vector3', x or 0, y or 0, z or 0)
       if not p then return nil, 'no position' end
       local u, err = base_call('World.spawn_unit', world.main, id, p)
@@ -754,7 +873,7 @@ function M.install(ctx, L)
     -- a unit's lights: chef.lights(u) -> how many; chef.light(u, i) -> { set_color(r, g, b) (0-255), set_intensity(v),
     -- set_enabled(on), set_falloff(start, end), set_shadows(on) }, each asked fresh (no handle kept)
     function chef.lights(u)
-      local k = current(u) and unit_kind(u)
+      local k = current(u) and unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return 0 end
       local n = base_call_kind('Unit.num_lights', k, u)
       return type(n) == 'number' and n or 0
@@ -762,7 +881,7 @@ function M.install(ctx, L)
     function chef.light(u, i)
       local L2 = {}
       local function get()
-        local k = current(u) and unit_kind(u)
+        local k = current(u) and unit_kind(u, owner)
         if not k or BAD_KINDS[k] then return nil end
         return base_call_kind('Unit.light', k, u, i or 1)
       end
@@ -786,7 +905,7 @@ function M.install(ctx, L)
     -- 3 timers, spread, budget
     local function timer(delay, every, fn)
       if type(fn) ~= 'function' or type(delay) ~= 'number' then return nil end
-      if #timers + #incoming >= 512 then once('timers', 'timers: 512 running already; no more'); return nil end
+      if #timers + #incoming >= 512 then once('timers:' .. owner, fmt('[%s] timers: 512 running already (all mods together); no more', owner)); return nil end
       local t = { a = a, at = ctx.now() + max(0, delay), every = every and max(0.0, delay) or nil, fn = fn, on = true, errors = 0 }
       incoming[#incoming + 1] = t
       return { cancel = function() if t.on then t.on = false; tsched.dirty = true end end,
@@ -856,62 +975,95 @@ function M.install(ctx, L)
     function chef.typed() return typed_now() end
     function chef.key_label(name) return key_label(name) end
 
-    -- 7 tables saved between launches (one file per mod and name, next to the loader's log)
+    -- 7 tables saved between launches (one file per mod and name, next to the loader's log; M.data_name)
     local function data_file(name)
       if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 then return nil end
-      return ctx.DIR .. 'chef_data_' .. owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_' .. name .. '.lua'
+      local file = M.data_name(owner, name)
+      return file and ctx.DIR .. file
+    end
+    local function parse(text, name)
+      if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
+      -- text only: compiled Lua can be made to reach outside any environment
+      if text:byte(1) == 27 then return nil, 'not a saved table' end
+      local chunk, err = loadstring(text, '=' .. name)
+      if not chunk then return nil, err_text(err) end
+      setfenv(chunk, {})               -- plain data: it runs with nothing to reach
+      local ok, t = pcall(chunk)
+      if ok and type(t) == 'table' then return t end
+      return nil, ok and 'not a table' or err_text(t)
+    end
+    local function read_text(path)
+      local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
+      if not f then return nil end
+      local ok, text = pcall(f.read, f, '*a')
+      pcall(f.close, f)
+      return ok and text or nil
+    end
+    -- the file written whole to .tmp and put in place (straight in place without os); false and why when any part
+    -- of it failed, the old file kept
+    local function write_file(path, text)
+      local tmp = L.os and path .. '.tmp' or path
+      local f = ctx.open(tmp, 'w')
+      if not f then return false, 'could not write ' .. tmp end
+      local okw = io_ok(pcall(f.write, f, text))
+      local okc = io_ok(pcall(f.close, f))
+      if not (okw and okc) then
+        if L.os and tmp ~= path then pcall(L.os.remove, tmp) end
+        return false, 'could not write ' .. tmp
+      end
+      if tmp == path then return true end
+      return util.replace(tmp, path)
+    end
+    -- The old name isn't one to one (mods/a/b's "c_x" and mods/a/b_c's "x" are one file). An old file is read (and
+    -- copied to the new name) only when no other mod the loader found (started yet or not) could have made it; it is
+    -- left where it is, so a mod that names itself after another can't take that mod's table away.
+    local function old_name_mine(name)
+      local mid = M.old_data_name(owner, name):sub(11, -5)
+      for _, o in ipairs(L.found and L.found() or {}) do
+        if type(o) == 'string' and o ~= owner then
+          local p = o:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_'
+          if #mid > #p and mid:sub(1, #p) == p then return false end
+        end
+      end
+      return true
     end
     function chef.save_table(name, t)
       local path = data_file(name)
       if not path then return false, 'names are letters, digits, _ - (48 at most)' end
       if type(t) ~= 'table' then return false, 'only a table' end
       local ok, text = pcall(M.serialize, t)
-      if not ok then return false, tostring(text) end
+      if not ok then return false, err_text(text) end
       if #text > 256 * 1024 then return false, 'more than 256 KB' end
-      local tmp = path .. '.tmp'
-      local f = ctx.open(tmp, 'w')
-      if not f then return false, 'could not write ' .. tmp end
-      local okw, werr = pcall(f.write, f, 'return ', text, '\n')
-      pcall(f.close, f)
-      if not okw then return false, 'could not write ' .. tmp .. ': ' .. tostring(werr) end
-      -- Windows' rename won't replace a file: the old one goes first (a crash in between leaves the .tmp, which
-      -- load_table reads). os.rename answers nil and why when it fails, so its answer is checked, not just the pcall.
-      if L.os then
-        pcall(L.os.remove, path)
-        local okr, renamed, rerr = pcall(L.os.rename, tmp, path)
-        if not (okr and renamed) then return false, 'rename failed: ' .. tostring(okr and rerr or renamed) end
-      end
-      return true
+      return write_file(path, 'return ' .. text .. '\n')
     end
     function chef.load_table(name)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
-      local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
-      -- a table saved in the old folder (%LOCALAPPDATA%) is read from there until the mod saves again
-      if not f and ctx.OLD_DIR then
-        local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
-        f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
+      local text = read_text(path)
+      if text then return parse(text, name) end
+      -- not saved under its name yet: the earlier name, here or in the old folder (%LOCALAPPDATA%)
+      local old = M.old_data_name(owner, name)
+      local here = ctx.DIR .. old
+      text = read_text(here)
+      if not text and ctx.OLD_DIR then text = read_text(ctx.OLD_DIR .. old) end
+      if not text then return nil, 'none saved' end
+      if not old_name_mine(name) then
+        once('old_data:' .. owner .. name, fmt('[%s] load_table %s: an older saved table could be another mod\'s too; not read', owner, name))
+        return nil, 'none saved'
       end
-      if not f then return nil, 'none saved' end
-      local text = f:read('*a')
-      f:close()
-      if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
-      -- text only: compiled Lua can be made to reach outside any environment
-      if text:byte(1) == 27 then return nil, 'not a saved table' end
-      local chunk, err = loadstring(text, '=' .. name)
-      if not chunk then return nil, tostring(err) end
-      setfenv(chunk, {})               -- plain data: it runs with nothing to reach
-      local ok, t = pcall(chunk)
-      if ok and type(t) == 'table' then return t end
-      return nil, ok and 'not a table' or tostring(t)
+      local t, err = parse(text, name)
+      if t then write_file(path, text) end   -- the old file stays (see old_name_mine)
+      return t, err
     end
 
     -- 8 the mods the loader found
     function chef.mods()
       local out = {}
       for _, m in ipairs(L.addons) do
+        -- (another mod's version read raw: its table can't raise into this call)
+        local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
         out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
-                          version = m.module and m.module.version and tostring(m.module.version) or nil }
+                          version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil }
       end
       for _, b in ipairs(L.boots()) do
         out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file }
@@ -926,9 +1078,9 @@ function M.install(ctx, L)
 
   -- ---------------------------------------------------------------- the performance monitor
   -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
-  -- cost, so a player can see what every mod does to the game. Every mod's time (its hooks, timers and spread work)
-  -- goes into a.pm_ms / a.pm_max as it runs, a boot script's into b.pm_ms, and the loader's own share of its update
-  -- into pm.loader (all from the loader). Once a second I turn the last second into averages a frame: each mod's
+  -- cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot
+  -- script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on
+  -- the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a second I turn the last second into averages a frame: each mod's
   -- milliseconds and its share of the frame (from the game's own frame time), the worst single call, and the total.
   -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
   -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
@@ -938,6 +1090,7 @@ function M.install(ctx, L)
   function util.pm_sum()
     local s = 0
     for _, a in ipairs(L.addons) do s = s + (a.pm_ms or 0) end
+    for _, b in ipairs(L.boots()) do s = s + (b.pm_ms or 0) + (b.a and b.a ~= b and b.a.pm_ms or 0) end
     return s
   end
   local function pm_reset(now)
@@ -945,11 +1098,15 @@ function M.install(ctx, L)
     -- the time counters keep running (the loader reads them before and after its update, which can straddle this);
     -- each window starts from where they stand
     for _, a in ipairs(L.addons) do a.pm_base, a.pm_max = a.pm_ms or 0, 0 end
-    for _, b in ipairs(L.boots()) do b.pm_base, b.pm_max = b.pm_ms or 0, 0 end
+    for _, b in ipairs(L.boots()) do
+      b.pm_base, b.pm_max = b.pm_ms or 0, 0
+      if b.a and b.a ~= b then b.a.pm_base, b.a.pm_max = b.a.pm_ms or 0, 0 end
+    end
   end
   local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
-  -- a boot script's name: its first comment line up to a bracket, else its patch file
+  -- a boot script's name: an HD2-Boot mod's name, else its first comment line up to a bracket, else its patch file
   local function boot_name(b)
+    if b.a and type(b.a.short) == 'string' then return b.a.short end      -- an HD2-Boot mod: its own name
     local t = b.title and b.title:match('^([^%(%[]+)')
     t = t and t:gsub('%s+$', '') or ''
     return t ~= '' and t ~= 'no title' and t or ('BOOT ' .. tostring(b.file or '?'))
@@ -964,13 +1121,15 @@ function M.install(ctx, L)
       rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on }
     end
     for _, b in ipairs(L.boots()) do
-      local avg = ((b.pm_ms or 0) - (b.pm_base or 0)) / n
+      local a = b.a ~= b and b.a or nil
+      local avg = ((b.pm_ms or 0) - (b.pm_base or 0) + (a and (a.pm_ms or 0) - (a.pm_base or 0) or 0)) / n
+      local worst = max(b.pm_max or 0, a and a.pm_max or 0)
       total = total + avg
       -- a file-mod installer boot (a helper several mods ship, not a mod a player picks) gets no row of its own; its
       -- time still counts in All Mods
       local name = boot_name(b)
       if not name:lower():find('file%-mod installer') then
-        rows[#rows + 1] = { name = name, avg = avg, worst = b.pm_max or 0, on = b.on ~= false }
+        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false }
       end
     end
     sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
@@ -996,18 +1155,20 @@ function M.install(ctx, L)
   -- yellow frame with a yellow bar on top, the title in yellow.
   local PM_COLORS = { { 255, 231, 16, 255 }, { 150, 255, 180, 255 }, { 255, 255, 255, 255 }, { 220, 222, 216, 255 },
                       { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
+  -- The layout is the panel's 5 rects and one text per column of a line ({ x, y, text, color index }); each frame I
+  -- draw them through ctx.text, whose fast path takes a whole text through one pcall.
   local function pm_layout(ls, w, h)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
     local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
     local x0, y1 = w - pw - floor(w * 0.02), floor(h * 0.96)        -- top right, clear of the options menu (top left)
     local b = max(1, floor(px * 0.75))
-    local out = {
+    local out = { px = px, rects = {
       { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
       { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
       { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
-    }
-    local function txt(x, y, s, ci) L.text_rects(x, y, s, px, out, ci) end
+    }, texts = {} }
+    local function txt(x, y, s, ci) out.texts[#out.texts + 1] = { x, y, s, ci } end
     local tx = 5 * px
     txt(x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
     local y = y1 - 2 * rh - px
@@ -1033,10 +1194,13 @@ function M.install(ctx, L)
     local t0 = L.clock()
     local w, h = ctx.screen()
     if not pm.rects or pm.w ~= w or pm.h ~= h then pm.rects, pm.w, pm.h = pm_layout(pm.lines, w, h), w, h end
-    local cs = {}
+    local cs = pm.cs or {}
+    pm.cs = cs
     for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
     local top = ctx.TOP + 940
-    for _, r in ipairs(pm.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
+    local lay = pm.rects
+    for _, r in ipairs(lay.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
+    for _, t in ipairs(lay.texts) do ctx.text(t[1], t[2], t[3], lay.px, cs[t[4]], top + 2) end
     pm.self = pm.self + (L.clock() - t0) * 1000
   end
 

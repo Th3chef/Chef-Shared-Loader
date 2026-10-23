@@ -20,7 +20,9 @@ local fmt, concat, sort = string.format, table.concat, table.sort
 -- "1.2.10" -> comparable parts; anything that isn't a number counts as 0
 local function vparts(v)
   local t = {}
-  for n in tostring(v or ''):gmatch('%d+') do t[#t + 1] = tonumber(n) end
+  -- (a version is a string or a number; anything else a mod put there counts as none)
+  local s = (type(v) == 'string' or type(v) == 'number') and tostring(v) or ''
+  for n in s:gmatch('%d+') do t[#t + 1] = tonumber(n) end
   return t
 end
 function M.version_at_least(have, want)
@@ -35,7 +37,8 @@ end
 -- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 1.0", also "chef-loader"), lines near the top
 function M.requirements(src)
   local out = {}
-  for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)%s*>?=?%s*([%d%.]*)') do
+  -- (spaces and tabs only between the name and its version: a line without one must not reach into the next line)
+  for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)[ \t]*>?=?[ \t]*([%d%.]*)') do
     out[#out + 1] = { name = name, version = want ~= '' and want or nil }
   end
   return out
@@ -66,6 +69,28 @@ local function plain(s)
   return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> ]', ' '))
 end
 
+-- A mod's error as text for the log. tostring alone can raise (an error object whose __tostring errors or doesn't
+-- return a string), and that must never stop the other mods' callbacks.
+local function err_text(e)
+  if type(e) == 'string' then return e end
+  local ok, s = pcall(tostring, e)
+  if ok and type(s) == 'string' then return s end
+  return '(an error that can not be shown as text)'
+end
+M.err_text = err_text
+-- a file write or close went through: pcall's ok, then what the call answered (nil and why when it failed)
+local function io_ok(ok, r, e)
+  if not ok or r == false then return false end
+  return not (r == nil and e ~= nil)
+end
+M.io_ok = io_ok
+-- Windows' device names: a file "con.log" is the console, not a file
+local DEVICES = { con = true, prn = true, aux = true, nul = true, ['clock$'] = true, ['conin$'] = true, ['conout$'] = true }
+for n = 0, 9 do DEVICES['com' .. n] = true; DEVICES['lpt' .. n] = true end
+-- the keys the options menu itself uses: none of them can be the key that opens it
+local MENU_KEYS = { enter = true, ['numpad enter'] = true, up = true, down = true, left = true, right = true,
+                    backspace = true, escape = true, delete = true, ['page up'] = true, ['page down'] = true }
+
 function M.install(ctx)
   local svc = { ctx = ctx }
   local log, guarded, fn_of = ctx.log, ctx.guarded, ctx.fn_of
@@ -73,48 +98,72 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- saved settings
   -- One file next to the log: "<mod>\t<key>\t<b|n|s>\t<value>" per line. Written at most every 3 s while something
-  -- changed, and at shutdown.
+  -- changed, and at shutdown. It's written whole to a .tmp first and then put in place, so a full or locked disk never
+  -- leaves it cut short; a write that didn't go through is tried again 3 s later.
   local store, dirty, save_at = {}, false, 0
+  local saving = { failed = 0 }
   do
-    local f = ctx.open(SETTINGS_FILE, 'r')
+    -- (only the .tmp is there when the game ended between taking the old file away and putting the new one in place)
+    local f = ctx.open(SETTINGS_FILE, 'r') or ctx.open(SETTINGS_FILE .. '.tmp', 'r')
     if f then
+      local UNESCAPE = { n = '\n', t = '\t', ['\\'] = '\\' }
       for line in f:lines() do
         local mod, key, ty, v = line:match('^([^\t]+)\t([^\t]+)\t([bns])\t(.*)$')
         if mod then
           local val
-          if ty == 'b' then val = v == 'true' elseif ty == 'n' then val = tonumber(v) else val = (v:gsub('\\n', '\n'):gsub('\\t', '\t'):gsub('\\\\', '\\')) end
+          -- strings: one pass over the escapes, so "C:\new" (saved as C:\\new) comes back as it was
+          if ty == 'b' then val = v == 'true' elseif ty == 'n' then val = tonumber(v) else val = (v:gsub('\\(.)', UNESCAPE)) end
           if val ~= nil then store[mod] = store[mod] or {}; store[mod][key] = val end
         end
       end
       f:close()
     end
   end
+  -- a number as text that reads back as the same number (tostring alone keeps 14 digits)
+  local function num_text(v)
+    local s = tostring(v)
+    if tonumber(s) == v then return s end
+    return fmt('%.17g', v)
+  end
   local function save_now()
-    dirty = false
-    local f = ctx.open(SETTINGS_FILE, 'w')
-    if not f then return end
-    local mods = {}
-    for m in pairs(store) do mods[#mods + 1] = m end
-    sort(mods)
-    for _, m in ipairs(mods) do
-      local keys = {}
-      for k in pairs(store[m]) do keys[#keys + 1] = k end
-      sort(keys)
-      for _, k in ipairs(keys) do
-        local v = store[m][k]
-        local ty = type(v) == 'boolean' and 'b' or (type(v) == 'number' and 'n' or 's')
-        local text = ty == 's' and (v:gsub('\\', '\\\\'):gsub('\n', '\\n'):gsub('\t', '\\t')) or tostring(v)
-        f:write(m, '\t', k, '\t', ty, '\t', text, '\n')
+    -- with the utilities there (always, in the game) I write it to .tmp and put it in place; without them, in place
+    local replace = svc.util and svc.util.replace
+    local tmp = SETTINGS_FILE .. '.tmp'
+    local f = ctx.open(replace and tmp or SETTINGS_FILE, 'w')
+    local ok = f ~= nil
+    if f then
+      local mods = {}
+      for m in pairs(store) do mods[#mods + 1] = m end
+      sort(mods)
+      for _, m in ipairs(mods) do
+        local keys = {}
+        for k in pairs(store[m]) do keys[#keys + 1] = k end
+        sort(keys)
+        for _, k in ipairs(keys) do
+          local v = store[m][k]
+          local ty = type(v) == 'boolean' and 'b' or (type(v) == 'number' and 'n' or 's')
+          local text = ty == 's' and (v:gsub('\\', '\\\\'):gsub('\n', '\\n'):gsub('\t', '\\t')) or (ty == 'n' and num_text(v) or tostring(v))
+          if ok then ok = io_ok(pcall(f.write, f, m, '\t', k, '\t', ty, '\t', text, '\n')) end
+        end
       end
+      ok = io_ok(pcall(f.close, f)) and ok
+      if ok and replace then ok = replace(tmp, SETTINGS_FILE) end
     end
-    f:close()
+    if ok then
+      dirty = false
+      if saving.failed > 0 then log('settings saved again'); saving.failed = 0 end
+    else
+      saving.failed = saving.failed + 1
+      if saving.failed == 1 then log('the settings could not be saved to ' .. SETTINGS_FILE .. '; trying again every 3 s') end
+    end
+    return ok
   end
   local function put(mod, key, v)
     if type(key) ~= 'string' or not key:match('^[%w_%.%-]+$') or #key > 64 then return false, 'keys are letters, digits, _ . - (64 at most)' end
     local t = type(v)
     if v ~= nil and t ~= 'boolean' and t ~= 'number' and t ~= 'string' then return false, 'only booleans, numbers and strings are saved' end
     if t == 'string' and #v > 512 then return false, 'strings are saved up to 512 characters' end
-    if t == 'number' and v ~= v then return false, 'not a number' end
+    if t == 'number' and (v ~= v or v == math.huge or v == -math.huge) then return false, 'only finite numbers are saved' end
     store[mod] = store[mod] or {}
     if store[mod][key] ~= v then store[mod][key] = v; dirty = true end
     return true
@@ -127,12 +176,30 @@ function M.install(ctx)
   end
 
   -- ---------------------------------------------------------------- after_startup, shared values, events
+  -- I time a mod's callbacks (events, on_change, after_startup) as that mod's own (its record, from extend), so the
+  -- performance monitor and its frame budget count them for it, not for the loader.
+  local recs = {}
+  local function call_as(owner, fn, ...)
+    local a, u = recs[owner], svc.util
+    if a and u then return u.timed(a, fn, ...) end
+    return pcall(fn, ...)
+  end
+  -- a mod's own call that runs other mods' callbacks (emit, set): their time already went to them, so it comes off
+  -- the caller's, which its hook or timer counts whole
+  local function as_caller(a, fn, ...)
+    local u = svc.util
+    if not u then return fn(...) end
+    local t0 = u.clock()
+    local r = fn(...)
+    u.discount(a, (u.clock() - t0) * 1000)
+    return r
+  end
   local after, started = {}, false
   local function after_startup(owner, fn)
     if type(fn) ~= 'function' then return false, 'after_startup needs a function' end
     if started then
-      local ok, err = pcall(fn)
-      if not ok then log(fmt('[%s] after_startup: %s', owner, tostring(err))) end
+      local ok, err = call_as(owner, fn)
+      if not ok then log(fmt('[%s] after_startup: %s', owner, err_text(err))) end
       return true
     end
     if #after >= 256 then return false, 'after_startup: 256 callbacks already registered' end
@@ -165,11 +232,11 @@ function M.install(ctx)
     for i = 1, #list do
       local sb = list[i]
       if sb and sb.on then
-        local ok, err = pcall(sb.fn, ...)
+        local ok, err = call_as(sb.owner, sb.fn, ...)
         n = n + 1
         if not ok then
           sb.errors = sb.errors + 1
-          if sb.errors <= 3 then log(fmt('[%s] event %s: %s', sb.owner, event, tostring(err))) end
+          if sb.errors <= 3 then log(fmt('[%s] event %s: %s', sb.owner, event, err_text(err))) end
           if sb.errors >= 20 then sb.on = false; stale[event] = true; log(fmt('[%s] event %s: switched off after 20 errors', sb.owner, event)) end
         end
       end
@@ -210,9 +277,16 @@ function M.install(ctx)
     end
     return fmt('opt.h_%08x%08x', a, b)
   end
+  -- a label, title or choice as text (a mod's function or odd value can't raise into the menu)
   local function text_of(v)
-    if type(v) == 'function' then local ok, s = pcall(v); return ok and tostring(s) or '?' end
-    return tostring(v or '')
+    if type(v) == 'function' then
+      local ok, s = pcall(v)
+      if not ok then return '?' end
+      v = s
+    end
+    if type(v) == 'string' then return v end
+    local ok, s = pcall(tostring, v or '')
+    return ok and type(s) == 'string' and s or '?'
   end
   local function clean(spec, value)
     local ty = spec.type
@@ -223,20 +297,32 @@ function M.install(ctx)
       return (v >= 1 and v <= n) and v or 1
     end
     if ty == 'slider' then
-      local v = tonumber(value) or spec.default
+      -- anything that isn't a number (a value saved when the row was something else, say) gives the default
+      local v = tonumber(value) or tonumber(spec.default) or spec.min
+      if v ~= v then v = spec.min end
       v = max(spec.min, min(spec.max, v))
       if spec.step and spec.step > 0 then v = spec.min + floor((v - spec.min) / spec.step + 0.5) * spec.step end
-      return v
+      -- (after the snap too: a step that doesn't divide the range would snap past max)
+      return max(spec.min, min(spec.max, v))
     end
-    if ty == 'key' then return type(value) == 'string' and value or 'off' end
+    if ty == 'key' then
+      local k = type(value) == 'string' and value or 'off'
+      -- the menu's own key is never none or one of the keys the menu uses (it could never be opened again)
+      if spec.menu and (k == 'off' or MENU_KEYS[k]) then return spec.default end
+      return k
+    end
     return value
   end
+  local function finite(n) return type(n) == 'number' and n == n and n > -math.huge and n < math.huge end
   local function check_spec(spec)
     if type(spec) ~= 'table' then return 'the spec must be a table' end
     local ty = spec.type
     if ty ~= 'toggle' and ty ~= 'choice' and ty ~= 'slider' and ty ~= 'key' then return 'type must be toggle, choice, slider or key' end
     if ty == 'choice' and (type(spec.choices) ~= 'table' or #spec.choices < 2 or #spec.choices > 32) then return 'a choice needs 2 to 32 choices' end
-    if ty == 'slider' and not (type(spec.min) == 'number' and type(spec.max) == 'number' and spec.max > spec.min) then return 'a slider needs min < max' end
+    if ty == 'slider' then
+      if not (finite(spec.min) and finite(spec.max) and spec.max > spec.min) then return 'a slider needs min < max' end
+      if spec.step ~= nil and not (finite(spec.step) and spec.step >= 0) then return 'a slider step is a number, 0 or more' end
+    end
     return nil
   end
   local function add_row(owner, mod, title, id, spec)
@@ -269,10 +355,18 @@ function M.install(ctx)
     local ok, err
     if v == row.default then ok, err = put(row.mod, row.key, nil) else ok, err = put(row.mod, row.key, v) end
     if not ok then log(fmt('[%s] option %s not saved: %s', row.owner, row.id, tostring(err))) end
-    for _, fn in ipairs(row.changed) do
-      local ok, err = pcall(fn, v)
-      if not ok then log(fmt('[%s] on_change %s: %s', row.owner, row.id, tostring(err))) end
+    -- each callback runs as the mod that asked for it ({ fn, owner, on }; a mod that stops has its own switched off)
+    for _, c in ipairs(row.changed) do
+      if c.on then
+        local ok, err = call_as(c.owner, c.fn, v)
+        if not ok then log(fmt('[%s] on_change %s: %s', c.owner, row.id, err_text(err))) end
+      end
     end
+  end
+  local function on_change(row, owner, fn)
+    if #row.changed >= 64 then return false end
+    row.changed[#row.changed + 1] = { fn = fn, owner = owner, on = true }
+    return true
   end
   -- every key some binding uses, for the conflict marks
   local users_cache = { ver = -1, users = nil }
@@ -351,6 +445,7 @@ function M.install(ctx)
   function svc.extend(chef, a)
     local owner = a.name
     local title = a.title
+    recs[owner] = a
     chef.api = M.api
     local caps = { api = M.api, after_startup = true, settings = true, share = true, events = true, require = true,
                    bind = true, menu = true, shims = true, dev = true, logs = true, own_log = true }
@@ -381,18 +476,24 @@ function M.install(ctx)
         if sb.on then sb.on = false; ended(event) end
       end
     end
-    function chef.emit(event, ...) if type(event) == 'string' then return emit(event, ...) end end
+    function chef.emit(event, ...) if type(event) == 'string' then return as_caller(a, emit, event, ...) end end
     -- another mod's exports (the table it returned), optionally at a version or newer
     function chef.require(name, want)
       local other = ctx.addon(name)
       if not other or not other.on or type(other.module) ~= 'table' then return nil, name .. ' is not running' end
-      if want and not M.version_at_least(other.module.version, want) then
-        return nil, fmt('%s is %s, %s or newer is needed', name, tostring(other.module.version), want)
+      if want and not M.version_at_least(other.version, want) then
+        return nil, fmt('%s is %s, %s or newer is needed', name, tostring(other.version), want)
       end
       return other.module
     end
     -- the options menu: a group under the mod's title (chef.title, or its name)
-    function chef.title(t) if type(t) == 'string' then title = t; group(owner, t) end end
+    -- (a title set after the first option renames the group it made)
+    function chef.title(t)
+      if type(t) ~= 'string' then return end
+      title = t
+      local g = group(owner, t)
+      if g.title ~= t then g.title = t; ver.layout = ver.layout + 1 end
+    end
     function chef.option(id, spec)
       if type(id) ~= 'string' or not id:match('^[%w_%.%-]+$') then return nil, 'ids are letters, digits, _ . -' end
       local row, err = add_row(owner, owner, title or a.short, id, spec)
@@ -400,15 +501,20 @@ function M.install(ctx)
       return row.value
     end
     function chef.get(id) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then return r.value end end
-    function chef.set(id, v) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then set_row(r, v); return r.value end end
+    function chef.set(id, v) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then as_caller(a, set_row, r, v); return r.value end end
     function chef.on_change(id, fn)
       local r = rows_by_id[owner .. '|' .. tostring(id)]
-      if r and type(fn) == 'function' then r.changed[#r.changed + 1] = fn; return true end
+      if r and type(fn) == 'function' then return on_change(r, owner, fn) end
       return false
     end
     -- a key binding: a 'key' row in the menu; b.key() is its key ('off' for none), b.pressed() / b.down() this frame
+    -- (key names are the engine's, in lower case: 'F6' is taken as 'f6'; a name the keyboard doesn't know is logged)
     function chef.bind(id, default_key, label)
-      local row = chef.option(id, { type = 'key', default = default_key or 'off', label = label or id })
+      local dk = type(default_key) == 'string' and default_key:lower() or 'off'
+      if dk ~= 'off' and svc.util and svc.util.known_key and not svc.util.known_key(dk) then
+        log(fmt('[%s] bind %s: "%s" is not a key name the keyboard knows (players can pick another in the menu)', owner, tostring(id), dk))
+      end
+      local row = chef.option(id, { type = 'key', default = dk, label = label or id })
       local r = rows_by_id[owner .. '|' .. id]
       if not r then return nil end
       note_conflicts()
@@ -447,7 +553,7 @@ function M.install(ctx)
   -- going back never touches the game's own Escape menu.)
   local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false, group = nil, back = 1 }
   local loader_mod = '_loader'
-  local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu' })
+  local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu', menu = true })
   local reload_key = nil
   -- more rows in the loader's own group (the frame budget)
   function svc.loader_option(id, spec)
@@ -550,9 +656,12 @@ function M.install(ctx)
   local function menu_input(ls)
     if menu.capture then
       local k = capture_key()
+      local r = menu.capture
       if k == 'escape' then menu.capture = nil
-      elseif k == 'delete' then set_row(menu.capture, 'off'); menu.capture = nil
-      elseif k then set_row(menu.capture, k); menu.capture = nil; conflicts_said = {}; note_conflicts() end
+      -- Delete: none (the menu's own key goes back to its default instead)
+      elseif k == 'delete' then set_row(r, r.spec.menu and r.default or 'off'); menu.capture = nil
+      -- the menu's own key can't be one the menu uses: it keeps waiting for another
+      elseif k and not (r.spec.menu and MENU_KEYS[k]) then set_row(r, k); menu.capture = nil; conflicts_said = {}; note_conflicts() end
       return
     end
     local n = #ls
@@ -588,7 +697,7 @@ function M.install(ctx)
       local v = r.value + dir
       if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
       set_row(r, v)
-    elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
+    elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * ((s.step or 0) > 0 and s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and pressed('enter') then menu.capture = r end
   end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
@@ -657,10 +766,10 @@ function M.install(ctx)
     end
     -- the hints under a thin line
     ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
-    local hint = menu.capture and 'PRESS A KEY  ESC CANCEL  DEL NONE'
+    local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
       or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
       or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
-      or 'ARROWS  ENTER OPEN  / SEARCH  F9 CLOSE'
+      or ('ARROWS  ENTER OPEN  / SEARCH  ' .. (svc.util and svc.util.key_label(menu_key.value) or menu_key.value) .. ' CLOSE')
     ctx.text(x0 + tx, midy(y0 - ph + px, rh), plain(hint):sub(1, cols), px, gray, top + 2)
   end
   local function menu_frame()
@@ -696,58 +805,96 @@ function M.install(ctx)
   -- Only when nothing of that name exists. A Lua-only mod that calls these globals gets:
   -- CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
   -- register_option(id, spec) / get / set / on_change / ready, with its rows in this menu under spec.mod.
+  -- I give every locked-down mod its own pair (bind_lookalikes, as the loader makes the mod's environment): fresh
+  -- functions that know which mod calls them, over the one set of rows, so no mod can change another's, and a mod
+  -- that stops has its callbacks end with it. The pair in the game's globals is for full-access boot scripts.
+  local shim = { count = { rows = 0, mods = 0 } }       -- .bingus / .mom: false when something else had the name
+  local MOM_OPTIONS, MOM_MODS = 128, 64
+  local BINGUS_CAPS = { api = 1, discovery = true, logs = true, health = false, jit_budget = false, after_startup = true }
+  local function read_only(t, what)
+    return setmetatable({}, { __index = t, __metatable = 'locked', __newindex = function() error(what .. ' is read-only', 2) end })
+  end
+  local function make_bingus(owner)
+    local dir = ctx.DIR:gsub('\\$', '')
+    return {
+      api = 1, version = ctx.LOADER .. ' ' .. ctx.VERSION .. ' (look-alike)', log_directory = dir,
+      capabilities = read_only(BINGUS_CAPS, 'CowboyBingusModLoader.capabilities'),
+      after_startup = function(fn) return after_startup(owner, fn) end,
+      open_log = function(name)
+        if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') or #name > 52 then
+          return nil, 'log names are letters, digits, _ - and end in .log'
+        end
+        local base = name:lower():sub(1, -5)
+        -- never the loader's own log, a device (con.log is the console) or another mod's own_log
+        if base:find('chef_loader', 1, true) == 1 or base:find(ctx.FILES:lower(), 1, true) == 1 then return nil, 'that log is the loader\'s own' end
+        if DEVICES[base] then return nil, 'device names are off limits' end
+        local o = own_logs[name:sub(1, -5)]
+        if o and o.owner ~= owner then return nil, name .. ' is ' .. o.owner .. "'s" end
+        return ctx.open(ctx.DIR .. name, 'a')
+      end,
+    }
+  end
+  local function mom_row(id) return rows_by_id['ModOptionsMenu|' .. tostring(id)] end
+  local function make_mom(owner)
+    local mom = { api = 1, version = 2, max_mods = MOM_MODS, max_options = MOM_OPTIONS }
+    function mom.register_option(id, spec)
+      if type(id) ~= 'string' or type(spec) ~= 'table' then return false, 'register_option(id, spec)' end
+      local s = { type = spec.type, label = spec.label, default = spec.default, choices = spec.choices, min = spec.min,
+                  max = spec.max, step = spec.step, description = spec.description }
+      if mom_row(id) then return true end
+      local title = text_of(spec.mod or 'MODS')
+      local key = 'mom:' .. title
+      local count = shim.count
+      if count.rows >= MOM_OPTIONS then return false, 'register_option: ' .. MOM_OPTIONS .. ' options already' end
+      if not group_of[key] and count.mods >= MOM_MODS then return false, 'register_option: ' .. MOM_MODS .. ' mods already' end
+      local r, err = add_row(owner, 'ModOptionsMenu', 'MODS', id, s)
+      if not r then return false, err end
+      count.rows = count.rows + 1
+      -- each spec.mod gets its own heading: move the row there
+      if not group_of[key] then count.mods = count.mods + 1 end
+      local g = group(key, title)
+      local home = group_of['ModOptionsMenu']
+      if home and home ~= g then
+        for i = #home.rows, 1, -1 do if home.rows[i] == r then table.remove(home.rows, i) end end
+        g.rows[#g.rows + 1] = r
+        ver.layout = ver.layout + 1
+      end
+      return true
+    end
+    function mom.get(id) local r = mom_row(id); if r then return r.value end end
+    function mom.set(id, v)
+      local r = mom_row(id)
+      if not r then return false end
+      local a = recs[owner]
+      if a then as_caller(a, set_row, r, v) else set_row(r, v) end
+      return true
+    end
+    function mom.on_change(id, fn)
+      local r = mom_row(id)
+      if r and type(fn) == 'function' then return on_change(r, owner, function(v) return fn(v, id) end) end
+      return false
+    end
+    function mom.ready() return true end
+    return mom
+  end
   function svc.install_shims(G)
-    if rawget(G, 'CowboyBingusModLoader') == nil then
-      local caps = setmetatable({}, { __index = { api = 1, discovery = true, logs = true, health = false, jit_budget = false, after_startup = true },
-        __newindex = function() error('CowboyBingusModLoader.capabilities is read-only', 2) end })
-      local dir = ctx.DIR:gsub('\\$', '')
-      rawset(G, 'CowboyBingusModLoader', {
-        api = 1, version = ctx.LOADER .. ' ' .. ctx.VERSION .. ' (look-alike)', capabilities = caps, log_directory = dir,
-        after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
-        open_log = function(name)
-          if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
-          -- never the loader's own log
-          if name:lower():find('^chef_loader') or name:lower():find('^' .. ctx.FILES:lower()) then return nil, 'that log is the loader\'s own' end
-          return ctx.open(ctx.DIR .. name, 'a')
-        end,
-      })
+    shim.bingus = rawget(G, 'CowboyBingusModLoader') == nil
+    if shim.bingus then
+      rawset(G, 'CowboyBingusModLoader', make_bingus('bingus look-alike'))
       log('look-alike: CowboyBingusModLoader (after_startup, capabilities, log_directory, open_log)')
     end
-    if rawget(G, 'ModOptionsMenu') == nil then
-      local mom = { api = 1, version = 2, max_mods = 64, max_options = 128 }
-      local count = { rows = 0, mods = 0 }
-      local function row(id) return rows_by_id['ModOptionsMenu|' .. tostring(id)] end
-      function mom.register_option(id, spec)
-        if type(id) ~= 'string' or type(spec) ~= 'table' then return false, 'register_option(id, spec)' end
-        local s = { type = spec.type, label = spec.label, default = spec.default, choices = spec.choices, min = spec.min,
-                    max = spec.max, step = spec.step, description = spec.description }
-        local was = rows_by_id['ModOptionsMenu|' .. id]
-        if was then return true end
-        local title = text_of(spec.mod or 'MODS')
-        local key = 'mom:' .. title
-        if count.rows >= mom.max_options then return false, 'register_option: ' .. mom.max_options .. ' options already' end
-        if not group_of[key] and count.mods >= mom.max_mods then return false, 'register_option: ' .. mom.max_mods .. ' mods already' end
-        local r, err = add_row('ModOptionsMenu', 'ModOptionsMenu', 'MODS', id, s)
-        if not r then return false, err end
-        count.rows = count.rows + 1
-        -- each spec.mod gets its own heading: move the row there
-        if not group_of[key] then count.mods = count.mods + 1 end
-        local g = group(key, title)
-        local home = group_of['ModOptionsMenu']
-        if home and home ~= g then
-          for i = #home.rows, 1, -1 do if home.rows[i] == r then table.remove(home.rows, i) end end
-          g.rows[#g.rows + 1] = r
-          ver.layout = ver.layout + 1
-        end
-        return true
-      end
-      function mom.get(id) local r = row(id); if r then return r.value end end
-      function mom.set(id, v) local r = row(id); if r then set_row(r, v); return true end return false end
-      function mom.on_change(id, fn) local r = row(id); if r and type(fn) == 'function' then r.changed[#r.changed + 1] = function(v) fn(v, id) end; return true end return false end
-      function mom.ready() return true end
-      rawset(G, 'ModOptionsMenu', mom)
+    shim.mom = rawget(G, 'ModOptionsMenu') == nil
+    if shim.mom then
+      rawset(G, 'ModOptionsMenu', make_mom('ModOptionsMenu'))
       log('look-alike: ModOptionsMenu (register_option, get, set, on_change, ready; rows in the ' .. ctx.LOADER .. ' options menu)')
     end
+  end
+  -- one mod's own pair, put straight into its environment (so the game's pair is never reached from it)
+  function svc.bind_lookalikes(env, owner)
+    if type(env) ~= 'table' or type(owner) ~= 'string' then return false end
+    if shim.bingus ~= false then rawset(env, 'CowboyBingusModLoader', make_bingus(owner)) end
+    if shim.mom ~= false then rawset(env, 'ModOptionsMenu', make_mom(owner)) end
+    return true
   end
 
   -- ---------------------------------------------------------------- dev mode (test builds only: the loader only calls
@@ -792,13 +939,20 @@ function M.install(ctx)
   -- rows keep their values but drop its change callbacks, its event subscriptions and waiting after_startup callbacks
   -- end, and the utilities drop its timers, jobs and what it spawned.
   function svc.forget(owner)
-    for _, row in pairs(rows_by_id) do if row.owner == owner then row.changed = {} end end
+    -- (its change callbacks on any row, a look-alike's shared ones too)
+    for _, row in pairs(rows_by_id) do
+      local keep, any = {}, false
+      for _, c in ipairs(row.changed) do
+        if c.owner == owner then c.on = false; any = true else keep[#keep + 1] = c end
+      end
+      if any then row.changed = keep end
+    end
     for event, list in pairs(subs) do
       local any = false
       for _, sb in ipairs(list) do if sb.owner == owner and sb.on then sb.on = false; any = true end end
       if any then ended(event) end
     end
-    for i = #after, 1, -1 do if after[i].owner == owner then table.remove(after, i) end end
+    for i = #after, 1, -1 do if after[i].owner == owner then after[i].off = true; table.remove(after, i) end end
     if svc.util then svc.util.forget(owner) end
   end
 
@@ -807,21 +961,29 @@ function M.install(ctx)
   function svc.startup_done()
     started = true
     if #after > 0 then log(fmt('after startup: running %d callback(s)', #after)) end
-    for _, c in ipairs(after) do
-      local ok, err = pcall(c.fn)
-      if not ok then log(fmt('[%s] after_startup: %s', c.owner, tostring(err))) end
-    end
+    local list = after
     after = {}
+    for _, c in ipairs(list) do
+      -- (one that a mod stopping in an earlier callback took away is skipped)
+      if not c.off then
+        local ok, err = call_as(c.owner, c.fn)
+        if not ok then log(fmt('[%s] after_startup: %s', c.owner, err_text(err))) end
+      end
+    end
     emit('startup')
     note_conflicts()
   end
   function svc.frame()
     local w = ctx.world
     if w.stable and w.id ~= last_world then last_world = w.id; emit('world', w.id, w.mission == true) end
-    local m = w.stable and w.mission and not w.checking and true or false
-    if m ~= last_mission then
-      last_mission = m
-      emit(m and 'mission_start' or 'mission_end', w.id)
+    -- while the loader looks again at a mission that may have ended (w.checking), it's still the mission it was: no
+    -- mission_end and mission_start for a look
+    if not w.checking then
+      local m = w.stable and w.mission and true or false
+      if m ~= last_mission then
+        last_mission = m
+        emit(m and 'mission_start' or 'mission_end', w.id)
+      end
     end
     if dirty and ctx.now() >= save_at then save_at = ctx.now() + 3; save_now() end
     if dev.on and reload_key and pressed(reload_key) then

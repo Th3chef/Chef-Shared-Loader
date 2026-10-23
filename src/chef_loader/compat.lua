@@ -102,8 +102,8 @@ local function fold(op2)
     r = op2(r, tou(y))
     local n = select('#', ...)
     if n > 0 then
-      local rest = { ... }
-      for i = 1, n do r = op2(r, tou(rest[i])) end
+      -- PERF: the extra operands through select, not { ... } (a table per call is garbage on every call)
+      for i = 1, n do r = op2(r, tou((select(i, ...)))) end
     end
     return tos(r)
   end
@@ -182,7 +182,7 @@ M.bit = bit
 -- Small LuaJIT extras
 ---------------------------------------------------------------------------------------------------
 
--- table.new only pre-sizes a table in LuaJIT; plain Lua 5.1 can't, so an empty table is the honest stand-in.
+-- table.new only pre-sizes a table in LuaJIT; plain Lua 5.1 can't, so it returns an empty table.
 local function table_new(narr, nrec) return {} end
 
 -- Setting existing fields to nil while walking a table with next is allowed in Lua 5.1.
@@ -194,8 +194,8 @@ local function table_clear(t)
   end
 end
 
--- LuaJIT's xpcall passes extra arguments on to the function. Lua 5.1's drops them without a word,
--- so a mod written for LuaJIT would quietly call its function with nothing. This one passes them on.
+-- LuaJIT's xpcall passes extra arguments on to the function; Lua 5.1's drops them, so a mod written for LuaJIT
+-- would call its function with none. This one passes them on.
 local function xpcall_args(f, handler, ...)
   local n = select('#', ...)
   if n == 0 then return xpcall(f, handler) end

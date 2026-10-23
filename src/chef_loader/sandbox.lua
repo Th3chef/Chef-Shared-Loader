@@ -18,7 +18,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.0.0' }
+local M = { version = '1.0.1' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local collectgarbage = collectgarbage
@@ -31,7 +31,7 @@ local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
 local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true }
-local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true }
+local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true, ['clock$'] = true }
 for n = 1, 9 do DEVICES['com' .. n] = true; DEVICES['lpt' .. n] = true end
 local LIBS = { 'string', 'table', 'math', 'coroutine', 'bit' }
 local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
@@ -72,6 +72,26 @@ function M.install(ctx)
   local overrides = ctx.overrides or {}
   local sb = { denied = 0 }
   local envs = setmetatable({}, { __mode = 'k' })        -- every mod environment I made -> its mod's name
+  local full = setmetatable({}, { __mode = 'k' })        -- environments with the game's whole Lua (other boot scripts)
+
+  -- The file handles' methods are one table every handle shares (f.__index hands it out), so a mod could replace
+  -- f.write and have my own writes (the crash state, the trace, the settings) run its function. The handles get a
+  -- locked copy instead, taken before any mod runs: f:write, f:lines and io.type work as usual, and f.__index is
+  -- nil. Done on the first handle I see (io.stdout, else the first file a mod opens).
+  local files_locked = false
+  local function lock_files(f)
+    if files_locked or f == nil then return end
+    local mt = getmetatable(f)
+    if type(mt) ~= 'table' or type(rawget(mt, '__index')) ~= 'table' then return end
+    local methods = {}
+    for k, v in pairs(rawget(mt, '__index')) do
+      if type(k) ~= 'string' or s_sub(k, 1, 2) ~= '__' then methods[k] = v end
+    end
+    mt.__index = setmetatable({}, { __index = methods, __metatable = 'locked',
+      __newindex = function() error('the file methods are off limits to Chef Shared Loader mods', 2) end })
+    files_locked = true
+  end
+  if type(io_) == 'table' then pcall(lock_files, rawget(io_, 'stdout') or rawget(io_, 'stderr')) end
 
   local function low(p) return s_lower((s_gsub(p, '/', '\\'))) end
   local WDIR = ctx.DIR and ctx.DIR ~= '' and low(ctx.DIR) or nil
@@ -162,6 +182,8 @@ function M.install(ctx)
       local lib = rawget(G, n)
       if type(lib) == 'table' then env[n] = copy(lib) end
     end
+    -- (string.dump only makes bytecode, which load and loadstring refuse anyway)
+    if env.string then env.string.dump = nil end
     local string_view = { __index = env.string }     -- getmetatable('') gives this, not the game's
     env.getmetatable = function(o)
       local mt = getmetatable(o)
@@ -174,8 +196,7 @@ function M.install(ctx)
     env.os = os_c
     env.package = { loaded = {}, preload = {}, path = '', cpath = '' }
 
-    -- files: through my check, and the first denials of each mod go to the log (a mod reaching for something it
-    -- shouldn't is worth seeing)
+    -- files: through my check, and the first denials of each mod go to the log
     local said = 0
     local function deny(what, path, mode, why)
       sb.denied = sb.denied + 1
@@ -191,13 +212,14 @@ function M.install(ctx)
         if not ok then return deny('open', path, mode, root) end
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
+        if f and not files_locked then lock_files(f) end
         -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
         -- (%LOCALAPPDATA%) if it's there: a mod's saved settings carry over,
         -- and its next write lands in the new place
         if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
           and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then
           local g = real_open(ctx.OLD_DIR .. names[1], mode or 'r')
-          if g then return g end
+          if g then lock_files(g); return g end
         end
         return f, err, code
       end,
@@ -245,7 +267,7 @@ function M.install(ctx)
 
     -- getfenv/setfenv: a function of the game's, the loader's or another mod's reads as this mod's own environment,
     -- and can't be changed. Levels count one more here (this wrapper is a level of its own).
-    local function foreign(e) return e == G or (envs[e] ~= nil and e ~= env) end
+    local function foreign(e) return e == G or full[e] ~= nil or (envs[e] ~= nil and e ~= env) end
     env.getfenv = function(f)
       if f == nil then f = 1 end
       if type(f) == 'number' then
@@ -301,6 +323,9 @@ function M.install(ctx)
 
   -- is this table a mod environment of mine? (the loader's own checks)
   function sb.owner_of(t) return envs[t] end
+  -- an environment with the game's whole Lua (another mod's boot script): to every loader mod it's someone else's, so
+  -- getfenv on one of its functions gives the mod its own environment and setfenv refuses
+  function sb.register_full(e, owner) if type(e) == 'table' then full[e] = owner or true end end
   return sb
 end
 
