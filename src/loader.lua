@@ -815,6 +815,26 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
+    -- (Test 13) a log of the same name in the old folder (%LOCALAPPDATA%, up to Test 12) gets one last line saying
+    -- where the log went, once
+    if ctx.OLD_DIR then
+      local old = ctx.OLD_DIR .. name .. '.log'
+      local g = ctx.open(old, 'r')
+      if g then
+        local size = g:seek('end') or 0
+        g:seek('set', math.max(0, size - 300))
+        local tail = g:read('*a') or ''
+        g:close()
+        if not tail:find('this log is no longer written', 1, true) then
+          local w = ctx.open(old, 'a')
+          if w then
+            pcall(w.write, w, fmt('%s %s.log moved to %%APPDATA%%\\Arrowhead\\Helldivers2 with %s; this log is no longer written\n',
+              ctx.clock(), name, ctx.LOADER))
+            w:close()
+          end
+        end
+      end
+    end
     return o
   end
   local function own_write(o, text)
@@ -898,6 +918,9 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
+    -- (Test 13) where the loader's folder was up to Test 12 (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
+    chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
       if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 or name:lower():find('^chef_loader') then
         return false, 'log names are letters, digits, _ - (48 at most), and not chef_loader'
@@ -1103,6 +1126,8 @@ function M.install(ctx)
         after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
         open_log = function(name)
           if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
+          -- (Test 13) never the loader's own log
+          if name:lower():find('^chef_loader') or name:lower():find('^' .. ctx.FILES:lower()) then return nil, 'that log is the loader\'s own' end
           return ctx.open(ctx.DIR .. name, 'a')
         end,
       })
@@ -2123,10 +2148,17 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
+      -- (Test 13) up to Test 12 the saved tables were in %LOCALAPPDATA%: read from there until the mod saves again
+      if not f and ctx.OLD_DIR then
+        local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
+        f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
+      end
       if not f then return nil, 'none saved' end
       local text = f:read('*a')
       f:close()
       if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
+      -- (Test 13) text only: compiled Lua can be made to reach outside any environment
+      if text:byte(1) == 27 then return nil, 'not a saved table' end
       local chunk, err = loadstring(text, '=' .. name)
       if not chunk then return nil, tostring(err) end
       setfenv(chunk, {})               -- plain data: it runs with nothing to reach
@@ -2161,16 +2193,332 @@ end
 return M
 end)()
 -- @@END utilities.lua@@
+-- @@BEGIN sandbox.lua@@ (copied from src/chef_loader/sandbox.lua by tools/splice.py; edit that file, not this)
+services.sandbox = (function()
+-- Chef Shared Loader: the locked-down space every loader mod runs in (0.2.0 Test 13)
+-- Every "-- HD2-Addon:" and "-- HD2-Boot:" mod gets an environment of its own built here. What it can't do from it:
+--   * start programs, delete or rename files, quit the game through Lua (os.execute, io.popen, os.remove/rename/exit)
+--   * load native code (package.loadlib, C modules through require) or compiled Lua (bytecode can be made to read and
+--     write any memory, so loadstring and load take text only)
+--   * reach past its own space: no debug library beyond traceback and getinfo, getfenv/setfenv only on its own
+--     functions, _G is its own environment, no require of the game's modules (require('_G') would hand out everything),
+--     no module() (package.seeall), and the metatables of its environment are locked
+--   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
+--     and writes only .log .txt .json .csv .dat files in the loader's folder, never the loader's own files or another
+--     mod's saved tables
+-- It still can, as before: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
+-- os.clock/time/date/getenv, reading and writing its own files.
+-- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, so one mod changing a library
+-- function changes it only for itself. The checks below use functions taken before any mod runs, so no mod can bend
+-- them.
+-- A mod that replaces the game's boot script itself isn't a loader mod: the game hands it everything, with or without
+-- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
+-- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
+
+local M = { version = '1.0.0' }
+
+local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
+local collectgarbage = collectgarbage
+local setmetatable, getmetatable = setmetatable, getmetatable
+local s_find, s_match, s_gsub, s_sub, s_lower, s_byte, s_gmatch, s_rep = string.find, string.match, string.gsub,
+  string.sub, string.lower, string.byte, string.gmatch, string.rep
+local s_format = string.format
+local t_concat = table.concat
+local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
+
+-- the file kinds a mod may write, and the Windows device names no file may be called
+local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true }
+local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true }
+for n = 1, 9 do DEVICES['com' .. n] = true; DEVICES['lpt' .. n] = true end
+local LIBS = { 'string', 'table', 'math', 'coroutine', 'bit' }
+local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
+local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
+
+local function copy(t)
+  local c = {}
+  for k, v in pairs(t) do c[k] = v end
+  return c
+end
+
+-- The part of a path after one of my roots, one name at a time. Refused: "..", empty names, names Windows treats as
+-- another file (a trailing dot or space is dropped by Windows, "~" makes 8.3 short names like CHEF_L~1.LOG, ":" opens
+-- an alternate data stream), wildcards and control characters, and device names.
+local function names_of(rest)
+  local names = {}
+  if s_find(rest, ':', 1, true) then return nil, 'a ":" in a file name is off limits' end
+  for name in s_gmatch(rest, '[^\\]+') do
+    if name == '..' then return nil, '".." is off limits' end
+    if name ~= '.' then
+      if s_find(name, '[<>"|%?%*~%c]') then return nil, 'that file name is off limits' end
+      if s_find(name, '[%. ]$') then return nil, 'a name ending in a dot or a space is off limits' end
+      if DEVICES[s_match(name, '^([^%.]*)')] then return nil, 'device names are off limits' end
+      names[#names + 1] = name
+    end
+  end
+  if #names == 0 then return nil, 'not a file' end
+  return names
+end
+
+-- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
+-- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where my files were up to Test 12, or nil),
+-- FILES ('chef_loader'), overrides (compat's xpcall and load)
+function M.install(ctx)
+  local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
+  local real_open = type(io_) == 'table' and io_.open or nil
+  local io_type = type(io_) == 'table' and io_.type or function() return nil end
+  local overrides = ctx.overrides or {}
+  local sb = { denied = 0 }
+  local envs = setmetatable({}, { __mode = 'k' })        -- every mod environment I made -> its mod's name
+
+  local function low(p) return s_lower((s_gsub(p, '/', '\\'))) end
+  local WDIR = ctx.DIR and ctx.DIR ~= '' and low(ctx.DIR) or nil
+  local GDIR = ctx.GAME_DIR and low(ctx.GAME_DIR) or nil
+  local ODIR = ctx.OLD_DIR and low(ctx.OLD_DIR) or nil
+  if ODIR == WDIR then ODIR = nil end
+  local OWN = s_lower(ctx.FILES or 'chef_loader')
+
+  -- for the log: the player's folders as %APPDATA% / %LOCALAPPDATA%, so a log someone attaches to a bug report
+  -- doesn't carry their user name
+  local shown = {}
+  do
+    local ok, a = pcall(os_.getenv, 'APPDATA')
+    if ok and type(a) == 'string' and a ~= '' then shown[#shown + 1] = { low(a), '%APPDATA%' } end
+    local okl, l = pcall(os_.getenv, 'LOCALAPPDATA')
+    if okl and type(l) == 'string' and l ~= '' then shown[#shown + 1] = { low(l), '%LOCALAPPDATA%' } end
+  end
+  local function show(path)
+    if type(path) ~= 'string' then return tostring(path) end
+    local p = low(path)
+    for _, s in ipairs(shown) do
+      if s_sub(p, 1, #s[1]) == s[1] then return s[2] .. s_sub(path, #s[1] + 1) end
+    end
+    if s_match(p, '^%a:\\users\\') then return '<user folder>' .. s_gsub(s_sub(path, 10), '^[^\\/]*', '') end
+    return path
+  end
+  sb.show = show
+
+  -- May a mod open this path in this mode? Returns true, or nil and why.
+  function sb.check(path, mode)
+    if mode == nil then mode = 'r' end
+    if type(path) ~= 'string' or path == '' or #path > 400 or s_find(path, '%z') then return nil, 'not a file path' end
+    if type(mode) ~= 'string' or not (s_match(mode, '^[rwa]%+?b?$') or s_match(mode, '^[rwa]b%+$')) then
+      return nil, 'not a file mode'
+    end
+    local p = low(path)
+    if s_sub(p, 1, 2) == '\\\\' then return nil, 'network and device paths are off limits' end
+    local writes = s_find(mode, '[wa%+]') ~= nil
+    -- which root: the loader's folder, the game's settings folder, my old folder, the game's data folder
+    local root, rest
+    for _, r in ipairs({ WDIR or false, GDIR or false, ODIR or false, 'data\\' }) do
+      if r and s_sub(p, 1, #r) == r and #p > #r then root, rest = r, s_sub(p, #r + 1); break end
+    end
+    if not root then
+      return nil, writes and 'mods write only in the loader\'s folder'
+        or 'mods read only the game\'s settings and data folders and the loader\'s folder'
+    end
+    local names, why = names_of(rest)
+    if not names then return nil, why end
+    local file = names[#names]
+    local ext = s_match(file, '%.(%w+)$')
+    if root == ODIR and not (#names == 1 and ext and MOD_EXT[ext]) then
+      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat files'
+    end
+    if not writes then return true, root, names, ext end
+    if root ~= WDIR then return nil, 'mods write only in the loader\'s folder' end
+    if #names ~= 1 then return nil, 'mods write only straight into the loader\'s folder, not below it' end
+    if not (ext and MOD_EXT[ext]) then return nil, 'mods write only .log .txt .json .csv .dat files' end
+    if not s_match(file, '^[%w_%-%.]+$') then return nil, 'file names are letters, digits, _ - and .' end
+    if s_sub(file, 1, #OWN) == OWN or s_sub(file, 1, 11) == 'chef_loader' or s_sub(file, 1, 10) == 'chef_data_' then
+      return nil, 'the loader\'s own files and saved tables are off limits (chef.save_table saves a table)'
+    end
+    return true, root, names, ext
+  end
+
+  local function blocked(name, instead)
+    return function() error(name .. ' is off limits to Chef Shared Loader mods' .. (instead or ''), 2) end
+  end
+
+  -- what every environment falls back on: the few names I take away or replace, then the game's globals
+  local base = {
+    dofile = blocked('dofile'), loadfile = blocked('loadfile'), module = blocked('module'),
+    collectgarbage = function(opt, arg)
+      if opt == nil or opt == 'collect' or opt == 'count' or opt == 'step' then return collectgarbage(opt, arg) end
+      return 0
+    end,
+  }
+  local string_mt = getmetatable('')
+  setmetatable(base, { __index = G, __metatable = 'locked' })
+  local env_mt = { __index = base, __metatable = 'locked' }
+
+  -- One mod's environment. owner: its name, for the log.
+  function sb.env(owner)
+    local env = setmetatable({}, env_mt)
+    envs[env] = owner
+    env._G = env
+    for _, n in ipairs(LIBS) do
+      local lib = rawget(G, n)
+      if type(lib) == 'table' then env[n] = copy(lib) end
+    end
+    local string_view = { __index = env.string }     -- getmetatable('') gives this, not the game's
+    env.getmetatable = function(o)
+      local mt = getmetatable(o)
+      if mt ~= nil and mt == string_mt then return string_view end
+      if type(o) == 'userdata' and io_type(o) then return nil end   -- file handles: their methods are shared
+      return mt
+    end
+    local os_c = {}
+    if type(os_) == 'table' then for _, k in ipairs(OS_KEEP) do os_c[k] = os_[k] end end
+    env.os = os_c
+    env.package = { loaded = {}, preload = {}, path = '', cpath = '' }
+
+    -- files: through my check, and the first denials of each mod go to the log (a mod reaching for something it
+    -- shouldn't is worth seeing)
+    local said = 0
+    local function deny(what, path, mode, why)
+      sb.denied = sb.denied + 1
+      said = said + 1
+      if said <= 10 and ctx.log then
+        ctx.log(s_format('blocked: %s tried to %s %s (%s): %s', owner, what, show(path), tostring(mode), why))
+      end
+      return nil, why
+    end
+    local io_c = {
+      open = function(path, mode)
+        local ok, root, names, ext = sb.check(path, mode)
+        if not ok then return deny('open', path, mode, root) end
+        if not real_open then return nil, 'no io' end
+        local f, err, code = real_open(path, mode or 'r')
+        -- (Test 13) a mod's own file read from the loader's folder that isn't there yet comes from the old folder
+        -- (%LOCALAPPDATA%, up to Test 12) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
+        -- its next write lands in the new place
+        if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
+          and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then
+          local g = real_open(ctx.OLD_DIR .. names[1], mode or 'r')
+          if g then return g end
+        end
+        return f, err, code
+      end,
+      lines = function(path)
+        if path == nil then return io_.lines() end
+        local ok, why = sb.check(path, 'r')
+        if not ok then deny('read', path, 'r', why); error(why, 2) end
+        return io_.lines(path)
+      end,
+      type = io_type,
+      close = function(f) if f ~= nil then return f:close() end end,
+      write = function(...) return io_.write(...) end,
+      popen = blocked('io.popen'), tmpfile = blocked('io.tmpfile'), input = blocked('io.input'),
+      output = blocked('io.output'),
+    }
+    env.io = io_c
+
+    -- code it loads: text only, and it lands in this environment (or one the mod hands load)
+    env.loadstring = function(s, name)
+      if type(s) == 'string' and s_byte(s, 1) == 27 then return nil, 'compiled Lua (bytecode) is off limits' end
+      local f, err = real_loadstring(s, name)
+      if f then real_setfenv(f, env) end
+      return f, err
+    end
+    env.load = function(chunk, name, mode, e)
+      if type(chunk) == 'function' then
+        local parts = {}
+        while true do
+          local piece = chunk()
+          if piece == nil or piece == '' then break end
+          if type(piece) ~= 'string' then return nil, 'reader function must return a string' end
+          parts[#parts + 1] = piece
+        end
+        chunk = t_concat(parts)
+      end
+      if type(chunk) ~= 'string' then return nil, 'bad argument #1 to \'load\' (string or function expected)' end
+      if mode == 'b' then return nil, 'attempt to load a text chunk (mode is \'b\')' end
+      if s_byte(chunk, 1) == 27 then return nil, 'compiled Lua (bytecode) is off limits' end
+      if e ~= nil and type(e) ~= 'table' then return nil, 'bad argument #4 to \'load\' (table expected)' end
+      local f, err = real_loadstring(chunk, name)
+      if f then real_setfenv(f, e or env) end
+      return f, err
+    end
+    if overrides.xpcall then env.xpcall = overrides.xpcall end
+
+    -- getfenv/setfenv: a function of the game's, the loader's or another mod's reads as this mod's own environment,
+    -- and can't be changed. Levels count one more here (this wrapper is a level of its own).
+    local function foreign(e) return e == G or (envs[e] ~= nil and e ~= env) end
+    env.getfenv = function(f)
+      if f == nil then f = 1 end
+      if type(f) == 'number' then
+        if f == 0 then return env end
+        if f < 0 then error('bad argument #1 to \'getfenv\' (level must be non-negative)', 2) end
+        local e = real_getfenv(f + 1)
+        if foreign(e) then return env end
+        return e
+      end
+      if type(f) ~= 'function' then error('bad argument #1 to \'getfenv\' (number or function expected)', 2) end
+      local e = real_getfenv(f)
+      if foreign(e) then return env end
+      return e
+    end
+    env.setfenv = function(f, t)
+      if type(t) ~= 'table' then error('bad argument #2 to \'setfenv\' (table expected)', 2) end
+      if type(f) == 'number' then
+        if f <= 0 then error('setfenv on the whole game is off limits to Chef Shared Loader mods', 2) end
+        if foreign(real_getfenv(f + 1)) then error('that function isn\'t this mod\'s (off limits)', 2) end
+        return real_setfenv(f + 1, t)
+      end
+      if type(f) ~= 'function' then error('bad argument #1 to \'setfenv\' (number or function expected)', 2) end
+      if foreign(real_getfenv(f)) then error('that function isn\'t this mod\'s (off limits)', 2) end
+      return real_setfenv(f, t)
+    end
+
+    -- debug: the traceback and getinfo (without the function itself), nothing that reaches locals or upvalues
+    local d = {}
+    if type(dbg) == 'table' then
+      if dbg.traceback then d.traceback = function(...) return dbg.traceback(...) end end
+      if dbg.getinfo then
+        d.getinfo = function(f, what)
+          if type(f) == 'number' then f = f + 1 end
+          local info = (what ~= nil) and dbg.getinfo(f, what) or dbg.getinfo(f)
+          if type(info) == 'table' then info.func = nil end
+          return info
+        end
+      end
+    end
+    env.debug = d
+
+    env.require = function(name)
+      local lib = REQUIRE_OK[name]
+      if lib and env[lib] ~= nil then return env[lib] end
+      if name == 'table.new' or name == 'table.clear' then
+        local fn = env.table and env.table[s_sub(name, 7)]
+        if fn then return fn end
+      end
+      error('require(\'' .. tostring(name) .. '\') is off limits to Chef Shared Loader mods (another mod\'s exports: chef.require)', 2)
+    end
+    return env
+  end
+
+  -- is this table a mod environment of mine? (the loader's own checks)
+  function sb.owner_of(t) return envs[t] end
+  return sb
+end
+return M
+end)()
+-- @@END sandbox.lua@@
 local overrides = {}                     -- what each addon's environment gets on top of G (filled at start-up)
 
 -- ------------------------------------------------------------------ files
--- At the root of %LOCALAPPDATA%: every player has it, and the game's Lua can't make a folder (only a command window
--- could, and I won't start one under Easy Anti-Cheat). A folder each player would have to make by hand isn't one a mod
--- can count on.
+-- In the game's own folder, %APPDATA%\Arrowhead\Helldivers2: every player has it (the game keeps its settings there),
+-- the game's Lua can't make a folder of its own (only a command window could, and I won't start one under Easy
+-- Anti-Cheat), and Mod Lag Watchdog logs there too. Older builds kept everything at the root of %LOCALAPPDATA%; the
+-- move below brings the files over once. If the game's folder can't be written, %LOCALAPPDATA% it stays.
+-- (services.OLD_DIR / GAME_DIR: fields, not locals, to spare the loader's main function locals.)
 local DIR = ''
 if type(os_) == 'table' and type(os_.getenv) == 'function' then
-  local ok, dir = pcall(os_.getenv, 'LOCALAPPDATA')
-  if ok and type(dir) == 'string' and dir ~= '' then DIR = dir .. '\\' end
+  local okl, ldir = pcall(os_.getenv, 'LOCALAPPDATA')
+  if okl and type(ldir) == 'string' and ldir ~= '' then services.OLD_DIR = ldir .. '\\' end
+  local ok, dir = pcall(os_.getenv, 'APPDATA')
+  if ok and type(dir) == 'string' and dir ~= '' then services.GAME_DIR = dir .. '\\Arrowhead\\Helldivers2\\' end
+  local f = services.GAME_DIR and type(io_) == 'table' and io_.open(services.GAME_DIR .. FILES .. '.log', 'a')
+  if f then f:close(); DIR = services.GAME_DIR else DIR = services.OLD_DIR or '' end
 end
 local LOG_FILE, STATE_FILE, TRACE_FILE = DIR .. FILES .. '.log', DIR .. FILES .. '_state.txt', DIR .. FILES .. '_trace.txt'
 
@@ -2200,6 +2548,50 @@ local function log(text)
   if log_written > LOG_CAP then line = line .. '\n(the log is full for this launch)' end
   if log_file then pcall(log_file.write, log_file, line .. '\n'); pcall(log_file.flush, log_file)
   elseif type(print) == 'function' then pcall(print, '[' .. LOADER .. '] ' .. line) end
+end
+
+-- (Test 13) The one-time move from %LOCALAPPDATA%: the crash state, the saved settings, dev mode's list and the last
+-- launch's breadcrumbs (before I read them below). Each is copied, checked and then removed from the old place; a file
+-- already in the new place wins. The old log stays where it is, with a last line saying where the log went. Saved
+-- tables (chef_data_*.lua) are picked up from the old place by chef.load_table the first time a mod asks.
+do
+  local old = services.OLD_DIR
+  if old and DIR ~= '' and old ~= DIR then
+    local moved = {}
+    for _, suffix in ipairs({ '_state.txt', '_settings.txt', '_dev.txt', '_trace.txt' }) do
+      local from, to = old .. FILES .. suffix, DIR .. FILES .. suffix
+      local f = open(from, 'rb')
+      if f then
+        local text = f:read('*a') or ''
+        f:close()
+        local g = open(to, 'rb')
+        local done = false
+        if g then g:close(); done = true
+        else
+          local w = open(to, 'wb')
+          if w then
+            local okw = pcall(w.write, w, text)
+            w:close()
+            local r = open(to, 'rb')
+            if r then done = okw and r:read('*a') == text; r:close() end
+          end
+        end
+        if done then
+          if type(os_) == 'table' then pcall(os_.remove, from) end
+          moved[#moved + 1] = FILES .. suffix
+        end
+      end
+    end
+    if #moved > 0 then
+      services.MOVED = moved
+      local l = open(old .. FILES .. '.log', 'a')
+      if l then
+        pcall(l.write, l, fmt('%s %s moved its files to %%APPDATA%%\\Arrowhead\\Helldivers2 (%s); this log is no longer written\n',
+          now(), LOADER, concat(moved, ', ')))
+        l:close()
+      end
+    end
+  end
 end
 
 -- ------------------------------------------------------------------ crash learning
@@ -2289,6 +2681,9 @@ local trace = open(TRACE_FILE, 'w')
 local tr = { bytes = 0, firsts = {}, last_tick = -1, cap = 200 * 1024 }
 local held = {}                          -- the per-frame jobs open now: key -> the second it opened
 local function crumb(line)
+  -- one breadcrumb is one line: a mod's text in a key (chef.call_kind's kind) can't add lines of its own and make the
+  -- next launch blame another mod or a loader job
+  if line:find('%c') then line = line:gsub('%c', '?') end
   if not trace then return end
   local c2 = sub(line, 1, 2)
   if c2 == '> ' then tr.firsts[#tr.firsts + 1] = sub(line, 3)
@@ -2416,8 +2811,11 @@ local function read_patch(f, name)
             local src = f:read(size - 8) or ''
             if #src == size - 8 then
               local list = kind == 'Addon' and found_addons or (kind == 'Boot' and found_named or found_options)
-              scan.seq = scan.seq + 1        -- the order found, so two copies of one mod always resolve the same way
-              list[#list + 1] = { name = mod, file = name:match('[^/]+$'), src = src, seq = scan.seq }
+              -- the patch number (when two patches carry the same mod, the higher one wins, below) and the order
+              -- found (a tie-break, so two copies always resolve the same way)
+              scan.seq = scan.seq + 1
+              list[#list + 1] = { name = mod, file = name:match('[^/]+$'), src = src, seq = scan.seq,
+                                  patch = tonumber(name:match('(%d+)$')) or 0 }
             end
           end
         end
@@ -2443,11 +2841,14 @@ discover = function()
     end
   end
   scan.ms = (clock() - t0) * 1000
-  -- my own mods start first, then everyone else's by name; two copies of one name in the order found (the first runs)
+  -- my own mods start first, then everyone else's by name. Two copies of one mod (an old version left installed next
+  -- to the new one): the higher patch number comes first and is the one that runs, the same rule the game uses for its
+  -- own files (the last one deployed wins); the same patch twice falls back to the order found.
   local function before(a, b)
     local ma, mb = a.name:match('^mods/chef/') ~= nil, b.name:match('^mods/chef/') ~= nil
     if ma ~= mb then return ma end
     if a.name ~= b.name then return a.name < b.name end
+    if (a.patch or 0) ~= (b.patch or 0) then return (a.patch or 0) > (b.patch or 0) end
     return (a.seq or 0) < (b.seq or 0)
   end
   sort(found_addons, before)
@@ -3497,6 +3898,7 @@ local addons, notices = {}, {}
 -- the shared services every mod gets (src/chef_loader/services.lua): after_startup, capabilities, saved settings, shared
 -- values and events, require, key bindings, the options menu, the Bingus look-alikes, dev mode (test builds)
 local svc = services.install({ log = log, guarded = guarded, fn_of = fn_of, open = open, DIR = DIR, FILES = FILES, LOADER = LOADER,
+  OLD_DIR = services.OLD_DIR ~= DIR and services.OLD_DIR or nil,
   VERSION = VERSION, ALLOW = ALLOW, TOP = TOP_FROM, world = world, color = color, rect = rect, text = text, text_width = text_width,
   screen = function() draw_world_reset(); return draw.w, draw.h end,
   key_pressed = function(name)
@@ -3760,9 +4162,13 @@ function starter.addon(r)
     if not chunk then
       a.on = false
       log('could not compile ' .. a.name .. ': ' .. tostring(cerr))
+    elseif not svc.sandbox then
+      -- (Test 13) no locked-down space, no start: a mod never runs with the game's whole Lua by mistake
+      a.on = false
+      log('not started: ' .. a.name .. ' (the locked-down space for mods could not be set up)')
     else
-      local env = setmetatable({}, { __index = G })
-      for k, v in pairs(overrides) do env[k] = v end
+      -- (Test 13) its own locked-down space (src/chef_loader/sandbox.lua)
+      local env = svc.sandbox.env(a.name)
       setfenv(chunk, env)
       crumb('> ' .. a.name .. '|start')
       local ok, m = pcall(chunk, make_api(a))
@@ -3787,9 +4193,9 @@ local function start_addons()
   local seen = {}
   for _, r in ipairs(services.order(found_addons)) do
     if seen[r.name] then
-      log('skipped a second copy of ' .. r.name .. ' (' .. r.file .. ')')
+      log(fmt('two copies of %s: running the one deployed last (%s), skipped %s', r.name, seen[r.name], r.file))
     else
-      seen[r.name] = true
+      seen[r.name] = r.file
       starter.addon(r)
     end
   end
@@ -3896,6 +4302,46 @@ svc.ctx.boots = boots
 -- `boot`): then it never replaces mine and runs whatever order the mods deploy in. It runs like the others below
 -- (init/update/render/shutdown in its own environment), plus: a `chef` table of helpers (with its options), its log
 -- lines under its name, and if it ends the game it stays off (named on screen) until the mod is updated, as an addon.
+-- (Test 12) An environment alone doesn't hold a boot script in: on Lua 5.1 a function made by loadstring (or load, or
+-- dofile) gets the game's globals, not the environment of the script that made it. A boot script that loads code
+-- (Boot Mod Loader runs the game's own boot that way) wrote init/update/render/shutdown straight into the game's
+-- globals and replaced mine, and from then on I never ran again. So every other mod's boot script gets its own
+-- loadstring, load and dofile, and whatever they load lands in that script's environment too (unless it hands load an
+-- environment). (Test 13: HD2-Boot scripts get the same from the locked-down space in sandbox.lua instead.)
+function starter.seal(env)
+  env.loadstring = function(s, name)
+    local f, err = loadstring(s, name)
+    if f then setfenv(f, env) end
+    return f, err
+  end
+  local load_ = rawget(env, 'load') or rawget(G, 'load')   -- my compat load (boot-style scripts get it) or the game's
+  if type(load_) == 'function' then
+    env.load = function(chunk, name, mode, e)
+      local f, err = load_(chunk, name, mode, e)
+      if f and e == nil then setfenv(f, env) end
+      return f, err
+    end
+  end
+  if type(rawget(G, 'dofile')) == 'function' and type(io_) == 'table' then
+    env.dofile = function(path)
+      local fh = io_.open(path, 'rb')
+      if not fh then error('cannot open ' .. tostring(path), 2) end
+      local text = fh:read('*a'); fh:close()
+      local f, err = loadstring(text or '', '@' .. tostring(path))
+      if not f then error(err, 2) end
+      setfenv(f, env)
+      return f()
+    end
+  end
+end
+-- (Test 12) Another mod loader's boot script (it reads the deployed patches for "-- HD2-Addon:" mods itself, like
+-- Boot Mod Loader) isn't run: its init would start every addon a second time, outside my crash guard and without the
+-- `chef` helpers my mods need. Copies of this loader are already left out when the patches are read.
+function starter.other_loader(src)
+  if src:find('__boot_mod_loader', 1, true) then return true end
+  local wants_addons = src:find('HD2%-Addon', 1, true) or src:find('HD2-Addon', 1, true)
+  return (wants_addons and src:find('9ba626afa44a3aa3', 1, true)) and true or false
+end
 function starter.named_one(r)
   local fp = fingerprint(r.src)
   local short = r.name:match('([^/]+)$')
@@ -3922,9 +4368,12 @@ function starter.named_one(r)
     log('could not compile ' .. r.name .. ': ' .. tostring(cerr))
     return
   end
-  local env = setmetatable({}, { __index = G })
-  for k, v in pairs(overrides) do env[k] = v end
-  env._G = env
+  if not svc.sandbox then
+    log('not started: ' .. r.name .. ' (the locked-down space for mods could not be set up)')
+    return
+  end
+  -- the same locked-down space as an addon (its own _G, loadstring, load; src/chef_loader/sandbox.lua)
+  local env = svc.sandbox.env(r.name)
   local a = { name = r.name, short = short, file = r.file, fp = fp, on = true, errors = 0, ms = 0, max_ms = 0 }
   a.options = options_for(r.name)
   env.chef = make_api(a)
@@ -3942,9 +4391,9 @@ local function start_named()
   local seen = {}
   for _, r in ipairs(services.order(found_named)) do
     if seen[r.name] then
-      log('skipped a second copy of ' .. r.name .. ' (' .. r.file .. ')')
+      log(fmt('two copies of %s: running the one deployed last (%s), skipped %s', r.name, seen[r.name], r.file))
     else
-      seen[r.name] = true
+      seen[r.name] = r.file
       starter.named_one(r)
     end
   end
@@ -3990,6 +4439,12 @@ local function start_boots()
     local title = (b.src:match('^%-%-%s*([^\r\n]+)') or 'no title'):sub(1, 90)
     if seen[fp] then
       log(fmt('another copy of a boot script I already run (%s): skipped', b.file))
+    elseif starter.other_loader(b.src) then
+      seen[fp] = true
+      log(fmt('another mod loader\'s boot script in %s (%s): not run, it would start every addon a second time. ' ..
+        'Only one loader can run: remove that mod (deployed after me, it would run instead of me)', b.file, title))
+      local short = (title:match('^([^%(%.;]+)') or 'another loader'):gsub('%s+$', ''):sub(1, 24)
+      notices[#notices + 1] = { text = 'OTHER LOADER NOT RUN: ' .. short:upper() .. ' (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
     else
       seen[fp] = true
       local chunk, cerr = loadstring(b.src, '@boot (' .. b.file .. ')')
@@ -4001,13 +4456,17 @@ local function start_boots()
       else
         local env = setmetatable({}, { __index = G })
         env._G = env
+        starter.seal(env)
         setfenv(chunk, env)
         local ok, err = guarded(owner, 'load', chunk)
         if err ~= nil and ok == nil then
           log(fmt('the boot script in %s failed to run: %s', b.file, tostring(err)))
         else
           boots[#boots + 1] = { owner = owner, file = b.file, env = env, errors = 0, on = true }
-          log(fmt('running another mod\'s boot script too: %s (%s)', b.file, title))
+          -- (Test 13) full access, as the game would give it if it were deployed after me: locking it down would only
+          -- break it (the file-mod installer swaps game files), and a boot that wants everything can take it anyway
+          log(fmt('running another mod\'s boot script too, with full access as the game gives any boot script: %s (%s)',
+            b.file, title))
         end
       end
     end
@@ -4142,6 +4601,21 @@ for _, r in ipairs(found_addons) do
 end
 ok, err = pcall(svc.install_shims, G)
 if not ok then log('the look-alikes failed: ' .. tostring(err)) end
+-- the locked-down space every loader mod runs in (after the compat parts and the look-alikes, which mods reach
+-- through it); if it can't be set up, no loader mod starts
+do
+  local bok, sb = pcall(services.sandbox.install, { G = G, io = io_, os = os_, debug = rawget(G, 'debug'), log = log,
+    DIR = DIR, GAME_DIR = services.GAME_DIR, OLD_DIR = services.OLD_DIR, FILES = FILES, overrides = overrides })
+  if bok and type(sb) == 'table' then
+    svc.sandbox = sb
+    log('mods run locked down: no programs, no native code or bytecode, files only in the game\'s folders (sandbox '
+      .. services.sandbox.version .. ')')
+  else
+    log('the locked-down space for mods failed, so no loader mod starts: ' .. tostring(sb))
+    notices[#notices + 1] = { text = 'NO MODS STARTED (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
+  end
+  if services.MOVED then log('moved from %LOCALAPPDATA% to %APPDATA%\\Arrowhead\\Helldivers2: ' .. concat(services.MOVED, ', ')) end
+end
 start_addons()
 ok, err = pcall(start_named)
 if not ok then log('starting the boot-style scripts failed: ' .. tostring(err)) end
