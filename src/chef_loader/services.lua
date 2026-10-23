@@ -1,6 +1,6 @@
 -- Chef Shared Loader: shared services
--- What every mod gets on top of the basic helpers, so mods can lean on the loader the way they leaned on Bingus Shared
--- Loader and its menus before the game went to plain Lua 5.1:
+-- What every mod gets on top of the basic helpers, so a mod doesn't have to build these
+-- itself:
 --   * after_startup(fn), a read-only capabilities table, has(name)
 --   * a log file of its own per mod (own_log), saved settings per mod (one file next to the log), shared values and
 --     events between mods, require() of another mod's exports with version requirements ("-- HD2-Requires:" lines)
@@ -32,7 +32,7 @@ function M.version_at_least(have, want)
   return true
 end
 
--- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 0.2"; "chef-loader" works too), any number of lines near the top
+-- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 1.0", also "chef-loader"), lines near the top
 function M.requirements(src)
   local out = {}
   for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)%s*>?=?%s*([%d%.]*)') do
@@ -317,7 +317,7 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
-    -- a log of the same name in the old folder (%LOCALAPPDATA%, in older builds) gets one last line saying
+    -- a log of the same name in the old folder (%LOCALAPPDATA%) gets one last line saying
     -- where the log went, once
     if ctx.OLD_DIR then
       local old = ctx.OLD_DIR .. name .. '.log'
@@ -420,7 +420,7 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
-    -- where the loader's folder was in older builds (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- the loader's old folder (%LOCALAPPDATA%), so a mod can pick up its own old files
     -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
@@ -591,7 +591,7 @@ function M.install(ctx)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and pressed('enter') then menu.capture = r end
   end
-  -- The look (the same as the loader's release art): a dark panel in a yellow frame, the title on a yellow bar, the
+  -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
   -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
   local function menu_draw(ls)
     local w, h = ctx.screen()
@@ -692,9 +692,9 @@ function M.install(ctx)
     menu_draw(ls)
   end
 
-  -- ---------------------------------------------------------------- the Bingus Shared Loader / Mod Options Menu look-alikes
-  -- Only when nothing of that name exists. Lua-only mods written for them (the parts that need ffi can't come back) see
-  -- what they used: CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
+  -- ---------------------------------------------- the CowboyBingusModLoader / ModOptionsMenu look-alikes
+  -- Only when nothing of that name exists. A Lua-only mod that calls these globals gets:
+  -- CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
   -- register_option(id, spec) / get / set / on_change / ready, with its rows in this menu under spec.mod.
   function svc.install_shims(G)
     if rawget(G, 'CowboyBingusModLoader') == nil then

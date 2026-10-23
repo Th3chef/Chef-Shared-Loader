@@ -164,7 +164,7 @@ function M.install(ctx, L)
   local log, guarded, fn_of, api, xyz = ctx.log, ctx.guarded, ctx.fn_of, L.api, L.xyz
   local world = ctx.world
 
-  -- the calls known to end the game (Boot Probe 2, Oct 21 2026): refused before they reach the engine
+  -- the calls known to end the game, refused before they reach the engine:
   -- runtime-built units (not a unit file; e.g. #ID[46cab355bd8d4d37], about 1,400 a mission): asking their position,
   -- rotation or meshes, or setting them, ends the game. The set is the loader's, so its unit scan skips them too.
   local BAD_KINDS = L.bad_kinds
@@ -174,8 +174,8 @@ function M.install(ctx, L)
                       ['Unit.set_local_rotation'] = true, ['Unit.set_local_scale'] = true,
                       ['Unit.set_local_pose'] = true, ['Unit.set_mesh_visibility'] = true }
   -- (and every Unit.teleport_..., below)
-  -- whole engine tables that aren't for mods: the Localizer (Localizer.lookup ended the game in my tests; the game
-  -- doesn't use the engine's Localizer, so there's nothing to look up), native code and the network
+  -- whole engine tables that aren't for mods: the Localizer (Localizer.lookup ends the game, and the game doesn't use
+  -- the engine's Localizer, so there's nothing to look up), native code and the network
   local NEVER_TABLES = { Localizer = 'it ends the game', PluginManager = 'native code', Http = 'the network',
                          WebSocket = 'the network' }
   -- and single calls: writing other players' game
@@ -887,7 +887,7 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
-      -- the saved tables of older builds were in %LOCALAPPDATA%: read from there until the mod saves again
+      -- a table saved in the old folder (%LOCALAPPDATA%) is read from there until the mod saves again
       if not f and ctx.OLD_DIR then
         local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
         f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
@@ -948,7 +948,7 @@ function M.install(ctx, L)
     for _, b in ipairs(L.boots()) do b.pm_base, b.pm_max = b.pm_ms or 0, 0 end
   end
   local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
-  -- a boot script's name: its first comment line up to a bracket ("HD2 file-mod installer 1"), else its patch file
+  -- a boot script's name: its first comment line up to a bracket, else its patch file
   local function boot_name(b)
     local t = b.title and b.title:match('^([^%(%[]+)')
     t = t and t:gsub('%s+$', '') or ''
@@ -966,8 +966,8 @@ function M.install(ctx, L)
     for _, b in ipairs(L.boots()) do
       local avg = ((b.pm_ms or 0) - (b.pm_base or 0)) / n
       total = total + avg
-      -- the HD2 file-mod installer (a helper boot the settings-file mods share, not a mod a player picks) gets no row
-      -- of its own; its time still counts in All Mods
+      -- a file-mod installer boot (a helper several mods ship, not a mod a player picks) gets no row of its own; its
+      -- time still counts in All Mods
       local name = boot_name(b)
       if not name:lower():find('file%-mod installer') then
         rows[#rows + 1] = { name = name, avg = avg, worst = b.pm_max or 0, on = b.on ~= false }

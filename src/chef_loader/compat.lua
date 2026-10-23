@@ -1,5 +1,5 @@
 -- Chef Shared Loader: compat layer
--- I add back the pure-Lua parts of LuaJIT that mods lean on, for a game that now runs plain Lua 5.1.
+-- I add back the pure-Lua parts of LuaJIT that mods lean on, for the game's plain Lua 5.1.
 -- I only fill in what's missing: if the game still has LuaJIT's own bit library, I leave it alone.
 -- What a script can't bring back: ffi, the JIT compiler and LuaJIT bytecode. Those need native code.
 -- This file sticks to Lua 5.1 syntax on purpose (no goto, no \x escapes, no LL literals, no bit ops).
@@ -204,7 +204,7 @@ local function xpcall_args(f, handler, ...)
 end
 
 -- LuaJIT's load takes a string or a reader function (plus a mode and an environment, 5.2 style).
--- The game has no load at all (7.2.0 probe: has.load=no), so I build it on loadstring alone: a reader's
+-- The game has no load at all, so I build it on loadstring alone: a reader's
 -- pieces get joined first, then it's the same as a string.
 local loadstring, setfenv = loadstring, setfenv
 local function load_compat(chunk, name, mode, env)

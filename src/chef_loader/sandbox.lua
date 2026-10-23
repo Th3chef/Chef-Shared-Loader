@@ -9,7 +9,7 @@
 --   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
 --     and writes only .log .txt .json .csv .dat files in the loader's folder, never the loader's own files or another
 --     mod's saved tables
--- It still can, as before: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
+-- It still can use: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
 -- os.clock/time/date/getenv, reading and writing its own files.
 -- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, so one mod changing a library
 -- function changes it only for itself. The checks below use functions taken before any mod runs, so no mod can bend
@@ -63,7 +63,7 @@ local function names_of(rest)
 end
 
 -- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
--- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where older builds kept my files, or nil),
+-- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, my files' old folder, or nil),
 -- FILES ('chef_loader'), overrides (compat's xpcall and load)
 function M.install(ctx)
   local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
@@ -192,8 +192,8 @@ function M.install(ctx)
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
         -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
-        -- (%LOCALAPPDATA%, in older builds) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
-        -- its next write lands in the new place
+        -- (%LOCALAPPDATA%) if it's there: a mod's saved settings carry over,
+        -- and its next write lands in the new place
         if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
           and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then
           local g = real_open(ctx.OLD_DIR .. names[1], mode or 'r')
