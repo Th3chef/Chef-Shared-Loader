@@ -4,7 +4,7 @@
 --   * the game runs `boot` at start-up and calls its init/update/render/shutdown; its own boot does nothing
 --   * Lua can read the deployed patch files (io), so I find addons myself: Lua resources whose text starts with
 --     "-- HD2-Addon: mods/<author>/<name>", option resources starting with "-- HD2-Options: mods/<author>/<name>",
---     and boot-style scripts starting with "-- HD2-Boot: mods/<author>/<name>" (0.2.0: open to every mod author; see
+--     and boot-style scripts starting with "-- HD2-Boot: mods/<author>/<name>" (open to every mod author; see
 --     docs/MODDING.md in the source kit)
 --   * loadstring runs them; every addon gets its own environment and a `chef` table of helpers
 --   * some engine calls crash the whole game (a null read, not a Lua error) when given the wrong kind of unit or
@@ -35,7 +35,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-]+$' --@@ALLOW@@ any author's mods/<author>/<name> (mine still start first)
-local VERSION = '0.2.0'
+local VERSION = '1.0.0'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
@@ -561,7 +561,7 @@ end
 -- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only
 local function plain(s)
   s = tostring(s or ''):upper()
-  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' '))
+  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> ]', ' '))
 end
 
 function M.install(ctx)
@@ -815,7 +815,7 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
-    -- (Test 13) a log of the same name in the old folder (%LOCALAPPDATA%, up to Test 12) gets one last line saying
+    -- a log of the same name in the old folder (%LOCALAPPDATA%, in older builds) gets one last line saying
     -- where the log went, once
     if ctx.OLD_DIR then
       local old = ctx.OLD_DIR .. name .. '.log'
@@ -918,7 +918,7 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
-    -- (Test 13) where the loader's folder was up to Test 12 (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- where the loader's folder was in older builds (%LOCALAPPDATA%), so a mod can pick up its own old files
     -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
@@ -939,7 +939,11 @@ function M.install(ctx)
   end
 
   -- ---------------------------------------------------------------- the options menu (drawn over everything)
-  local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false }
+  -- Two levels: the mods (in alphabetical order), then the options of the one picked (in the mod's own order). A search
+  -- shows every match across the mods at once. menu.group: the mod open now (nil: the list); menu.back: where the
+  -- list's cursor was, so Backspace returns to it. (Escape closes the whole menu; Backspace goes back one level, so
+  -- going back never touches the game's own Escape menu.)
+  local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false, group = nil, back = 1 }
   local loader_mod = '_loader'
   local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu' })
   local reload_key = nil
@@ -951,15 +955,31 @@ function M.install(ctx)
   end
   function svc.set_row(r, v) set_row(r, v) end
   function svc.menu_key_name() return menu_key.value end
-  -- a search typed after '/': a group whose title has it shows whole; else only the rows whose label has it
-  local lines_cache = { ver = -1, search = nil, out = nil }
+  -- the mods with rows, by title in alphabetical order (case ignored; the mod's name breaks a tie)
+  local function sorted_groups()
+    local gs = {}
+    for _, g in ipairs(groups) do if #g.rows > 0 then gs[#gs + 1] = g end end
+    table.sort(gs, function(a, b)
+      local ta, tb = text_of(a.title):lower(), text_of(b.title):lower()
+      if ta ~= tb then return ta < tb end
+      return a.mod < b.mod
+    end)
+    return gs
+  end
+  -- the lines shown: the list of mods; the open mod's options; or, with a search typed after '/', every mod whose
+  -- title has it (whole) and every option whose label has it, under its mod's title
+  local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
   local function lines()
-    if lines_cache.ver == ver.layout and lines_cache.search == menu.search then return lines_cache.out end
+    if lines_cache.ver == ver.layout and lines_cache.search == menu.search and lines_cache.group == menu.group then
+      return lines_cache.out
+    end
     local out = {}
     local q = menu.search ~= '' and menu.search or nil
-    for _, g in ipairs(groups) do
-      if #g.rows > 0 then
-        local whole = not q or text_of(g.title):lower():find(q, 1, true) ~= nil
+    -- every screen under the list starts with a Back row (to the list of mods)
+    if q or menu.group then out[1] = { back = true, text = '< BACK' } end
+    if q then
+      for _, g in ipairs(sorted_groups()) do
+        local whole = text_of(g.title):lower():find(q, 1, true) ~= nil
         local rows = {}
         for _, r in ipairs(g.rows) do
           if whole or text_of(r.spec.label or r.id):lower():find(q, 1, true) then rows[#rows + 1] = r end
@@ -969,8 +989,12 @@ function M.install(ctx)
           for _, r in ipairs(rows) do out[#out + 1] = { row = r } end
         end
       end
+    elseif menu.group then
+      for _, r in ipairs(menu.group.rows) do out[#out + 1] = { row = r } end
+    else
+      for _, g in ipairs(sorted_groups()) do out[#out + 1] = { pick = g, text = g.title } end
     end
-    lines_cache.ver, lines_cache.search, lines_cache.out = ver.layout, menu.search, out
+    lines_cache.ver, lines_cache.search, lines_cache.group, lines_cache.out = ver.layout, menu.search, menu.group, out
     return out
   end
   local function value_text(r, users)
@@ -1004,16 +1028,22 @@ function M.install(ctx)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 1, 1 end
+      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 2, 1 end
+      if menu.typing then menu.group = nil end
       return false
     end
     for ch in typed:gmatch('[%w ]') do
-      if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 1, 1 end
+      if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 1, 1 end
+    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
     if pressed('enter') then menu.typing = false end
     if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
     return true
+  end
+  -- back to the list of mods, where its cursor was (the Back row, or Backspace)
+  local function go_back()
+    if menu.group then menu.sel, menu.top = menu.back, 1 else menu.sel, menu.top = 1, 1 end
+    menu.group, menu.search = nil, ''
   end
   local function menu_input(ls)
     if menu.capture then
@@ -1037,11 +1067,20 @@ function M.install(ctx)
     elseif pressed('page down') then for _ = 1, 8 do step(1) end
     elseif pressed('page up') then for _ = 1, 8 do step(-1) end end
     local l = ls[menu.sel]
+    -- a mod in the list: Enter (or Right) opens its options, the cursor on its first option (Back is just above it)
+    if l and l.pick then
+      if pressed('enter') or pressed('right') then menu.back, menu.group, menu.sel, menu.top = menu.sel, l.pick, 2, 1 end
+      return
+    end
+    if l and l.back then
+      if pressed('enter') or pressed('left') then go_back() end
+      return
+    end
     local r = l and l.row
     if not r then return end
     local s = r.spec
     local dir = pressed('right') and 1 or (pressed('left') and -1 or 0)
-    if pressed('backspace') then set_row(r, r.default); return end
+    if pressed('delete') then set_row(r, r.default); return end
     if s.type == 'toggle' and (dir ~= 0 or pressed('enter')) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 then
       local v = r.value + dir
@@ -1050,61 +1089,100 @@ function M.install(ctx)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and pressed('enter') then menu.capture = r end
   end
+  -- The look (the same as the loader's release art): a dark panel in a yellow frame, the title on a yellow bar, the
+  -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
   local function menu_draw(ls)
     local w, h = ctx.screen()
     local px = max(2, floor(h / 540 + 0.5))
     local top = ctx.TOP + 950
-    local rh, cols = 11 * px, 40
-    local pw = (cols * 6 + 6) * px
+    local rh, cols = 12 * px, 40
+    local pw = (cols * 6 + 10) * px
     local x0 = floor(w * 0.05)
-    local visible = max(4, floor((h * 0.7) / rh) - 3)
+    local visible = max(4, floor((h * 0.7) / rh) - 4)
     if menu.sel < menu.top then menu.top = menu.sel elseif menu.sel >= menu.top + visible then menu.top = menu.sel - visible + 1 end
     local shown = min(visible, #ls - menu.top + 1)
-    local ph = (shown + 3) * rh
-    local y0 = floor(h * 0.85)
+    local hb = rh + 2 * px                     -- the title bar
+    local ph = hb + shown * rh + 3 * px + rh + 2 * px
+    local y0 = floor(h * 0.85)                 -- the panel's top edge (y grows upward)
     local col = ctx.color
-    ctx.rect(x0, y0 - ph, pw, ph, col(8, 12, 10, 230), top)
-    ctx.rect(x0, y0 - 2, pw, 2, col(90, 255, 140, 255), top + 1)
-    ctx.text(x0 + 3 * px, y0 - rh + 2 * px, plain(ctx.LOADER .. ' OPTIONS'), px, col(150, 255, 180, 255), top + 2)
-    if menu.typing or menu.search ~= '' then
-      local q = plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
-      ctx.text(x0 + pw - 3 * px - ctx.text_width(q, px), y0 - rh + 2 * px, q, px, col(255, 221, 31, 255), top + 2)
-    end
+    local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
+    local white, green, gray = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255)
+    local tx = 7 * px                          -- the text's left inset
+    local function midy(y, hgt) return y + floor((hgt - 7 * px) / 2) end
+    -- panel, frame, title bar
+    ctx.rect(x0, y0 - ph, pw, ph, col(9, 11, 10, 238), top)
+    local b = max(1, floor(px * 0.75))
+    ctx.rect(x0, y0 - ph, pw, b, yellow, top + 3); ctx.rect(x0, y0 - b, pw, b, yellow, top + 3)
+    ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
+    ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
+    local head = menu.group and text_of(menu.group.title) or (ctx.LOADER .. ' OPTIONS')
+    ctx.text(x0 + tx, midy(y0 - hb, hb), plain(head):sub(1, cols - 8), px, ink, top + 2)
+    local right = (menu.typing or menu.search ~= '') and plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
+      or plain(menu_key.value ~= 'off' and menu_key.value or '')
+    ctx.text(x0 + pw - tx - ctx.text_width(right, px), midy(y0 - hb, hb), right, px, ink, top + 2)
     local users = key_users()
-    local y = y0 - 2 * rh
+    local y = y0 - hb - rh
     for i = menu.top, menu.top + shown - 1 do
       local l = ls[i]
+      local sel = i == menu.sel and not l.head
+      if sel then
+        ctx.rect(x0 + b, y, pw - 2 * b, rh, col(255, 231, 16, 42), top + 1)
+        ctx.rect(x0 + b, y, 2 * px, rh, yellow, top + 2)
+      end
+      local ty = midy(y, rh)
       if l.head then
-        ctx.text(x0 + 3 * px, y + 2 * px, plain(l.text):sub(1, cols - 2), px, col(90, 255, 140, 255), top + 2)
+        ctx.text(x0 + tx, ty, plain(l.text):sub(1, cols - 2), px, yellow, top + 2)
+      elseif l.back then
+        ctx.text(x0 + tx + 2 * px, ty, l.text, px, yellow, top + 2)
+      elseif l.pick then
+        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(l.text)):sub(1, cols - 6), px, white, top + 2)
+        ctx.text(x0 + pw - tx - ctx.text_width('>', px), ty, '>', px, green, top + 2)
       else
         local r = l.row
-        if i == menu.sel then ctx.rect(x0 + px, y, pw - 2 * px, rh, col(40, 70, 50, 230), top + 1) end
-        local label = plain(text_of(r.spec.label or r.id)):sub(1, 24)
-        ctx.text(x0 + 6 * px, y + 2 * px, label, px, col(235, 235, 235, 255), top + 2)
+        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(r.spec.label or r.id)):sub(1, 24), px, white, top + 2)
         local v = plain(value_text(r, users)):sub(1, 14)
-        ctx.text(x0 + pw - 3 * px - ctx.text_width(v, px), y + 2 * px, v, px, col(255, 221, 31, 255), top + 2)
+        local vw = ctx.text_width(v, px)
+        local vx = x0 + pw - tx - vw
+        if r.spec.type == 'key' and menu.capture ~= r then
+          -- a key: a light chip with the key's name in ink
+          ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, white, top + 2)
+          ctx.text(vx, ty, v, px, ink, top + 3)
+        else
+          ctx.text(vx, ty, v, px, (r.spec.type == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green), top + 2)
+        end
       end
       y = y - rh
     end
+    -- the hints under a thin line
+    ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
     local hint = menu.capture and 'PRESS A KEY  ESC CANCEL  DEL NONE'
       or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-      or 'ARROWS PICK/CHANGE  ENTER  BKSP DEFAULT  / SEARCH'
-    ctx.text(x0 + 3 * px, y0 - ph + 2 * px, plain(hint):sub(1, cols), px, col(150, 150, 150, 255), top + 2)
+      or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
+      or 'ARROWS  ENTER OPEN  / SEARCH  F9 CLOSE'
+    ctx.text(x0 + tx, midy(y0 - ph + px, rh), plain(hint):sub(1, cols), px, gray, top + 2)
   end
   local function menu_frame()
     local mk = menu_key.value
+    if menu.open and menu.capture == nil and not menu.typing and pressed('backspace') and (menu.group or menu.search ~= '') then
+      -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
+      go_back()
+      return
+    end
     if menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
       menu.open, menu.typing = false, false
       return
     end
     if not menu.open then
       if mk ~= 'off' and pressed(mk) then
-        menu.open = true
+        -- it always opens on the list of mods
+        menu.open, menu.group, menu.search, menu.sel, menu.top = true, nil, '', 1, 1
         if not menu.said then menu.said = true; log('options menu opened') end
       else
         return
       end
     end
+    -- the open mod stopped and its options went: back to the list
+    if menu.group and #menu.group.rows == 0 then menu.group, menu.sel, menu.top = nil, 1, 1 end
     local typing = menu.capture == nil and search_input()
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
@@ -1126,7 +1204,7 @@ function M.install(ctx)
         after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
         open_log = function(name)
           if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
-          -- (Test 13) never the loader's own log
+          -- never the loader's own log
           if name:lower():find('^chef_loader') or name:lower():find('^' .. ctx.FILES:lower()) then return nil, 'that log is the loader\'s own' end
           return ctx.open(ctx.DIR .. name, 'a')
         end,
@@ -1583,6 +1661,8 @@ function M.install(ctx, L)
     local ms = (L.clock() - t0) * 1000
     a.ms = (a.ms or 0) + ms
     if ms > (a.max_ms or 0) then a.max_ms = ms end
+    a.pm_ms = (a.pm_ms or 0) + ms
+    if ms > (a.pm_max or 0) then a.pm_max = ms end
     if not ok then
       a.timer_errors = (a.timer_errors or 0) + 1
       if a.timer_errors <= 3 then log(fmt('[%s] %s error: %s', a.short, what, tostring(err))) end
@@ -1668,6 +1748,7 @@ function M.install(ctx, L)
     timers_frame(now)
     jobs_frame()
     sweep_made(now)
+    if util.monitor_frame then util.monitor_frame(now) end
   end
   -- a mod's average a frame against its budget, from the loader's status line (once every 10 minutes at most)
   function util.budget_check(a, avg, worst)
@@ -2148,7 +2229,7 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
-      -- (Test 13) up to Test 12 the saved tables were in %LOCALAPPDATA%: read from there until the mod saves again
+      -- the saved tables of older builds were in %LOCALAPPDATA%: read from there until the mod saves again
       if not f and ctx.OLD_DIR then
         local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
         f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
@@ -2157,7 +2238,7 @@ function M.install(ctx, L)
       local text = f:read('*a')
       f:close()
       if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
-      -- (Test 13) text only: compiled Lua can be made to reach outside any environment
+      -- text only: compiled Lua can be made to reach outside any environment
       if text:byte(1) == 27 then return nil, 'not a saved table' end
       local chunk, err = loadstring(text, '=' .. name)
       if not chunk then return nil, tostring(err) end
@@ -2185,6 +2266,122 @@ function M.install(ctx, L)
   -- loader), 2 ms until it's there
   util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
 
+  -- ---------------------------------------------------------------- the performance monitor
+  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
+  -- cost, so a player can see what every mod does to the game. Every mod's time (its hooks, timers and spread work)
+  -- goes into a.pm_ms / a.pm_max as it runs, a boot script's into b.pm_ms, and the loader's own share of its update
+  -- into pm.loader (all from the loader). Once a second I turn the last second into averages a frame: each mod's
+  -- milliseconds and its share of the frame (from the game's own frame time), the worst single call, and the total.
+  -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
+  -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
+  local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
+  util.pm = pm
+  -- the mods' time so far (the loader asks before and after its update, to find its own share)
+  function util.pm_sum()
+    local s = 0
+    for _, a in ipairs(L.addons) do s = s + (a.pm_ms or 0) end
+    return s
+  end
+  local function pm_reset(now)
+    pm.at, pm.frames, pm.t0, pm.loader, pm.self = now + 1, 0, now, 0, 0
+    -- the time counters keep running (the loader reads them before and after its update, which can straddle this);
+    -- each window starts from where they stand
+    for _, a in ipairs(L.addons) do a.pm_base, a.pm_max = a.pm_ms or 0, 0 end
+    for _, b in ipairs(L.boots()) do b.pm_base, b.pm_max = b.pm_ms or 0, 0 end
+  end
+  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
+  -- a boot script's name: its first comment line up to a bracket ("HD2 file-mod installer 1"), else its patch file
+  local function boot_name(b)
+    local t = b.title and b.title:match('^([^%(%[]+)')
+    t = t and t:gsub('%s+$', '') or ''
+    return t ~= '' and t ~= 'no title' and t or ('BOOT ' .. tostring(b.file or '?'))
+  end
+  local function pm_lines(now)
+    local n = max(1, pm.frames)
+    local frame_ms = (now - pm.t0) * 1000 / n
+    local rows, total = {}, 0
+    for _, a in ipairs(L.addons) do
+      local avg = ((a.pm_ms or 0) - (a.pm_base or 0)) / n
+      total = total + avg
+      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on }
+    end
+    for _, b in ipairs(L.boots()) do
+      local avg = ((b.pm_ms or 0) - (b.pm_base or 0)) / n
+      total = total + avg
+      -- the HD2 file-mod installer (a helper boot the settings-file mods share, not a mod a player picks) gets no row
+      -- of its own; its time still counts in All Mods
+      local name = boot_name(b)
+      if not name:lower():find('file%-mod installer') then
+        rows[#rows + 1] = { name = name, avg = avg, worst = b.pm_max or 0, on = b.on ~= false }
+      end
+    end
+    sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
+    local self = pm.self / n
+    local loader = max(0, pm.loader / n - self)
+    local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
+    -- { left, right, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod (1 ms or more), 6 off or dim
+    local out = {
+      { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), 'MS  SHARE WORST', 2 },
+      { 'ALL MODS', fmt('%.2f %4.1f%%', total + loader, pct(total + loader)), 3 },
+    }
+    for i, r in ipairs(rows) do
+      if i > 12 then break end
+      out[#out + 1] = { plain(r.name):sub(1, 20), r.on and fmt('%.2f %4.1f%% %4.1f', r.avg, pct(r.avg), r.worst) or 'OFF',
+                        r.on and (r.avg >= 1 and 5 or 4) or 6 }
+    end
+    out[#out + 1] = { 'LOADER', fmt('%.2f %4.1f%%', loader, pct(loader)), 4 }
+    out[#out + 1] = { 'THIS MONITOR', fmt('%.2f %4.1f%%', self, pct(self)), 6 }
+    return out
+  end
+  -- The panel, laid out once a second (when its numbers change) into a list of rects with a color index each; every
+  -- frame only makes the few colors and draws the rects. The look matches the options menu: a dark panel in a thin
+  -- yellow frame with a yellow bar on top, the title in yellow.
+  local PM_COLORS = { { 255, 231, 16, 255 }, { 150, 255, 180, 255 }, { 255, 255, 255, 255 }, { 220, 222, 216, 255 },
+                      { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
+  local function pm_layout(ls, w, h)
+    local px = max(2, floor(h / 540 + 0.5))
+    local rh, cols = 10 * px, 38
+    local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
+    local x0, y1 = w - pw - floor(w * 0.02), floor(h * 0.96)        -- top right, clear of the options menu (top left)
+    local b = max(1, floor(px * 0.75))
+    local out = {
+      { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
+      { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
+      { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
+    }
+    local function txt(x, y, s, ci) L.text_rects(x, y, s, px, out, ci) end
+    local tx = 5 * px
+    txt(x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
+    local y = y1 - 2 * rh - px
+    for _, l in ipairs(ls) do
+      txt(x0 + tx, y + px, l[1], l[3])
+      if l[2] ~= '' then txt(x0 + pw - tx - (#l[2] * 6 * px - px), y + px, l[2], l[3] == 2 and 6 or l[3]) end
+      y = y - rh
+    end
+    return out
+  end
+  function util.monitor_frame(now)
+    local on = util.perf_row ~= nil and util.perf_row.value == true
+    if on ~= pm.on then
+      pm.on, pm.lines, pm.rects = on, nil, nil
+      if on then pm_reset(now) end
+      log(on and 'performance monitor: on (each mod\'s average a frame, its share of the frame and its worst call; once a second)'
+        or 'performance monitor: off')
+    end
+    if not on then return end
+    pm.frames = pm.frames + 1
+    if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
+    if not pm.lines then return end
+    local t0 = L.clock()
+    local w, h = ctx.screen()
+    if not pm.rects or pm.w ~= w or pm.h ~= h then pm.rects, pm.w, pm.h = pm_layout(pm.lines, w, h), w, h end
+    local cs = {}
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
+    local top = ctx.TOP + 940
+    for _, r in ipairs(pm.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
+    pm.self = pm.self + (L.clock() - t0) * 1000
+  end
+
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,
                 mods = true }
@@ -2195,7 +2392,7 @@ end)()
 -- @@END utilities.lua@@
 -- @@BEGIN sandbox.lua@@ (copied from src/chef_loader/sandbox.lua by tools/splice.py; edit that file, not this)
 services.sandbox = (function()
--- Chef Shared Loader: the locked-down space every loader mod runs in (0.2.0 Test 13)
+-- Chef Shared Loader: the locked-down space every loader mod runs in
 -- Every "-- HD2-Addon:" and "-- HD2-Boot:" mod gets an environment of its own built here. What it can't do from it:
 --   * start programs, delete or rename files, quit the game through Lua (os.execute, io.popen, os.remove/rename/exit)
 --   * load native code (package.loadlib, C modules through require) or compiled Lua (bytecode can be made to read and
@@ -2260,7 +2457,7 @@ local function names_of(rest)
 end
 
 -- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
--- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where my files were up to Test 12, or nil),
+-- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where older builds kept my files, or nil),
 -- FILES ('chef_loader'), overrides (compat's xpcall and load)
 function M.install(ctx)
   local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
@@ -2388,8 +2585,8 @@ function M.install(ctx)
         if not ok then return deny('open', path, mode, root) end
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
-        -- (Test 13) a mod's own file read from the loader's folder that isn't there yet comes from the old folder
-        -- (%LOCALAPPDATA%, up to Test 12) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
+        -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
+        -- (%LOCALAPPDATA%, in older builds) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
         -- its next write lands in the new place
         if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
           and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then
@@ -2550,7 +2747,7 @@ local function log(text)
   elseif type(print) == 'function' then pcall(print, '[' .. LOADER .. '] ' .. line) end
 end
 
--- (Test 13) The one-time move from %LOCALAPPDATA%: the crash state, the saved settings, dev mode's list and the last
+-- The one-time move from %LOCALAPPDATA%: the crash state, the saved settings, dev mode's list and the last
 -- launch's breadcrumbs (before I read them below). Each is copied, checked and then removed from the old place; a file
 -- already in the new place wins. The old log stays where it is, with a last line saying where the log went. Saved
 -- tables (chef_data_*.lua) are picked up from the old place by chef.load_table the first time a mod asks.
@@ -3661,6 +3858,7 @@ local GLYPHS = {
   [')'] = '01000001000001000010000100010001000', ["'"] = '00100001000100000000000000000000000',
   ['!'] = '00100001000010000100001000000000100', ['?'] = '01110100010000100010001000000000100',
   [','] = '00000000000000000000001100010001000', ['x'] = '00000000001000101010001000101010001',
+  ['>'] = '10000010000010000010001000100010000', ['<'] = '00001000100010001000001000001000001',
 }
 -- Each glyph as a few rects: runs along a row, merged down over identical rows (about 6-12 rects a letter).
 local glyph_rects = {}
@@ -3753,6 +3951,20 @@ local function text(x, y, str, px, c, layer)
     cx = cx + 6 * px
   end
   return cx - x - px
+end
+
+-- the rects a text is drawn with, appended to out as { x, y, w, h, ci } (ci: the caller's color index), so text that
+-- stays put (the performance monitor) is laid out once and redrawn without the per-letter work. A field of draw: the
+-- loader is near Lua 5.1's 200 locals.
+function draw.text_rects(x, y, str, px, out, ci)
+  local cx = x
+  for i = 1, #str do
+    local ch = sub(str, i, i)
+    if ch ~= ' ' then
+      for _, r in ipairs(rects_of(ch)) do out[#out + 1] = { cx + r.x * px, y + r.y * px, r.w * px, r.h * px, ci } end
+    end
+    cx = cx + 6 * px
+  end
 end
 
 local function line(x1, y1, z1, x2, y2, z2, c)
@@ -3916,10 +4128,13 @@ svc.util = services.utilities.install(svc.ctx, { api = api, xyz = xyz, rect = re
   notify = function(n) notices[#notices + 1] = n end,
   notes_of = function(o) local k = 0; for _, n in ipairs(notices) do if n.owner == o then k = k + 1 end end return k end,
   addons = addons, boots = function() return svc.ctx.boots or {} end, frame_no = function() return frame_no end,
+  text_rects = function(...) return draw.text_rects(...) end,
   clock = clock, os = os_, new_world_hooks = new_world_hooks, bad_kinds = res.bad, settings_text = cfg_text })
 -- my own row in the options menu: the frame budget behind chef.budget
 svc.util.budget_row = svc.loader_option('budget', { type = 'slider', label = 'Budget warning (ms)', min = 0.5, max = 10,
   step = 0.5, default = 2 })
+-- and the performance monitor (utilities: each mod's cost, drawn once a second's numbers are in)
+svc.util.perf_row = svc.loader_option('perf', { type = 'toggle', label = 'Performance monitor', default = false })
 local function options_for(name)
   local o = {}
   for _, r in ipairs(found_options) do
@@ -4096,6 +4311,8 @@ local function run_hook(a, hook, ...)
   local ms = (clock() - t0) * 1000
   a.ms = a.ms + ms
   if ms > a.max_ms then a.max_ms = ms end
+  a.pm_ms = (a.pm_ms or 0) + ms
+  if ms > (a.pm_max or 0) then a.pm_max = ms end
   if not ok then
     a.errors = a.errors + 1
     if a.errors <= 3 then log('[' .. a.short .. '] ' .. hook .. ' error: ' .. tostring(err)) end
@@ -4163,11 +4380,11 @@ function starter.addon(r)
       a.on = false
       log('could not compile ' .. a.name .. ': ' .. tostring(cerr))
     elseif not svc.sandbox then
-      -- (Test 13) no locked-down space, no start: a mod never runs with the game's whole Lua by mistake
+      -- no locked-down space, no start: a mod never runs with the game's whole Lua by mistake
       a.on = false
       log('not started: ' .. a.name .. ' (the locked-down space for mods could not be set up)')
     else
-      -- (Test 13) its own locked-down space (src/chef_loader/sandbox.lua)
+      -- its own locked-down space (src/chef_loader/sandbox.lua)
       local env = svc.sandbox.env(a.name)
       setfenv(chunk, env)
       crumb('> ' .. a.name .. '|start')
@@ -4298,16 +4515,16 @@ end
 -- ends the game is skipped from the next launch on; one that keeps raising Lua errors is turned off for the session.
 local boots = {}
 svc.ctx.boots = boots
--- (0.2.0) A mod can also ship its boot-style script as "-- HD2-Boot: mods/<author>/<name>" (any resource name, not
+-- A mod can also ship its boot-style script as "-- HD2-Boot: mods/<author>/<name>" (any resource name, not
 -- `boot`): then it never replaces mine and runs whatever order the mods deploy in. It runs like the others below
 -- (init/update/render/shutdown in its own environment), plus: a `chef` table of helpers (with its options), its log
 -- lines under its name, and if it ends the game it stays off (named on screen) until the mod is updated, as an addon.
--- (Test 12) An environment alone doesn't hold a boot script in: on Lua 5.1 a function made by loadstring (or load, or
+-- An environment alone doesn't hold a boot script in: on Lua 5.1 a function made by loadstring (or load, or
 -- dofile) gets the game's globals, not the environment of the script that made it. A boot script that loads code
 -- (Boot Mod Loader runs the game's own boot that way) wrote init/update/render/shutdown straight into the game's
 -- globals and replaced mine, and from then on I never ran again. So every other mod's boot script gets its own
 -- loadstring, load and dofile, and whatever they load lands in that script's environment too (unless it hands load an
--- environment). (Test 13: HD2-Boot scripts get the same from the locked-down space in sandbox.lua instead.)
+-- environment). (HD2-Boot scripts get the same from the locked-down space in sandbox.lua instead.)
 function starter.seal(env)
   env.loadstring = function(s, name)
     local f, err = loadstring(s, name)
@@ -4334,7 +4551,7 @@ function starter.seal(env)
     end
   end
 end
--- (Test 12) Another mod loader's boot script (it reads the deployed patches for "-- HD2-Addon:" mods itself, like
+-- Another mod loader's boot script (it reads the deployed patches for "-- HD2-Addon:" mods itself, like
 -- Boot Mod Loader) isn't run: its init would start every addon a second time, outside my crash guard and without the
 -- `chef` helpers my mods need. Copies of this loader are already left out when the patches are read.
 function starter.other_loader(src)
@@ -4462,8 +4679,8 @@ local function start_boots()
         if err ~= nil and ok == nil then
           log(fmt('the boot script in %s failed to run: %s', b.file, tostring(err)))
         else
-          boots[#boots + 1] = { owner = owner, file = b.file, env = env, errors = 0, on = true }
-          -- (Test 13) full access, as the game would give it if it were deployed after me: locking it down would only
+          boots[#boots + 1] = { owner = owner, file = b.file, env = env, errors = 0, on = true, title = title }
+          -- full access, as the game would give it if it were deployed after me: locking it down would only
           -- break it (the file-mod installer swaps game files), and a boot that wants everything can take it anyway
           log(fmt('running another mod\'s boot script too, with full access as the game gives any boot script: %s (%s)',
             b.file, title))
@@ -4477,7 +4694,11 @@ local function call_boots(hook, ...)
   for _, b in ipairs(boots) do
     local fn = b.on and rawget(b.env, hook)
     if type(fn) == 'function' then
+      local t0 = clock()
       local r1, err = guarded(b.owner, hook, fn, ...)
+      local ms = (clock() - t0) * 1000
+      b.pm_ms = (b.pm_ms or 0) + ms
+      if ms > (b.pm_max or 0) then b.pm_max = ms end
       if r1 == nil and type(err) == 'string' and err ~= 'skipped' then
         b.errors = b.errors + 1
         if b.errors <= 3 then log(fmt('the boot script in %s: %s error: %s', b.file, hook, tostring(err))) end
@@ -4493,9 +4714,12 @@ end
 
 function update(dt)
   if type(dt) == 'number' and dt > 0 and dt < 10 then elapsed = elapsed + dt end
+  -- the performance monitor: the mods' time so far, so my own share of this update is what's left
+  local pm = svc.util.pm.on and svc.util.pm_sum() or nil
   local t0 = clock()
   local ok, err = pcall(frame, dt)
   local ms = (clock() - t0) * 1000
+  if pm then svc.util.pm.loader = svc.util.pm.loader + max(0, ms - (svc.util.pm_sum() - pm)) end
   st.ms, st.frames = st.ms + ms, st.frames + 1
   if ms > st.max then st.max = ms end
   if #boots > 0 then call_boots('update', dt) end
