@@ -4,6 +4,11 @@
 
 **Download:** `Chef-Shared-Loader-1.0.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
+**Install:** add the zip in your mod manager and enable it, **put it last in your load order** so it deploys after every
+other mod (in a mod manager that lists the highest priority at the top, that means first), then Purge and Deploy. A mod
+deployed after it that replaces the game's `boot` script takes its place, and then no loader mod runs
+(see [Other mods' boot scripts](#other-mods-boot-scripts)).
+
 A Lua mod loader for Helldivers 2 on the Lua 5.1 game build (PUC Lua 5.1, no LuaJIT, no `ffi`, Easy Anti-Cheat on).
 It replaces the game's `boot` script, finds every loader mod in the deployed patch archives, and runs each one in its
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
