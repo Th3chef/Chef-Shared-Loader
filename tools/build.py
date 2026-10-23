@@ -5,9 +5,9 @@
   python3 tools/build.py <out dir> --header-from <a working Lua patch> --test N   -> Chef-Shared-Loader-<ver>-Test-N.zip
 
 The zip holds one patch with the game's `boot` script replaced by src/loader.lua (with compat.lua, probe.lua,
-services.lua and utilities.lua copied in; tools/splice.py --check must pass), plus manifest.json and thumbnail.png.
-Same zip byte for byte on every build. Test builds share the loader's own GUID and update it in place, as my script
-mods' test builds do.
+services.lua, utilities.lua and sandbox.lua copied in; tools/splice.py --check must pass), plus manifest.json and
+thumbnail.png.
+Same zip byte for byte on every build. Test builds share the loader's own GUID and update it in place.
 
 A test build also sets the loader's TEST line (`local TEST = N --@@TEST@@`): only a test build has dev mode
 (chef_loader_dev.txt) and the probe's Lua timing loop, and its log says "Test N". A release build leaves TEST nil.

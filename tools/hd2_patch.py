@@ -115,7 +115,7 @@ def lua_resource(src_bytes):
     return struct.pack('<II', len(src_bytes), 2) + src_bytes
 
 def write_lua_archive(path, entries, header12_72):
-    """entries: list of (fid, data). Layout matches the Rover/Bingus Lua addon archives."""
+    """entries: list of (fid, data). Layout matches the game's Lua patch archives."""
     head = struct.pack('<III', MAGIC, 1, len(entries)) + header12_72
     head += struct.pack('<QQQII', 0, LUA, len(entries), 16, 16)
     cursor = len(head) + 80 * len(entries); rows = body = b''
