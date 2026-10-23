@@ -1,0 +1,738 @@
+-- Chef Shared Loader: shared services
+-- What every mod gets on top of the basic helpers, so mods can lean on the loader the way they leaned on Bingus Shared
+-- Loader and its menus before the game went to plain Lua 5.1:
+--   * after_startup(fn), a read-only capabilities table, has(name)
+--   * a log file of its own per mod (own_log), saved settings per mod (one file next to the log), shared values and
+--     events between mods, require() of another mod's exports with version requirements ("-- HD2-Requires:" lines)
+--   * key bindings players can change, with conflicts flagged
+--   * an in-game options menu (F9 by default) listing every mod's options and bindings, saved between launches
+--   * look-alikes of CowboyBingusModLoader and ModOptionsMenu, so Lua-only mods written for them run
+--   * dev mode (test builds of the loader only): mods loaded from loose files listed in chef_loader_dev.txt, reloaded
+--     with a key
+-- It only reaches the loader through the ctx table install() is given. Lua 5.1 syntax only.
+
+local M = { version = '0.1.1', api = 3 }
+
+local pairs, ipairs, pcall, type, tostring, tonumber, next = pairs, ipairs, pcall, type, tostring, tonumber, next
+local floor, max, min = math.floor, math.max, math.min
+local fmt, concat, sort = string.format, table.concat, table.sort
+
+-- "1.2.10" -> comparable parts; anything that isn't a number counts as 0
+local function vparts(v)
+  local t = {}
+  for n in tostring(v or ''):gmatch('%d+') do t[#t + 1] = tonumber(n) end
+  return t
+end
+function M.version_at_least(have, want)
+  local a, b = vparts(have), vparts(want)
+  for i = 1, max(#a, #b) do
+    local x, y = a[i] or 0, b[i] or 0
+    if x ~= y then return x > y end
+  end
+  return true
+end
+
+-- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 0.2"; "chef-loader" works too), any number of lines near the top
+function M.requirements(src)
+  local out = {}
+  for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)%s*>?=?%s*([%d%.]*)') do
+    out[#out + 1] = { name = name, version = want ~= '' and want or nil }
+  end
+  return out
+end
+
+-- Dependencies first, then the given order; a cycle or a missing requirement is reported, never looped on.
+function M.order(list)
+  local by, out, state = {}, {}, {}
+  for _, r in ipairs(list) do if not by[r.name] then by[r.name] = r end end
+  local function visit(r, depth)
+    if state[r] == 'done' or depth > 32 then return end
+    if state[r] == 'busy' then r.cycle = true; return end
+    state[r] = 'busy'
+    for _, q in ipairs(M.requirements(r.src)) do
+      local d = by[q.name]
+      if d and d ~= r then visit(d, depth + 1) end
+    end
+    state[r] = 'done'
+    out[#out + 1] = r
+  end
+  for _, r in ipairs(list) do visit(r, 0) end
+  return out
+end
+
+-- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only
+local function plain(s)
+  s = tostring(s or ''):upper()
+  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' '))
+end
+
+function M.install(ctx)
+  local svc = { ctx = ctx }
+  local log, guarded, fn_of = ctx.log, ctx.guarded, ctx.fn_of
+  local SETTINGS_FILE, DEV_FILE = ctx.DIR .. ctx.FILES .. '_settings.txt', ctx.DIR .. ctx.FILES .. '_dev.txt'
+
+  -- ---------------------------------------------------------------- saved settings
+  -- One file next to the log: "<mod>\t<key>\t<b|n|s>\t<value>" per line. Written at most every 3 s while something
+  -- changed, and at shutdown.
+  local store, dirty, save_at = {}, false, 0
+  do
+    local f = ctx.open(SETTINGS_FILE, 'r')
+    if f then
+      for line in f:lines() do
+        local mod, key, ty, v = line:match('^([^\t]+)\t([^\t]+)\t([bns])\t(.*)$')
+        if mod then
+          local val
+          if ty == 'b' then val = v == 'true' elseif ty == 'n' then val = tonumber(v) else val = (v:gsub('\\n', '\n'):gsub('\\t', '\t'):gsub('\\\\', '\\')) end
+          if val ~= nil then store[mod] = store[mod] or {}; store[mod][key] = val end
+        end
+      end
+      f:close()
+    end
+  end
+  local function save_now()
+    dirty = false
+    local f = ctx.open(SETTINGS_FILE, 'w')
+    if not f then return end
+    local mods = {}
+    for m in pairs(store) do mods[#mods + 1] = m end
+    sort(mods)
+    for _, m in ipairs(mods) do
+      local keys = {}
+      for k in pairs(store[m]) do keys[#keys + 1] = k end
+      sort(keys)
+      for _, k in ipairs(keys) do
+        local v = store[m][k]
+        local ty = type(v) == 'boolean' and 'b' or (type(v) == 'number' and 'n' or 's')
+        local text = ty == 's' and (v:gsub('\\', '\\\\'):gsub('\n', '\\n'):gsub('\t', '\\t')) or tostring(v)
+        f:write(m, '\t', k, '\t', ty, '\t', text, '\n')
+      end
+    end
+    f:close()
+  end
+  local function put(mod, key, v)
+    if type(key) ~= 'string' or not key:match('^[%w_%.%-]+$') or #key > 64 then return false, 'keys are letters, digits, _ . - (64 at most)' end
+    local t = type(v)
+    if v ~= nil and t ~= 'boolean' and t ~= 'number' and t ~= 'string' then return false, 'only booleans, numbers and strings are saved' end
+    if t == 'string' and #v > 512 then return false, 'strings are saved up to 512 characters' end
+    if t == 'number' and v ~= v then return false, 'not a number' end
+    store[mod] = store[mod] or {}
+    if store[mod][key] ~= v then store[mod][key] = v; dirty = true end
+    return true
+  end
+  local function get(mod, key, default)
+    local t = store[mod]
+    local v = t and t[key]
+    if v == nil then return default end
+    return v
+  end
+
+  -- ---------------------------------------------------------------- after_startup, shared values, events
+  local after, started = {}, false
+  local function after_startup(owner, fn)
+    if type(fn) ~= 'function' then return false, 'after_startup needs a function' end
+    if started then
+      local ok, err = pcall(fn)
+      if not ok then log(fmt('[%s] after_startup: %s', owner, tostring(err))) end
+      return true
+    end
+    if #after >= 256 then return false, 'after_startup: 256 callbacks already registered' end
+    after[#after + 1] = { owner = owner, fn = fn }
+    return true
+  end
+  local shared = {}
+  local subs = {}                           -- event -> { { owner, fn, on, errors }, ... }
+  -- Ended subscriptions leave the lists right away, except while an emit is walking them: then at the end of it.
+  local emitting, stale = 0, {}
+  local function compact(event)
+    local list = subs[event]
+    if not list then return end
+    local j = 0
+    for i = 1, #list do
+      local sb = list[i]
+      list[i] = nil
+      if sb.on then j = j + 1; list[j] = sb end
+    end
+    if j == 0 then subs[event] = nil end
+  end
+  local function ended(event)
+    if emitting > 0 then stale[event] = true else compact(event) end
+  end
+  local function emit(event, ...)
+    local list = subs[event]
+    if not list then return 0 end
+    local n = 0
+    emitting = emitting + 1
+    for i = 1, #list do
+      local sb = list[i]
+      if sb and sb.on then
+        local ok, err = pcall(sb.fn, ...)
+        n = n + 1
+        if not ok then
+          sb.errors = sb.errors + 1
+          if sb.errors <= 3 then log(fmt('[%s] event %s: %s', sb.owner, event, tostring(err))) end
+          if sb.errors >= 20 then sb.on = false; stale[event] = true; log(fmt('[%s] event %s: switched off after 20 errors', sb.owner, event)) end
+        end
+      end
+    end
+    emitting = emitting - 1
+    if emitting == 0 and next(stale) then
+      for e in pairs(stale) do compact(e) end
+      stale = {}
+    end
+    return n
+  end
+  svc.emit = emit
+
+  -- ---------------------------------------------------------------- options (the menu's rows) and key bindings
+  -- groups: in the order mods first register; each group { title, mod, rows = { row, ... } }. A row: { id (full),
+  -- key (saved under), spec, value, owner, changed = { fn, ... } }.
+  local groups, group_of, rows_by_id = {}, {}, {}
+  -- the menu's line list and the key users are kept until a row is added or moved (layout) or a binding changes (keys)
+  local ver = { layout = 0, keys = 0 }
+  local function group(mod, title)
+    local g = group_of[mod]
+    if not g then
+      g = { mod = mod, title = title or mod, rows = {} }
+      group_of[mod] = g; groups[#groups + 1] = g
+      ver.layout = ver.layout + 1
+    elseif title and g.title == mod then g.title = title; ver.layout = ver.layout + 1 end
+    return g
+  end
+  -- The saved name of a row: 'opt.<id>' when the id is a plain one, else a hash of it, so any id saves (the look-alike
+  -- takes ids with spaces, colons and the like). Two 31-bit hashes: string.format's %x only goes to 2^31 on Windows.
+  local function row_key(id)
+    if #id <= 60 and id:match('^[%w_%.%-]+$') then return 'opt.' .. id end
+    local a, b = 5381, #id
+    for i = 1, #id do
+      local c = id:byte(i)
+      a = (a * 33 + c) % 2147483647
+      b = (b * 65599 + c) % 2147483647
+    end
+    return fmt('opt.h_%08x%08x', a, b)
+  end
+  local function text_of(v)
+    if type(v) == 'function' then local ok, s = pcall(v); return ok and tostring(s) or '?' end
+    return tostring(v or '')
+  end
+  local function clean(spec, value)
+    local ty = spec.type
+    if ty == 'toggle' then return value == true end
+    if ty == 'choice' then
+      local n = #spec.choices
+      local v = floor(tonumber(value) or 1)
+      return (v >= 1 and v <= n) and v or 1
+    end
+    if ty == 'slider' then
+      local v = tonumber(value) or spec.default
+      v = max(spec.min, min(spec.max, v))
+      if spec.step and spec.step > 0 then v = spec.min + floor((v - spec.min) / spec.step + 0.5) * spec.step end
+      return v
+    end
+    if ty == 'key' then return type(value) == 'string' and value or 'off' end
+    return value
+  end
+  local function check_spec(spec)
+    if type(spec) ~= 'table' then return 'the spec must be a table' end
+    local ty = spec.type
+    if ty ~= 'toggle' and ty ~= 'choice' and ty ~= 'slider' and ty ~= 'key' then return 'type must be toggle, choice, slider or key' end
+    if ty == 'choice' and (type(spec.choices) ~= 'table' or #spec.choices < 2 or #spec.choices > 32) then return 'a choice needs 2 to 32 choices' end
+    if ty == 'slider' and not (type(spec.min) == 'number' and type(spec.max) == 'number' and spec.max > spec.min) then return 'a slider needs min < max' end
+    return nil
+  end
+  local function add_row(owner, mod, title, id, spec)
+    local err = check_spec(spec)
+    if err then return nil, err end
+    local full = mod .. '|' .. id
+    local row = rows_by_id[full]
+    if row then return row end
+    local default = spec.default
+    if spec.type == 'toggle' then default = default == true
+    elseif spec.type == 'choice' then default = default or 1
+    elseif spec.type == 'slider' then default = default or spec.min
+    elseif spec.type == 'key' then default = default or 'off' end
+    row = { id = full, key = row_key(id), mod = mod, spec = spec, owner = owner, changed = {} }
+    row.default = clean(spec, default)
+    row.value = clean(spec, get(mod, row.key, row.default))
+    rows_by_id[full] = row
+    local g = group(mod, title)
+    g.rows[#g.rows + 1] = row
+    ver.layout = ver.layout + 1
+    if spec.type == 'key' then ver.keys = ver.keys + 1 end
+    return row
+  end
+  local function set_row(row, v)
+    v = clean(row.spec, v)
+    if v == row.value then return end
+    row.value = v
+    if row.spec.type == 'key' then ver.keys = ver.keys + 1 end
+    -- the default isn't stored (so a new default reaches players who never changed the row); anything else is, false too
+    local ok, err
+    if v == row.default then ok, err = put(row.mod, row.key, nil) else ok, err = put(row.mod, row.key, v) end
+    if not ok then log(fmt('[%s] option %s not saved: %s', row.owner, row.id, tostring(err))) end
+    for _, fn in ipairs(row.changed) do
+      local ok, err = pcall(fn, v)
+      if not ok then log(fmt('[%s] on_change %s: %s', row.owner, row.id, tostring(err))) end
+    end
+  end
+  -- every key some binding uses, for the conflict marks
+  local users_cache = { ver = -1, users = nil }
+  local function key_users()
+    if users_cache.ver == ver.keys then return users_cache.users end
+    local users = {}
+    for _, g in ipairs(groups) do
+      for _, row in ipairs(g.rows) do
+        if row.spec.type == 'key' and row.value ~= 'off' then
+          users[row.value] = (users[row.value] or 0) + 1
+        end
+      end
+    end
+    users_cache.ver, users_cache.users = ver.keys, users
+    return users
+  end
+  local conflicts_said = {}
+  local function note_conflicts()
+    for k, n in pairs(key_users()) do
+      if n > 1 and not conflicts_said[k] then
+        conflicts_said[k] = true
+        log(fmt('key %s is bound %d times (see the options menu: it marks them)', k, n))
+      end
+    end
+  end
+
+  -- ---------------------------------------------------------------- a mod's own log file
+  -- chef.own_log(name): from then on the mod's chef.log lines go to <name>.log next to chef_loader.log instead of into
+  -- it (a fresh file each launch once it passes 1 MB, the same cap per launch). The loader's own lines about the mod
+  -- (started, errors, crashes, timings) stay in chef_loader.log.
+  local own_logs = {}                       -- name -> { f, written, owner }
+  local function own_open(owner, name)
+    local o = own_logs[name]
+    if o then
+      if o.owner ~= owner then return nil, name .. '.log is ' .. o.owner .. "'s" end
+      return o
+    end
+    local path = ctx.DIR .. name .. '.log'
+    local f, big = ctx.open(path, 'r'), false
+    if f then local size = f:seek('end'); big = size and size > 1024 * 1024; f:close() end
+    f = ctx.open(path, big and 'w' or 'a')
+    if not f then return nil, 'could not open ' .. path end
+    o = { f = f, written = 0, owner = owner }
+    own_logs[name] = o
+    return o
+  end
+  local function own_write(o, text)
+    if o.written > ctx.LOG_CAP then return end
+    local line = fmt('%s %6.1f s | %s', ctx.clock(), ctx.now(), text)
+    o.written = o.written + #line + 1
+    if o.written > ctx.LOG_CAP then line = line .. '\n(the log is full for this launch)' end
+    pcall(o.f.write, o.f, line .. '\n'); pcall(o.f.flush, o.f)
+  end
+
+  -- ---------------------------------------------------------------- the helpers each mod gets
+  function svc.extend(chef, a)
+    local owner = a.name
+    local title = a.title
+    chef.api = M.api
+    local caps = { api = M.api, after_startup = true, settings = true, share = true, events = true, require = true,
+                   bind = true, menu = true, shims = true, dev = true, logs = true, own_log = true }
+    if svc.util then for k, v in pairs(svc.util.caps) do caps[k] = v end end
+    chef.capabilities = setmetatable({}, { __index = caps,
+      __newindex = function() error('chef.capabilities is read-only', 2) end })
+    function chef.has(name) return chef.capabilities[name] == true or (name == 'api' and true) end
+    function chef.after_startup(fn) return after_startup(owner, fn) end
+    -- saved settings
+    function chef.save(key, value) return put(owner, key, value) end
+    function chef.load(key, default) return get(owner, key, default) end
+    -- shared values and events
+    function chef.share(name, value)
+      if type(name) ~= 'string' then return false end
+      local was = shared[name]
+      if was and was.owner ~= owner then log(fmt('[%s] replaced shared "%s" (it was %s\'s)', owner, name, was.owner)) end
+      shared[name] = { owner = owner, value = value }
+      return true
+    end
+    function chef.shared(name) local s = shared[name]; return s and s.value end
+    -- returns a function that ends the subscription (the entry leaves the list)
+    function chef.on(event, fn)
+      if type(event) ~= 'string' or type(fn) ~= 'function' then return nil end
+      subs[event] = subs[event] or {}
+      local sb = { owner = owner, fn = fn, on = true, errors = 0 }
+      subs[event][#subs[event] + 1] = sb
+      return function()
+        if sb.on then sb.on = false; ended(event) end
+      end
+    end
+    function chef.emit(event, ...) if type(event) == 'string' then return emit(event, ...) end end
+    -- another mod's exports (the table it returned), optionally at a version or newer
+    function chef.require(name, want)
+      local other = ctx.addon(name)
+      if not other or not other.on or type(other.module) ~= 'table' then return nil, name .. ' is not running' end
+      if want and not M.version_at_least(other.module.version, want) then
+        return nil, fmt('%s is %s, %s or newer is needed', name, tostring(other.module.version), want)
+      end
+      return other.module
+    end
+    -- the options menu: a group under the mod's title (chef.title, or its name)
+    function chef.title(t) if type(t) == 'string' then title = t; group(owner, t) end end
+    function chef.option(id, spec)
+      if type(id) ~= 'string' or not id:match('^[%w_%.%-]+$') then return nil, 'ids are letters, digits, _ . -' end
+      local row, err = add_row(owner, owner, title or a.short, id, spec)
+      if not row then log(fmt('[%s] option %s: %s', owner, id, err)); return nil, err end
+      return row.value
+    end
+    function chef.get(id) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then return r.value end end
+    function chef.set(id, v) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then set_row(r, v); return r.value end end
+    function chef.on_change(id, fn)
+      local r = rows_by_id[owner .. '|' .. tostring(id)]
+      if r and type(fn) == 'function' then r.changed[#r.changed + 1] = fn; return true end
+      return false
+    end
+    -- a key binding: a 'key' row in the menu; b.key() is its key ('off' for none), b.pressed() / b.down() this frame
+    function chef.bind(id, default_key, label)
+      local row = chef.option(id, { type = 'key', default = default_key or 'off', label = label or id })
+      local r = rows_by_id[owner .. '|' .. id]
+      if not r then return nil end
+      note_conflicts()
+      local b = {}
+      function b.key() return r.value end
+      function b.pressed() return r.value ~= 'off' and chef.key_pressed(r.value) end
+      function b.down() return r.value ~= 'off' and chef.key_down(r.value) end
+      return b, row
+    end
+    chef.log_directory = ctx.DIR:gsub('\\$', '')
+    chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
+    function chef.own_log(name)
+      if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 or name:lower():find('^chef_loader') then
+        return false, 'log names are letters, digits, _ - (48 at most), and not chef_loader'
+      end
+      local o, err = own_open(owner, name)
+      if not o then log(fmt('[%s] own log: %s; its lines stay here', owner, tostring(err))); return false, err end
+      if not o.said then
+        o.said = true
+        own_write(o, fmt('==== %s, run by %s %s', owner, ctx.LOADER, ctx.VERSION))
+        log(fmt('[%s] logs to %s.log', owner, name))
+      end
+      function chef.log(...) local ok, s = pcall(fmt, ...); own_write(o, ok and s or tostring((...))) end
+      chef.log_file = ctx.DIR .. name .. '.log'
+      return true
+    end
+  end
+
+  -- ---------------------------------------------------------------- the options menu (drawn over everything)
+  local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false }
+  local loader_mod = '_loader'
+  local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu' })
+  local reload_key = nil
+  -- more rows in the loader's own group (the frame budget)
+  function svc.loader_option(id, spec)
+    local r, err = add_row('loader', loader_mod, ctx.LOADER, id, spec)
+    if not r then log('loader option ' .. id .. ': ' .. tostring(err)) end
+    return r
+  end
+  function svc.set_row(r, v) set_row(r, v) end
+  function svc.menu_key_name() return menu_key.value end
+  -- a search typed after '/': a group whose title has it shows whole; else only the rows whose label has it
+  local lines_cache = { ver = -1, search = nil, out = nil }
+  local function lines()
+    if lines_cache.ver == ver.layout and lines_cache.search == menu.search then return lines_cache.out end
+    local out = {}
+    local q = menu.search ~= '' and menu.search or nil
+    for _, g in ipairs(groups) do
+      if #g.rows > 0 then
+        local whole = not q or text_of(g.title):lower():find(q, 1, true) ~= nil
+        local rows = {}
+        for _, r in ipairs(g.rows) do
+          if whole or text_of(r.spec.label or r.id):lower():find(q, 1, true) then rows[#rows + 1] = r end
+        end
+        if #rows > 0 then
+          out[#out + 1] = { head = true, text = g.title }
+          for _, r in ipairs(rows) do out[#out + 1] = { row = r } end
+        end
+      end
+    end
+    lines_cache.ver, lines_cache.search, lines_cache.out = ver.layout, menu.search, out
+    return out
+  end
+  local function value_text(r, users)
+    local s, v = r.spec, r.value
+    if s.type == 'toggle' then return v and 'ON' or 'OFF' end
+    if s.type == 'choice' then return text_of(s.choices[v]) end
+    if s.type == 'slider' then
+      local st = s.step or 0
+      return (st >= 1 or st == 0 and floor(v) == v) and tostring(floor(v + 0.5)) or fmt('%.2f', v)
+    end
+    if s.type == 'key' then
+      if menu.capture == r then return 'PRESS A KEY' end
+      return (v == 'off' and 'NONE' or v) .. ((v ~= 'off' and (users[v] or 0) > 1) and ' !' or '')
+    end
+    return tostring(v)
+  end
+  local function pressed(name) return ctx.key_pressed(name) end
+  local function capture_key()
+    -- any key pressed this frame, by its engine name (Escape cancels, Delete clears)
+    local n = guarded('loader', 'Keyboard.num_buttons', fn_of('Keyboard.num_buttons'))
+    if type(n) ~= 'number' then return nil end
+    for i = 0, n - 1 do
+      if guarded('loader', 'Keyboard.pressed', fn_of('Keyboard.pressed'), i) == true then
+        local name = guarded('loader', 'Keyboard.button_name', fn_of('Keyboard.button_name'), i)
+        if type(name) == 'string' and name ~= '' then return name end
+      end
+    end
+  end
+  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace takes one off, Enter keeps it, Escape
+  -- clears it (the typed text comes from Keyboard.keystrokes, through the utilities)
+  local function search_input()
+    local typed = svc.util and svc.util.typed() or ''
+    if not menu.typing then
+      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 1, 1 end
+      return false
+    end
+    for ch in typed:gmatch('[%w ]') do
+      if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 1, 1 end
+    end
+    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 1, 1 end
+    if pressed('enter') then menu.typing = false end
+    if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
+    return true
+  end
+  local function menu_input(ls)
+    if menu.capture then
+      local k = capture_key()
+      if k == 'escape' then menu.capture = nil
+      elseif k == 'delete' then set_row(menu.capture, 'off'); menu.capture = nil
+      elseif k then set_row(menu.capture, k); menu.capture = nil; conflicts_said = {}; note_conflicts() end
+      return
+    end
+    local n = #ls
+    local function step(d)
+      local i = menu.sel
+      for _ = 1, n do
+        i = i + d
+        if i < 1 then i = n elseif i > n then i = 1 end
+        if not ls[i].head then menu.sel = i; return end
+      end
+    end
+    if ls[menu.sel] == nil or ls[menu.sel].head then step(1) end
+    if pressed('down') then step(1) elseif pressed('up') then step(-1)
+    elseif pressed('page down') then for _ = 1, 8 do step(1) end
+    elseif pressed('page up') then for _ = 1, 8 do step(-1) end end
+    local l = ls[menu.sel]
+    local r = l and l.row
+    if not r then return end
+    local s = r.spec
+    local dir = pressed('right') and 1 or (pressed('left') and -1 or 0)
+    if pressed('backspace') then set_row(r, r.default); return end
+    if s.type == 'toggle' and (dir ~= 0 or pressed('enter')) then set_row(r, not r.value)
+    elseif s.type == 'choice' and dir ~= 0 then
+      local v = r.value + dir
+      if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
+      set_row(r, v)
+    elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
+    elseif s.type == 'key' and pressed('enter') then menu.capture = r end
+  end
+  local function menu_draw(ls)
+    local w, h = ctx.screen()
+    local px = max(2, floor(h / 540 + 0.5))
+    local top = ctx.TOP + 950
+    local rh, cols = 11 * px, 40
+    local pw = (cols * 6 + 6) * px
+    local x0 = floor(w * 0.05)
+    local visible = max(4, floor((h * 0.7) / rh) - 3)
+    if menu.sel < menu.top then menu.top = menu.sel elseif menu.sel >= menu.top + visible then menu.top = menu.sel - visible + 1 end
+    local shown = min(visible, #ls - menu.top + 1)
+    local ph = (shown + 3) * rh
+    local y0 = floor(h * 0.85)
+    local col = ctx.color
+    ctx.rect(x0, y0 - ph, pw, ph, col(8, 12, 10, 230), top)
+    ctx.rect(x0, y0 - 2, pw, 2, col(90, 255, 140, 255), top + 1)
+    ctx.text(x0 + 3 * px, y0 - rh + 2 * px, plain(ctx.LOADER .. ' OPTIONS'), px, col(150, 255, 180, 255), top + 2)
+    if menu.typing or menu.search ~= '' then
+      local q = plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
+      ctx.text(x0 + pw - 3 * px - ctx.text_width(q, px), y0 - rh + 2 * px, q, px, col(255, 221, 31, 255), top + 2)
+    end
+    local users = key_users()
+    local y = y0 - 2 * rh
+    for i = menu.top, menu.top + shown - 1 do
+      local l = ls[i]
+      if l.head then
+        ctx.text(x0 + 3 * px, y + 2 * px, plain(l.text):sub(1, cols - 2), px, col(90, 255, 140, 255), top + 2)
+      else
+        local r = l.row
+        if i == menu.sel then ctx.rect(x0 + px, y, pw - 2 * px, rh, col(40, 70, 50, 230), top + 1) end
+        local label = plain(text_of(r.spec.label or r.id)):sub(1, 24)
+        ctx.text(x0 + 6 * px, y + 2 * px, label, px, col(235, 235, 235, 255), top + 2)
+        local v = plain(value_text(r, users)):sub(1, 14)
+        ctx.text(x0 + pw - 3 * px - ctx.text_width(v, px), y + 2 * px, v, px, col(255, 221, 31, 255), top + 2)
+      end
+      y = y - rh
+    end
+    local hint = menu.capture and 'PRESS A KEY  ESC CANCEL  DEL NONE'
+      or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
+      or 'ARROWS PICK/CHANGE  ENTER  BKSP DEFAULT  / SEARCH'
+    ctx.text(x0 + 3 * px, y0 - ph + 2 * px, plain(hint):sub(1, cols), px, col(150, 150, 150, 255), top + 2)
+  end
+  local function menu_frame()
+    local mk = menu_key.value
+    if menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
+      menu.open, menu.typing = false, false
+      return
+    end
+    if not menu.open then
+      if mk ~= 'off' and pressed(mk) then
+        menu.open = true
+        if not menu.said then menu.said = true; log('options menu opened') end
+      else
+        return
+      end
+    end
+    local typing = menu.capture == nil and search_input()
+    local ls = lines()
+    if #ls == 0 and menu.search == '' then return end
+    if not typing then menu_input(ls) end
+    menu_draw(ls)
+  end
+
+  -- ---------------------------------------------------------------- the Bingus Shared Loader / Mod Options Menu look-alikes
+  -- Only when nothing of that name exists. Lua-only mods written for them (the parts that need ffi can't come back) see
+  -- what they used: CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
+  -- register_option(id, spec) / get / set / on_change / ready, with its rows in this menu under spec.mod.
+  function svc.install_shims(G)
+    if rawget(G, 'CowboyBingusModLoader') == nil then
+      local caps = setmetatable({}, { __index = { api = 1, discovery = true, logs = true, health = false, jit_budget = false, after_startup = true },
+        __newindex = function() error('CowboyBingusModLoader.capabilities is read-only', 2) end })
+      local dir = ctx.DIR:gsub('\\$', '')
+      rawset(G, 'CowboyBingusModLoader', {
+        api = 1, version = ctx.LOADER .. ' ' .. ctx.VERSION .. ' (look-alike)', capabilities = caps, log_directory = dir,
+        after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
+        open_log = function(name)
+          if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
+          return ctx.open(ctx.DIR .. name, 'a')
+        end,
+      })
+      log('look-alike: CowboyBingusModLoader (after_startup, capabilities, log_directory, open_log)')
+    end
+    if rawget(G, 'ModOptionsMenu') == nil then
+      local mom = { api = 1, version = 2, max_mods = 64, max_options = 128 }
+      local count = { rows = 0, mods = 0 }
+      local function row(id) return rows_by_id['ModOptionsMenu|' .. tostring(id)] end
+      function mom.register_option(id, spec)
+        if type(id) ~= 'string' or type(spec) ~= 'table' then return false, 'register_option(id, spec)' end
+        local s = { type = spec.type, label = spec.label, default = spec.default, choices = spec.choices, min = spec.min,
+                    max = spec.max, step = spec.step, description = spec.description }
+        local was = rows_by_id['ModOptionsMenu|' .. id]
+        if was then return true end
+        local title = text_of(spec.mod or 'MODS')
+        local key = 'mom:' .. title
+        if count.rows >= mom.max_options then return false, 'register_option: ' .. mom.max_options .. ' options already' end
+        if not group_of[key] and count.mods >= mom.max_mods then return false, 'register_option: ' .. mom.max_mods .. ' mods already' end
+        local r, err = add_row('ModOptionsMenu', 'ModOptionsMenu', 'MODS', id, s)
+        if not r then return false, err end
+        count.rows = count.rows + 1
+        -- each spec.mod gets its own heading: move the row there
+        if not group_of[key] then count.mods = count.mods + 1 end
+        local g = group(key, title)
+        local home = group_of['ModOptionsMenu']
+        if home and home ~= g then
+          for i = #home.rows, 1, -1 do if home.rows[i] == r then table.remove(home.rows, i) end end
+          g.rows[#g.rows + 1] = r
+          ver.layout = ver.layout + 1
+        end
+        return true
+      end
+      function mom.get(id) local r = row(id); if r then return r.value end end
+      function mom.set(id, v) local r = row(id); if r then set_row(r, v); return true end return false end
+      function mom.on_change(id, fn) local r = row(id); if r and type(fn) == 'function' then r.changed[#r.changed + 1] = function(v) fn(v, id) end; return true end return false end
+      function mom.ready() return true end
+      rawset(G, 'ModOptionsMenu', mom)
+      log('look-alike: ModOptionsMenu (register_option, get, set, on_change, ready; rows in the ' .. ctx.LOADER .. ' options menu)')
+    end
+  end
+
+  -- ---------------------------------------------------------------- dev mode (test builds only: the loader only calls
+  -- dev_files when it is a test build)
+  -- chef_loader_dev.txt next to the log: one Lua file path a line (absolute), "#" comments, and optionally
+  -- "reload = f11". Each file needs its header line like any mod; a dev file wins over a deployed mod of the same name.
+  local dev = { files = {}, on = false }
+  function svc.dev_files()
+    local f = ctx.open(DEV_FILE, 'r')
+    dev.files = {}
+    if not f then dev.on = false; return {} end
+    local out = {}
+    for line in f:lines() do
+      line = line:gsub('^%s+', ''):gsub('%s+$', '')
+      local k = line:match('^reload%s*=%s*(.+)$')
+      if k then reload_key = k
+      elseif line ~= '' and not line:match('^#') then dev.files[#dev.files + 1] = line end
+    end
+    f:close()
+    dev.on = #dev.files > 0
+    for _, path in ipairs(dev.files) do
+      local g = ctx.open(path, 'rb')
+      local src = g and g:read('*a')
+      if g then g:close() end
+      if type(src) == 'string' then
+        local kind, mod = src:match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
+        if mod and mod:match(ctx.ALLOW) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
+          out[#out + 1] = { kind = kind, name = mod, file = 'dev:' .. (path:match('[^\\/]+$') or path), src = src, dev = true, path = path }
+        else
+          log('dev mode: ' .. path .. ' has no "-- HD2-Addon/Boot/Options: mods/<author>/<name>" first line')
+        end
+      else
+        log('dev mode: could not read ' .. path)
+      end
+    end
+    reload_key = reload_key or 'f11'
+    if dev.on then log(fmt('dev mode: %d file(s) from %s; %s reloads them', #out, DEV_FILE, reload_key)) end
+    return out
+  end
+
+  -- A mod that stopped (switched off after errors, failed to start, or about to be started again in dev mode): its menu
+  -- rows keep their values but drop its change callbacks, its event subscriptions and waiting after_startup callbacks
+  -- end, and the utilities drop its timers, jobs and what it spawned.
+  function svc.forget(owner)
+    for _, row in pairs(rows_by_id) do if row.owner == owner then row.changed = {} end end
+    for event, list in pairs(subs) do
+      local any = false
+      for _, sb in ipairs(list) do if sb.owner == owner and sb.on then sb.on = false; any = true end end
+      if any then ended(event) end
+    end
+    for i = #after, 1, -1 do if after[i].owner == owner then table.remove(after, i) end end
+    if svc.util then svc.util.forget(owner) end
+  end
+
+  -- ---------------------------------------------------------------- the loader's hooks
+  local last_world, last_mission = nil, false
+  function svc.startup_done()
+    started = true
+    if #after > 0 then log(fmt('after startup: running %d callback(s)', #after)) end
+    for _, c in ipairs(after) do
+      local ok, err = pcall(c.fn)
+      if not ok then log(fmt('[%s] after_startup: %s', c.owner, tostring(err))) end
+    end
+    after = {}
+    emit('startup')
+    note_conflicts()
+  end
+  function svc.frame()
+    local w = ctx.world
+    if w.stable and w.id ~= last_world then last_world = w.id; emit('world', w.id, w.mission == true) end
+    local m = w.stable and w.mission and not w.checking and true or false
+    if m ~= last_mission then
+      last_mission = m
+      emit(m and 'mission_start' or 'mission_end', w.id)
+    end
+    if dirty and ctx.now() >= save_at then save_at = ctx.now() + 3; save_now() end
+    if dev.on and reload_key and pressed(reload_key) then
+      log('dev mode: reloading')
+      ctx.dev_reload(svc.dev_files())
+    end
+    menu_frame()
+  end
+  function svc.shutdown()
+    emit('shutdown')
+    if dirty then save_now() end
+    for _, o in pairs(own_logs) do pcall(o.f.close, o.f) end
+  end
+  return svc
+end
+
+return M
