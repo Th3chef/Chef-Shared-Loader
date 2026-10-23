@@ -319,6 +319,8 @@ function M.install(ctx, L)
     local ms = (L.clock() - t0) * 1000
     a.ms = (a.ms or 0) + ms
     if ms > (a.max_ms or 0) then a.max_ms = ms end
+    a.pm_ms = (a.pm_ms or 0) + ms
+    if ms > (a.pm_max or 0) then a.pm_max = ms end
     if not ok then
       a.timer_errors = (a.timer_errors or 0) + 1
       if a.timer_errors <= 3 then log(fmt('[%s] %s error: %s', a.short, what, tostring(err))) end
@@ -404,6 +406,7 @@ function M.install(ctx, L)
     timers_frame(now)
     jobs_frame()
     sweep_made(now)
+    if util.monitor_frame then util.monitor_frame(now) end
   end
   -- a mod's average a frame against its budget, from the loader's status line (once every 10 minutes at most)
   function util.budget_check(a, avg, worst)
@@ -884,7 +887,7 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
-      -- (Test 13) up to Test 12 the saved tables were in %LOCALAPPDATA%: read from there until the mod saves again
+      -- the saved tables of older builds were in %LOCALAPPDATA%: read from there until the mod saves again
       if not f and ctx.OLD_DIR then
         local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
         f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
@@ -893,7 +896,7 @@ function M.install(ctx, L)
       local text = f:read('*a')
       f:close()
       if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
-      -- (Test 13) text only: compiled Lua can be made to reach outside any environment
+      -- text only: compiled Lua can be made to reach outside any environment
       if text:byte(1) == 27 then return nil, 'not a saved table' end
       local chunk, err = loadstring(text, '=' .. name)
       if not chunk then return nil, tostring(err) end
@@ -920,6 +923,122 @@ function M.install(ctx, L)
   -- the frame budget behind chef.budget: the loader's own "Budget warning (ms)" row (util.budget_row, set by the
   -- loader), 2 ms until it's there
   util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
+
+  -- ---------------------------------------------------------------- the performance monitor
+  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
+  -- cost, so a player can see what every mod does to the game. Every mod's time (its hooks, timers and spread work)
+  -- goes into a.pm_ms / a.pm_max as it runs, a boot script's into b.pm_ms, and the loader's own share of its update
+  -- into pm.loader (all from the loader). Once a second I turn the last second into averages a frame: each mod's
+  -- milliseconds and its share of the frame (from the game's own frame time), the worst single call, and the total.
+  -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
+  -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
+  local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
+  util.pm = pm
+  -- the mods' time so far (the loader asks before and after its update, to find its own share)
+  function util.pm_sum()
+    local s = 0
+    for _, a in ipairs(L.addons) do s = s + (a.pm_ms or 0) end
+    return s
+  end
+  local function pm_reset(now)
+    pm.at, pm.frames, pm.t0, pm.loader, pm.self = now + 1, 0, now, 0, 0
+    -- the time counters keep running (the loader reads them before and after its update, which can straddle this);
+    -- each window starts from where they stand
+    for _, a in ipairs(L.addons) do a.pm_base, a.pm_max = a.pm_ms or 0, 0 end
+    for _, b in ipairs(L.boots()) do b.pm_base, b.pm_max = b.pm_ms or 0, 0 end
+  end
+  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
+  -- a boot script's name: its first comment line up to a bracket ("HD2 file-mod installer 1"), else its patch file
+  local function boot_name(b)
+    local t = b.title and b.title:match('^([^%(%[]+)')
+    t = t and t:gsub('%s+$', '') or ''
+    return t ~= '' and t ~= 'no title' and t or ('BOOT ' .. tostring(b.file or '?'))
+  end
+  local function pm_lines(now)
+    local n = max(1, pm.frames)
+    local frame_ms = (now - pm.t0) * 1000 / n
+    local rows, total = {}, 0
+    for _, a in ipairs(L.addons) do
+      local avg = ((a.pm_ms or 0) - (a.pm_base or 0)) / n
+      total = total + avg
+      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on }
+    end
+    for _, b in ipairs(L.boots()) do
+      local avg = ((b.pm_ms or 0) - (b.pm_base or 0)) / n
+      total = total + avg
+      -- the HD2 file-mod installer (a helper boot the settings-file mods share, not a mod a player picks) gets no row
+      -- of its own; its time still counts in All Mods
+      local name = boot_name(b)
+      if not name:lower():find('file%-mod installer') then
+        rows[#rows + 1] = { name = name, avg = avg, worst = b.pm_max or 0, on = b.on ~= false }
+      end
+    end
+    sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
+    local self = pm.self / n
+    local loader = max(0, pm.loader / n - self)
+    local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
+    -- { left, right, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod (1 ms or more), 6 off or dim
+    local out = {
+      { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), 'MS  SHARE WORST', 2 },
+      { 'ALL MODS', fmt('%.2f %4.1f%%', total + loader, pct(total + loader)), 3 },
+    }
+    for i, r in ipairs(rows) do
+      if i > 12 then break end
+      out[#out + 1] = { plain(r.name):sub(1, 20), r.on and fmt('%.2f %4.1f%% %4.1f', r.avg, pct(r.avg), r.worst) or 'OFF',
+                        r.on and (r.avg >= 1 and 5 or 4) or 6 }
+    end
+    out[#out + 1] = { 'LOADER', fmt('%.2f %4.1f%%', loader, pct(loader)), 4 }
+    out[#out + 1] = { 'THIS MONITOR', fmt('%.2f %4.1f%%', self, pct(self)), 6 }
+    return out
+  end
+  -- The panel, laid out once a second (when its numbers change) into a list of rects with a color index each; every
+  -- frame only makes the few colors and draws the rects. The look matches the options menu: a dark panel in a thin
+  -- yellow frame with a yellow bar on top, the title in yellow.
+  local PM_COLORS = { { 255, 231, 16, 255 }, { 150, 255, 180, 255 }, { 255, 255, 255, 255 }, { 220, 222, 216, 255 },
+                      { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
+  local function pm_layout(ls, w, h)
+    local px = max(2, floor(h / 540 + 0.5))
+    local rh, cols = 10 * px, 38
+    local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
+    local x0, y1 = w - pw - floor(w * 0.02), floor(h * 0.96)        -- top right, clear of the options menu (top left)
+    local b = max(1, floor(px * 0.75))
+    local out = {
+      { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
+      { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
+      { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
+    }
+    local function txt(x, y, s, ci) L.text_rects(x, y, s, px, out, ci) end
+    local tx = 5 * px
+    txt(x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
+    local y = y1 - 2 * rh - px
+    for _, l in ipairs(ls) do
+      txt(x0 + tx, y + px, l[1], l[3])
+      if l[2] ~= '' then txt(x0 + pw - tx - (#l[2] * 6 * px - px), y + px, l[2], l[3] == 2 and 6 or l[3]) end
+      y = y - rh
+    end
+    return out
+  end
+  function util.monitor_frame(now)
+    local on = util.perf_row ~= nil and util.perf_row.value == true
+    if on ~= pm.on then
+      pm.on, pm.lines, pm.rects = on, nil, nil
+      if on then pm_reset(now) end
+      log(on and 'performance monitor: on (each mod\'s average a frame, its share of the frame and its worst call; once a second)'
+        or 'performance monitor: off')
+    end
+    if not on then return end
+    pm.frames = pm.frames + 1
+    if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
+    if not pm.lines then return end
+    local t0 = L.clock()
+    local w, h = ctx.screen()
+    if not pm.rects or pm.w ~= w or pm.h ~= h then pm.rects, pm.w, pm.h = pm_layout(pm.lines, w, h), w, h end
+    local cs = {}
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
+    local top = ctx.TOP + 940
+    for _, r in ipairs(pm.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
+    pm.self = pm.self + (L.clock() - t0) * 1000
+  end
 
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,

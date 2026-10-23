@@ -1,4 +1,4 @@
--- Chef Shared Loader: the locked-down space every loader mod runs in (0.2.0 Test 13)
+-- Chef Shared Loader: the locked-down space every loader mod runs in
 -- Every "-- HD2-Addon:" and "-- HD2-Boot:" mod gets an environment of its own built here. What it can't do from it:
 --   * start programs, delete or rename files, quit the game through Lua (os.execute, io.popen, os.remove/rename/exit)
 --   * load native code (package.loadlib, C modules through require) or compiled Lua (bytecode can be made to read and
@@ -63,7 +63,7 @@ local function names_of(rest)
 end
 
 -- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
--- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where my files were up to Test 12, or nil),
+-- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, where older builds kept my files, or nil),
 -- FILES ('chef_loader'), overrides (compat's xpcall and load)
 function M.install(ctx)
   local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
@@ -191,8 +191,8 @@ function M.install(ctx)
         if not ok then return deny('open', path, mode, root) end
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
-        -- (Test 13) a mod's own file read from the loader's folder that isn't there yet comes from the old folder
-        -- (%LOCALAPPDATA%, up to Test 12) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
+        -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
+        -- (%LOCALAPPDATA%, in older builds) if it's there: settings a mod kept (Treasure Radar's zoom) carry over, and
         -- its next write lands in the new place
         if not f and root == WDIR and ODIR and ctx.OLD_DIR and type(names) == 'table' and #names == 1 and ext
           and MOD_EXT[ext] and (mode == nil or mode == 'r' or mode == 'rb') then

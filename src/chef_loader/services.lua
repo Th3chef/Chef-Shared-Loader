@@ -63,7 +63,7 @@ end
 -- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only
 local function plain(s)
   s = tostring(s or ''):upper()
-  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' '))
+  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> ]', ' '))
 end
 
 function M.install(ctx)
@@ -317,7 +317,7 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
-    -- (Test 13) a log of the same name in the old folder (%LOCALAPPDATA%, up to Test 12) gets one last line saying
+    -- a log of the same name in the old folder (%LOCALAPPDATA%, in older builds) gets one last line saying
     -- where the log went, once
     if ctx.OLD_DIR then
       local old = ctx.OLD_DIR .. name .. '.log'
@@ -420,7 +420,7 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
-    -- (Test 13) where the loader's folder was up to Test 12 (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- where the loader's folder was in older builds (%LOCALAPPDATA%), so a mod can pick up its own old files
     -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
@@ -441,7 +441,11 @@ function M.install(ctx)
   end
 
   -- ---------------------------------------------------------------- the options menu (drawn over everything)
-  local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false }
+  -- Two levels: the mods (in alphabetical order), then the options of the one picked (in the mod's own order). A search
+  -- shows every match across the mods at once. menu.group: the mod open now (nil: the list); menu.back: where the
+  -- list's cursor was, so Backspace returns to it. (Escape closes the whole menu; Backspace goes back one level, so
+  -- going back never touches the game's own Escape menu.)
+  local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false, group = nil, back = 1 }
   local loader_mod = '_loader'
   local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu' })
   local reload_key = nil
@@ -453,15 +457,31 @@ function M.install(ctx)
   end
   function svc.set_row(r, v) set_row(r, v) end
   function svc.menu_key_name() return menu_key.value end
-  -- a search typed after '/': a group whose title has it shows whole; else only the rows whose label has it
-  local lines_cache = { ver = -1, search = nil, out = nil }
+  -- the mods with rows, by title in alphabetical order (case ignored; the mod's name breaks a tie)
+  local function sorted_groups()
+    local gs = {}
+    for _, g in ipairs(groups) do if #g.rows > 0 then gs[#gs + 1] = g end end
+    table.sort(gs, function(a, b)
+      local ta, tb = text_of(a.title):lower(), text_of(b.title):lower()
+      if ta ~= tb then return ta < tb end
+      return a.mod < b.mod
+    end)
+    return gs
+  end
+  -- the lines shown: the list of mods; the open mod's options; or, with a search typed after '/', every mod whose
+  -- title has it (whole) and every option whose label has it, under its mod's title
+  local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
   local function lines()
-    if lines_cache.ver == ver.layout and lines_cache.search == menu.search then return lines_cache.out end
+    if lines_cache.ver == ver.layout and lines_cache.search == menu.search and lines_cache.group == menu.group then
+      return lines_cache.out
+    end
     local out = {}
     local q = menu.search ~= '' and menu.search or nil
-    for _, g in ipairs(groups) do
-      if #g.rows > 0 then
-        local whole = not q or text_of(g.title):lower():find(q, 1, true) ~= nil
+    -- every screen under the list starts with a Back row (to the list of mods)
+    if q or menu.group then out[1] = { back = true, text = '< BACK' } end
+    if q then
+      for _, g in ipairs(sorted_groups()) do
+        local whole = text_of(g.title):lower():find(q, 1, true) ~= nil
         local rows = {}
         for _, r in ipairs(g.rows) do
           if whole or text_of(r.spec.label or r.id):lower():find(q, 1, true) then rows[#rows + 1] = r end
@@ -471,8 +491,12 @@ function M.install(ctx)
           for _, r in ipairs(rows) do out[#out + 1] = { row = r } end
         end
       end
+    elseif menu.group then
+      for _, r in ipairs(menu.group.rows) do out[#out + 1] = { row = r } end
+    else
+      for _, g in ipairs(sorted_groups()) do out[#out + 1] = { pick = g, text = g.title } end
     end
-    lines_cache.ver, lines_cache.search, lines_cache.out = ver.layout, menu.search, out
+    lines_cache.ver, lines_cache.search, lines_cache.group, lines_cache.out = ver.layout, menu.search, menu.group, out
     return out
   end
   local function value_text(r, users)
@@ -506,16 +530,22 @@ function M.install(ctx)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 1, 1 end
+      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 2, 1 end
+      if menu.typing then menu.group = nil end
       return false
     end
     for ch in typed:gmatch('[%w ]') do
-      if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 1, 1 end
+      if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 1, 1 end
+    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
     if pressed('enter') then menu.typing = false end
     if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
     return true
+  end
+  -- back to the list of mods, where its cursor was (the Back row, or Backspace)
+  local function go_back()
+    if menu.group then menu.sel, menu.top = menu.back, 1 else menu.sel, menu.top = 1, 1 end
+    menu.group, menu.search = nil, ''
   end
   local function menu_input(ls)
     if menu.capture then
@@ -539,11 +569,20 @@ function M.install(ctx)
     elseif pressed('page down') then for _ = 1, 8 do step(1) end
     elseif pressed('page up') then for _ = 1, 8 do step(-1) end end
     local l = ls[menu.sel]
+    -- a mod in the list: Enter (or Right) opens its options, the cursor on its first option (Back is just above it)
+    if l and l.pick then
+      if pressed('enter') or pressed('right') then menu.back, menu.group, menu.sel, menu.top = menu.sel, l.pick, 2, 1 end
+      return
+    end
+    if l and l.back then
+      if pressed('enter') or pressed('left') then go_back() end
+      return
+    end
     local r = l and l.row
     if not r then return end
     local s = r.spec
     local dir = pressed('right') and 1 or (pressed('left') and -1 or 0)
-    if pressed('backspace') then set_row(r, r.default); return end
+    if pressed('delete') then set_row(r, r.default); return end
     if s.type == 'toggle' and (dir ~= 0 or pressed('enter')) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 then
       local v = r.value + dir
@@ -552,61 +591,100 @@ function M.install(ctx)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * (s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and pressed('enter') then menu.capture = r end
   end
+  -- The look (the same as the loader's release art): a dark panel in a yellow frame, the title on a yellow bar, the
+  -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
   local function menu_draw(ls)
     local w, h = ctx.screen()
     local px = max(2, floor(h / 540 + 0.5))
     local top = ctx.TOP + 950
-    local rh, cols = 11 * px, 40
-    local pw = (cols * 6 + 6) * px
+    local rh, cols = 12 * px, 40
+    local pw = (cols * 6 + 10) * px
     local x0 = floor(w * 0.05)
-    local visible = max(4, floor((h * 0.7) / rh) - 3)
+    local visible = max(4, floor((h * 0.7) / rh) - 4)
     if menu.sel < menu.top then menu.top = menu.sel elseif menu.sel >= menu.top + visible then menu.top = menu.sel - visible + 1 end
     local shown = min(visible, #ls - menu.top + 1)
-    local ph = (shown + 3) * rh
-    local y0 = floor(h * 0.85)
+    local hb = rh + 2 * px                     -- the title bar
+    local ph = hb + shown * rh + 3 * px + rh + 2 * px
+    local y0 = floor(h * 0.85)                 -- the panel's top edge (y grows upward)
     local col = ctx.color
-    ctx.rect(x0, y0 - ph, pw, ph, col(8, 12, 10, 230), top)
-    ctx.rect(x0, y0 - 2, pw, 2, col(90, 255, 140, 255), top + 1)
-    ctx.text(x0 + 3 * px, y0 - rh + 2 * px, plain(ctx.LOADER .. ' OPTIONS'), px, col(150, 255, 180, 255), top + 2)
-    if menu.typing or menu.search ~= '' then
-      local q = plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
-      ctx.text(x0 + pw - 3 * px - ctx.text_width(q, px), y0 - rh + 2 * px, q, px, col(255, 221, 31, 255), top + 2)
-    end
+    local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
+    local white, green, gray = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255)
+    local tx = 7 * px                          -- the text's left inset
+    local function midy(y, hgt) return y + floor((hgt - 7 * px) / 2) end
+    -- panel, frame, title bar
+    ctx.rect(x0, y0 - ph, pw, ph, col(9, 11, 10, 238), top)
+    local b = max(1, floor(px * 0.75))
+    ctx.rect(x0, y0 - ph, pw, b, yellow, top + 3); ctx.rect(x0, y0 - b, pw, b, yellow, top + 3)
+    ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
+    ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
+    local head = menu.group and text_of(menu.group.title) or (ctx.LOADER .. ' OPTIONS')
+    ctx.text(x0 + tx, midy(y0 - hb, hb), plain(head):sub(1, cols - 8), px, ink, top + 2)
+    local right = (menu.typing or menu.search ~= '') and plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
+      or plain(menu_key.value ~= 'off' and menu_key.value or '')
+    ctx.text(x0 + pw - tx - ctx.text_width(right, px), midy(y0 - hb, hb), right, px, ink, top + 2)
     local users = key_users()
-    local y = y0 - 2 * rh
+    local y = y0 - hb - rh
     for i = menu.top, menu.top + shown - 1 do
       local l = ls[i]
+      local sel = i == menu.sel and not l.head
+      if sel then
+        ctx.rect(x0 + b, y, pw - 2 * b, rh, col(255, 231, 16, 42), top + 1)
+        ctx.rect(x0 + b, y, 2 * px, rh, yellow, top + 2)
+      end
+      local ty = midy(y, rh)
       if l.head then
-        ctx.text(x0 + 3 * px, y + 2 * px, plain(l.text):sub(1, cols - 2), px, col(90, 255, 140, 255), top + 2)
+        ctx.text(x0 + tx, ty, plain(l.text):sub(1, cols - 2), px, yellow, top + 2)
+      elseif l.back then
+        ctx.text(x0 + tx + 2 * px, ty, l.text, px, yellow, top + 2)
+      elseif l.pick then
+        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(l.text)):sub(1, cols - 6), px, white, top + 2)
+        ctx.text(x0 + pw - tx - ctx.text_width('>', px), ty, '>', px, green, top + 2)
       else
         local r = l.row
-        if i == menu.sel then ctx.rect(x0 + px, y, pw - 2 * px, rh, col(40, 70, 50, 230), top + 1) end
-        local label = plain(text_of(r.spec.label or r.id)):sub(1, 24)
-        ctx.text(x0 + 6 * px, y + 2 * px, label, px, col(235, 235, 235, 255), top + 2)
+        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(r.spec.label or r.id)):sub(1, 24), px, white, top + 2)
         local v = plain(value_text(r, users)):sub(1, 14)
-        ctx.text(x0 + pw - 3 * px - ctx.text_width(v, px), y + 2 * px, v, px, col(255, 221, 31, 255), top + 2)
+        local vw = ctx.text_width(v, px)
+        local vx = x0 + pw - tx - vw
+        if r.spec.type == 'key' and menu.capture ~= r then
+          -- a key: a light chip with the key's name in ink
+          ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, white, top + 2)
+          ctx.text(vx, ty, v, px, ink, top + 3)
+        else
+          ctx.text(vx, ty, v, px, (r.spec.type == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green), top + 2)
+        end
       end
       y = y - rh
     end
+    -- the hints under a thin line
+    ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
     local hint = menu.capture and 'PRESS A KEY  ESC CANCEL  DEL NONE'
       or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-      or 'ARROWS PICK/CHANGE  ENTER  BKSP DEFAULT  / SEARCH'
-    ctx.text(x0 + 3 * px, y0 - ph + 2 * px, plain(hint):sub(1, cols), px, col(150, 150, 150, 255), top + 2)
+      or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
+      or 'ARROWS  ENTER OPEN  / SEARCH  F9 CLOSE'
+    ctx.text(x0 + tx, midy(y0 - ph + px, rh), plain(hint):sub(1, cols), px, gray, top + 2)
   end
   local function menu_frame()
     local mk = menu_key.value
+    if menu.open and menu.capture == nil and not menu.typing and pressed('backspace') and (menu.group or menu.search ~= '') then
+      -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
+      go_back()
+      return
+    end
     if menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
       menu.open, menu.typing = false, false
       return
     end
     if not menu.open then
       if mk ~= 'off' and pressed(mk) then
-        menu.open = true
+        -- it always opens on the list of mods
+        menu.open, menu.group, menu.search, menu.sel, menu.top = true, nil, '', 1, 1
         if not menu.said then menu.said = true; log('options menu opened') end
       else
         return
       end
     end
+    -- the open mod stopped and its options went: back to the list
+    if menu.group and #menu.group.rows == 0 then menu.group, menu.sel, menu.top = nil, 1, 1 end
     local typing = menu.capture == nil and search_input()
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
@@ -628,7 +706,7 @@ function M.install(ctx)
         after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
         open_log = function(name)
           if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
-          -- (Test 13) never the loader's own log
+          -- never the loader's own log
           if name:lower():find('^chef_loader') or name:lower():find('^' .. ctx.FILES:lower()) then return nil, 'that log is the loader\'s own' end
           return ctx.open(ctx.DIR .. name, 'a')
         end,
