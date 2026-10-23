@@ -1,5 +1,5 @@
 """Chef Shared Loader release art: thumbnail (1254x1254, and the 512x512 Arsenal one), gallery photo (1920x1080),
-GitHub social preview (1280x640) and the AyakaMods cover (1600x1000, the title inside the middle the site's mod cards
+GitHub social preview (1280x640), the Nexus header (1300x372) and the AyakaMods cover (1600x1000, the title inside the middle the site's mod cards
 show). HTML rendered with Playwright Chromium over a blurred shot of the game (scene.jpg): the title and badge in
 Anton and Barlow Condensed, the log and the options menu in JetBrains Mono (all SIL Open Font License, from
 @fontsource, in fonts/). The menu and the monitor follow the loader's own (its pixel font redrawn in a mono face).
@@ -147,6 +147,14 @@ def main():
         <div class="tag" style="font-size:28px">%(t)s</div>
         <div style="margin-top:22px">%(f)s</div>
       </div>""" % dict(v, f=feats(21)) + menu(740, 180, 470, 20) + perf(960, 420, 470, 19)),
+        # the Nexus header (1300x372): Nexus fades the lower half and puts the page's title, stats and buttons over
+        # it, and its Manage button sits top right, so everything stays in the upper half, clear of that corner
+        ('header_1300x372.png', 1300, 372, """
+      <div style="position:absolute;left:30px;top:34px;width:560px">
+        <div style="white-space:nowrap"><span class="title" style="font-size:58px">Chef Shared Loader</span>
+          <span class="badge" style="font-size:24px;vertical-align:14px;margin-left:12px">%(b)s</span></div>
+        <div class="tag" style="font-size:19px;margin-top:12px">%(t)s</div>
+      </div>""" % v + menu(596, 30, 268, 13) + perf(880, 30, 296, 12)),
     ]
     with sync_playwright() as p:
         b = p.chromium.launch()
