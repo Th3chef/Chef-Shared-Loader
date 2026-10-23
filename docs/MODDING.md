@@ -94,7 +94,7 @@ version, `chef.name` your mod's name.
 
 | Helper | What it does |
 |---|---|
-| `chef.call('Table.function', ...)` | A guarded engine call, e.g. `chef.call('Unit.alive', u)`. It returns nil plus a reason when the function is missing, raised an error, or is skipped after a crash. |
+| `chef.call('Table.function', ...)` | A guarded engine call, e.g. `chef.call('Unit.alive', u)`: an engine table from `stingray` (or an engine table among the game's globals). It returns nil plus a reason when the function is missing, raised an error, or is skipped after a crash. |
 | `chef.call_kind('Table.function', kind, ...)` | The same, with its own crash key per `kind` (so a crash on one unit kind only skips that kind). |
 
 ### World, camera and units
@@ -202,10 +202,10 @@ off, **Enter** keeps the search, **Escape** clears it. Values are saved between 
 | Helper | What it does |
 |---|---|
 | `chef.title(text)` | Your mod's heading in the menu (its name otherwise). |
-| `chef.option(id, spec)` | Adds a row and returns its current value. Ids are letters, digits, `_ . -`. `spec`: `{ type = 'toggle' \| 'choice' \| 'slider' \| 'key', label, default, ... }`. A choice has `choices` (2 to 32 strings; the value is the index), a slider `min`, `max` and optionally `step`. A row at its default isn't stored, so a new default in an update reaches players who never changed it. |
+| `chef.option(id, spec)` | Adds a row and returns its current value. Ids are letters, digits, `_ . -`. `spec`: `{ type = 'toggle' \| 'choice' \| 'slider' \| 'key', label, default, ... }`. A choice has `choices` (2 to 32 strings; the value is the index), a slider `min` < `max` (finite numbers) and optionally `step` (0 or more; values snap within the range). A spec that doesn't fit is refused with the reason. A row at its default isn't stored, so a new default in an update reaches players who never changed it. |
 | `chef.get(id)`, `chef.set(id, value)` | Read or change a row. |
-| `chef.on_change(id, fn)` | `fn(value)` whenever the row changes (from the menu or `set`). |
-| `chef.bind(id, default_key, label)` | A key row. Returns `b` with `b.key()` (`'off'` for none), `b.pressed()` and `b.down()` for this frame. A key two rows use is marked `!` in the menu and noted in the log. |
+| `chef.on_change(id, fn)` | `fn(value)` whenever the row changes (from the menu or `set`). Up to 64 per row; it stops when your mod stops. |
+| `chef.bind(id, default_key, label)` | A key row (key names in any case: `'F6'` is `'f6'`). Returns `b` with `b.key()` (`'off'` for none), `b.pressed()` and `b.down()` for this frame. A key two rows use is marked `!` in the menu and noted in the log. |
 
 Arsenal options (`chef.options`) still work and stay the place for what has to be chosen before the game starts (which
 textures ship, for example). A good pattern: take the Arsenal value as the menu row's default.
@@ -229,6 +229,8 @@ them run (the parts that needed `ffi` or the JIT can't come back):
   the loader's folder).
 - `ModOptionsMenu`: `register_option(id, spec)`, `get`, `set`, `on_change`, `ready`. Its rows appear in this menu,
   under each `spec.mod` heading (128 options and 64 headings at most). Any id saves, spaces and all.
+- Each mod gets its own read-only copy of both, tied to that mod: its `after_startup` and `on_change` stop when it
+  stops, and no mod can replace another's.
 
 ### Dev mode (test builds of the loader only)
 
@@ -248,6 +250,7 @@ Delete the file (or empty it) to turn dev mode off.
 ### Drawing every frame
 
 An addon's table can have `render()` besides `update(dt)`; the loader calls it after the game's render each frame.
+The loader looks `update`, `render` and `shutdown` up in the table at every call, so you can set or swap them later.
 Boot-style scripts keep their global `render`.
 
 ## Utilities (api 3)
@@ -346,7 +349,7 @@ jobs made inside a timer or job start on the next frame.
 
 | Helper | What it does |
 |---|---|
-| `chef.save_table(name, t)` | Saves plain data (booleans, numbers, strings, tables of them; no functions or cycles, 16 deep, 256 KB) to `chef_data_<author>_<mod>_<name>.lua` in the log folder. Written to a `.tmp` first. |
+| `chef.save_table(name, t)` | Saves plain data (booleans, numbers, strings, tables of them; no functions or cycles, 16 deep, 256 KB) to `chef_data_<author>_<mod>__<name>.lua` in the log folder (characters other than `a-z 0-9 -` become `_` and two hex digits, so every mod and table has its own file; files from 1.0.0 are moved over once). Written to a `.tmp` first; returns true when saved, or false and why. |
 | `chef.load_table(name)` | Reads it back (run with nothing to reach), or nil and why. |
 
 ### The mod list
@@ -357,7 +360,7 @@ jobs made inside a timer or job start on the next frame.
 
 | Row | What it does |
 |---|---|
-| Open this menu | The menu key (F9). |
+| Open this menu | The menu key (F9). It can't be off or a menu navigation key; such a value falls back to F9. |
 | Budget warning (ms) | The default frame budget behind `chef.budget`. |
 | Performance monitor | Off by default. On, a panel in the top right shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
 
@@ -430,8 +433,10 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
   environment and crash-guarded, with full access (as the game gives any boot script; the log says so). Identical
   copies run once.
 - **When that mod deploys after Chef Shared Loader:** the game runs only that mod's `boot`, and no Chef Shared Loader mod runs.
-- So players who keep such a mod should deploy Chef Shared Loader last. The fix for good is to port the mod to `-- HD2-Boot:`.
+- So players who keep such a mod should give Chef Shared Loader the highest priority. The fix for good is to port the mod to `-- HD2-Boot:`.
 - Code such a boot loads with `loadstring`, `load` or `dofile` stays in its own environment too.
+- Its environment's metatable is locked (from 1.0.1), so no loader mod can reach the game's globals through it. A boot
+  script that calls `setmetatable(_G, ...)` (a "strict mode" guard) gets an error there; port it to `-- HD2-Boot:`.
 - **Another mod loader's `boot`** (one that reads the patches for `-- HD2-Addon:` mods itself, such as Boot Mod Loader)
   is not run: it would start every mod a second time. The log and the screen say so. Only one loader can run.
 - **Two copies of the same mod** (`-- HD2-Addon:` or `-- HD2-Boot:` with the same name): the one deployed last runs.
