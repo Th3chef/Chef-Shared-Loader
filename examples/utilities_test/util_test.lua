@@ -1,5 +1,5 @@
 -- HD2-Addon: mods/test/util_test
--- HD2-Requires: chef-shared-loader >= 0.2.0
+-- HD2-Requires: chef-shared-loader >= 1.0.0
 -- Exercises the api 3 utilities in the simulator (and in game as a test mod): every result goes to its own log.
 local chef = ...
 local M = { version = '1.0.1' }

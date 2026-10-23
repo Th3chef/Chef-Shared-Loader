@@ -1,3 +1,3 @@
 { "name": "Chef Shared Loader Utilities Test", "version": "1.0.1", "guid": "33333333-4444-4555-8666-777777777777",
-  "description": "A test mod for Chef Shared Loader 0.2.0: exercises the api 3 utilities and logs every result to util_test.log.",
+  "description": "A test mod for Chef Shared Loader 1.0.0: exercises the api 3 utilities and logs every result to util_test.log.",
   "lua": [ {"resource": "mods/test/util_test", "file": "util_test.lua"} ] }
