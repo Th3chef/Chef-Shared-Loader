@@ -317,6 +317,26 @@ function M.install(ctx)
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, written = 0, owner = owner }
     own_logs[name] = o
+    -- (Test 13) a log of the same name in the old folder (%LOCALAPPDATA%, up to Test 12) gets one last line saying
+    -- where the log went, once
+    if ctx.OLD_DIR then
+      local old = ctx.OLD_DIR .. name .. '.log'
+      local g = ctx.open(old, 'r')
+      if g then
+        local size = g:seek('end') or 0
+        g:seek('set', math.max(0, size - 300))
+        local tail = g:read('*a') or ''
+        g:close()
+        if not tail:find('this log is no longer written', 1, true) then
+          local w = ctx.open(old, 'a')
+          if w then
+            pcall(w.write, w, fmt('%s %s.log moved to %%APPDATA%%\\Arrowhead\\Helldivers2 with %s; this log is no longer written\n',
+              ctx.clock(), name, ctx.LOADER))
+            w:close()
+          end
+        end
+      end
+    end
     return o
   end
   local function own_write(o, text)
@@ -400,6 +420,9 @@ function M.install(ctx)
     end
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
+    -- (Test 13) where the loader's folder was up to Test 12 (%LOCALAPPDATA%), so a mod can pick up its own old files
+    -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
+    chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
       if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 or name:lower():find('^chef_loader') then
         return false, 'log names are letters, digits, _ - (48 at most), and not chef_loader'
@@ -605,6 +628,8 @@ function M.install(ctx)
         after_startup = function(fn) return after_startup('bingus look-alike', fn) end,
         open_log = function(name)
           if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') then return nil, 'log names are letters, digits, _ - and end in .log' end
+          -- (Test 13) never the loader's own log
+          if name:lower():find('^chef_loader') or name:lower():find('^' .. ctx.FILES:lower()) then return nil, 'that log is the loader\'s own' end
           return ctx.open(ctx.DIR .. name, 'a')
         end,
       })

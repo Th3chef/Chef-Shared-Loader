@@ -884,10 +884,17 @@ function M.install(ctx, L)
       local path = data_file(name)
       if not path then return nil, 'bad name' end
       local f = ctx.open(path, 'r') or ctx.open(path .. '.tmp', 'r')
+      -- (Test 13) up to Test 12 the saved tables were in %LOCALAPPDATA%: read from there until the mod saves again
+      if not f and ctx.OLD_DIR then
+        local old = ctx.OLD_DIR .. path:sub(#ctx.DIR + 1)
+        f = ctx.open(old, 'r') or ctx.open(old .. '.tmp', 'r')
+      end
       if not f then return nil, 'none saved' end
       local text = f:read('*a')
       f:close()
       if type(text) ~= 'string' or #text > 256 * 1024 then return nil, 'too big' end
+      -- (Test 13) text only: compiled Lua can be made to reach outside any environment
+      if text:byte(1) == 27 then return nil, 'not a saved table' end
       local chunk, err = loadstring(text, '=' .. name)
       if not chunk then return nil, tostring(err) end
       setfenv(chunk, {})               -- plain data: it runs with nothing to reach
