@@ -1,6 +1,7 @@
 """Chef Shared Loader release art: thumbnail (1254x1254, and the 512x512 Arsenal one), gallery photo (1920x1080),
-GitHub social preview (1280x640), the Nexus header (1300x372) and the AyakaMods cover (1600x1000, the title inside the middle the site's mod cards
-show). HTML rendered with Playwright Chromium over a blurred shot of the game (scene.jpg): the title and badge in
+GitHub social preview (1280x640), the Nexus header (1300x372) and the AyakaMods cover (1600x1000, the title inside
+the middle the site's mod cards show). HTML rendered with Playwright Chromium over a blurred shot of the game
+(scene.jpg): the title and badge in
 Anton and Barlow Condensed, the log and the options menu in JetBrains Mono (all SIL Open Font License, from
 @fontsource, in fonts/). The menu and the monitor follow the loader's own (its pixel font redrawn in a mono face).
 python3 art/cards.py <out dir> [version, e.g. 1.0.0]"""
@@ -17,7 +18,7 @@ FEATURES = ['ANY AUTHOR', 'F9 OPTIONS MENU', 'PERFORMANCE MONITOR', 'CRASH GUARD
 
 
 def background(W, H):
-    """the game, blurred and darkened toward the edges (a touch darker than Treasure Radar's, for the windows)"""
+    """the game, blurred and darkened toward the edges (dark enough for the windows to stand out)"""
     im = Image.open(os.path.join(HERE, 'scene.jpg')).convert('RGB')
     k = max(W / im.width, H / im.height)
     im = im.resize((int(im.width * k + 1), int(im.height * k + 1)), Image.LANCZOS)
