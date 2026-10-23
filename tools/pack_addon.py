@@ -8,7 +8,7 @@ mod.json:
     "name": "My Mod",                       shown in the mod manager
     "version": "1.0.0",
     "guid": "<a new uuid of your own>",
-    "description": "What it does. Needs Chef Shared Loader 0.2.0 or newer.",
+    "description": "What it does. Needs Chef Shared Loader 1.0.0 or newer.",
     "thumbnail": "thumbnail.png",            optional
     "lua": [                                 the core folder: your addon / boot-style script and any extra Lua
       {"resource": "mods/you/my_mod", "file": "my_mod.lua"}
@@ -82,7 +82,7 @@ def main():
                             [(h.resource_hash(o['addon'] + '/options/' + o['folder']), h.lua_resource(text))], header)
         options.append({'Name': o['name'], 'Description': o.get('description', ''), 'Include': [o['folder']]})
     manifest = {'Version': 1, 'Guid': spec['guid'], 'Name': spec['name'] + ' ' + spec['version'],
-                'Description': spec.get('description', '') or 'Needs Chef Shared Loader 0.2.0 or newer.', 'Options': options}
+                'Description': spec.get('description', '') or 'Needs Chef Shared Loader 1.0.0 or newer.', 'Options': options}
     if spec.get('thumbnail'):
         shutil.copy(os.path.join(base, spec['thumbnail']), os.path.join(d, 'thumbnail.png'))
         manifest['IconPath'] = 'thumbnail.png'

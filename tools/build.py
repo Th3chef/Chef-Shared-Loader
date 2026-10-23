@@ -20,7 +20,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, 'tools'))
 import hd2_patch as h
 
-VERSION = '0.2.0'
+VERSION = '1.0.0'
 GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader (the same id since its first test build)
 ZIP_DATE = (2026, 10, 23, 0, 0, 0)
 
@@ -64,7 +64,7 @@ json.dump({'Version': 1, 'Guid': GUID, 'Name': name, 'IconPath': 'thumbnail.png'
                            "boot script (mods that still replace boot run too when Chef Shared Loader is deployed last). Puts back the "
                            "pure-Lua parts of LuaJIT mods use. A mod that crashes the game is switched off on the next launch "
                            "and named in chef_loader.log (%APPDATA%\\Arrowhead\\Helldivers2). Mods run locked down: no programs, no native code, "
-                           "files only in the game's own folders. Mod makers: see docs/MODDING.md in the source kit.")},
+                           "files only in the game's own folders. F9 opens the options menu of every mod (and the loader's performance monitor). Mod makers: see docs/MODDING.md at github.com/Th3chef/Chef-Shared-Loader.")},
           open(os.path.join(d, 'manifest.json'), 'w'), indent=2)
 shutil.copy(os.path.join(HERE, 'tools', 'thumbnail.png'), d)
 z = os.path.join(OUT, f'Chef-Shared-Loader-{VERSION}' + (f'-Test-{TEST}' if TEST else '') + '.zip')
