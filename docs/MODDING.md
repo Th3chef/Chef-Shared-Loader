@@ -1,7 +1,5 @@
 # Making mods for Chef Shared Loader
 
-(Its earlier name was Chef Loader. Nothing a mod uses was renamed: the headers, `chef` and the file names stay.)
-
 Chef Shared Loader replaces the game's empty `boot` script and runs Lua mods on the current game build (Lua 5.1, with Easy
 Anti-Cheat). Since 0.2.0 any mod author can use it. Your mod ships a Lua file with a one-line header, and Chef Shared Loader:
 
@@ -24,8 +22,9 @@ replace it can't work together. With Chef Shared Loader, no mod but the loader t
 | Helpers | `chef` is passed in (`local chef = ...`) | `chef` is a global |
 | Best for | new mods | porting a mod that used to replace `boot` |
 
-Both run in their own environment. Globals you define stay yours; reading the game's globals (`stingray`, `Unit`,
-`World`, `io`, `os` ...) works as usual. Both are crash-guarded and stay off after a crash until the mod is updated.
+Both run in their own locked-down environment (see [What your mod can reach](#what-your-mod-can-reach)). Globals you
+define stay yours, `_G` is your environment, and the engine's script API (`stingray`, `Unit`, `World` ...) works as
+usual. Both are crash-guarded and stay off after a crash until the mod is updated.
 
 ### Porting a boot-replacing mod
 
@@ -41,8 +40,8 @@ Your `init`, `update`, `render` and `shutdown` are called as before, after Chef 
 
 - **The header** is the file's very first line, exactly `-- HD2-Addon: mods/<author>/<name>` (or `-- HD2-Boot:`, or
   `-- HD2-Options:` for an options file). `<author>` and `<name>` use letters, digits, `_` and `-`.
-- **The author folder** should be unique to you (your handle). Two mods with the same full name run once: the copy in
-  the earliest patch file (the one deployed first).
+- **The author folder** should be unique to you (your handle). Two mods with the same full name run once: the one
+  deployed last (the highest patch number).
 - **Load order:** `mods/chef/...` (my own mods) start first, then everyone else's by name. A mod's requirements start
   before it (see Requirements below).
 
@@ -87,7 +86,7 @@ version, `chef.name` your mod's name.
 
 | Helper | What it does |
 |---|---|
-| `chef.log(fmt, ...)` | A line in `chef_loader.log` (in `%LOCALAPPDATA%`), prefixed `[mods/you/my_mod]`. |
+| `chef.log(fmt, ...)` | A line in `chef_loader.log` (in `%APPDATA%\Arrowhead\Helldivers2`), prefixed `[mods/you/my_mod]`. |
 | `chef.options` | Your merged options. |
 | `chef.time()` | Seconds since the game started (the loader's clock). |
 
@@ -144,7 +143,8 @@ loader. An older loader has no `chef.has`: calling it there is an error, so test
 | `chef.capabilities` | Read-only. `api` (the level, 3), and true for each of: `after_startup`, `settings`, `share`, `events`, `require`, `bind`, `menu`, `shims`, `dev`, `logs`, `own_log` (api 2) and `units`, `spawn`, `timers`, `budget`, `session`, `settings_file`, `shapes`, `sprite_sheets`, `notify`, `typed`, `key_labels`, `save_table`, `mods` (api 3). |
 | `chef.has(name)` | True when the loader has that capability (`chef.has('api')` is true too). |
 | `chef.after_startup(fn)` | Runs `fn` once every mod has started (so other mods' shared values, exports and menu rows exist). Called at once when start-up is already over. |
-| `chef.log_directory` | The folder the loader's files are in, without a trailing `\`. Keep your own files there. |
+| `chef.log_directory` | The folder the loader's files are in (`%APPDATA%\Arrowhead\Helldivers2`), without a trailing `\`. Keep your own files there (`.log .txt .json .csv .dat`). |
+| `chef.previous_directory` | Where older builds of the loader kept its folder (`%LOCALAPPDATA%`), or nil. You may read your own `.log .txt .json .csv .dat` files there; a read of a missing file in `chef.log_directory` already falls back to it. |
 | `chef.own_log(name)` | From now on your `chef.log` lines go to `<name>.log` in that folder instead of `chef_loader.log` (no `[mods/...]` prefix there; a fresh file each launch once it passes 1 MB). The loader's own lines about your mod (started, Lua errors, crashes, timings) stay in `chef_loader.log`. Call it first thing; returns false and keeps logging to `chef_loader.log` when the name is taken or the file can't be opened. Names are letters, digits, `_ -`, 48 at most, and can't start with `chef_loader`. Check `chef.has('own_log')`. |
 | `chef.log_file` | The full path of the file your `chef.log` lines go to. |
 
@@ -379,15 +379,55 @@ jobs made inside a timer or job start on the next frame.
 
 ## The Lua you get
 
-- **The game's Lua is plain Lua 5.1:** no LuaJIT, no `ffi`, no `goto`. The game removed `load` and `loadfile`;
-  `loadstring`, `setfenv`, `io`, `os`, `debug` and `require` are there.
+- **The game's Lua is plain Lua 5.1:** no LuaJIT, no `ffi`, no `goto`. The game removed `load` and `loadfile`.
 - **What Chef Shared Loader puts back:** the pure-Lua parts of LuaJIT that mods often use: `bit` (identical results to
   LuaJIT's), `table.new`, `table.clear` and `table.unpack`.
 - **In your own environment:** `xpcall` with arguments, and `load` from a string.
 
+## What your mod can reach
+
+Every `HD2-Addon` and `HD2-Boot` mod runs locked down, so players can install mods from anyone without handing them
+their computer. Your mod has:
+
+- **The engine's script API:** `stingray`, `Unit`, `World` and the rest, plus every `chef` helper.
+- **Lua itself:** its own copies of `string`, `table`, `math`, `coroutine` and `bit`, so changing one changes it only
+  for you. `require` gives those, plus `table.new` and `table.clear`.
+- **`os`:** `clock`, `time`, `date`, `difftime` and `getenv`.
+- **`io.open` / `io.lines`:**
+  - **Reading:** the loader's folder (`chef.log_directory`, which is also the game's settings folder, `saves\`
+    included) and the game's `data\` folder.
+  - **Writing:** only `.log .txt .json .csv .dat` files straight in `chef.log_directory`, with names made of letters,
+    digits, `_ - .`. The loader's own files (`chef_loader*`) and saved tables (`chef_data_*`) are off limits; use
+    `chef.save_table`.
+- **`loadstring` / `load`:** text only. What you load runs in your environment, or in the table you hand `load`.
+- **`getfenv` / `setfenv`:** on your own functions.
+- **`debug`:** `traceback` and `getinfo`.
+
+Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod are logged as `blocked:`):
+
+- **Programs and files:** `os.execute`, `os.exit`, `os.remove`, `os.rename` and `io.popen`.
+- **Native code and compiled Lua:** `package.loadlib`, C modules and bytecode.
+- **The game's globals:** `require` of anything but the libraries above, `dofile`, `loadfile` and `module`.
+- **Climbing out:** the rest of `debug`, `setmetatable` on your environment, and `getfenv`/`setfenv` on the game's,
+  the loader's or another mod's functions.
+- **Files outside the rules above:** `..`, alternate data streams (`:`), short `~` names, device names and network
+  paths are refused too.
+
+**Porting tips:**
+- **A mod that hooked the frame by assigning `_G.update`** no longer reaches the engine that way. Return `update`
+  from your module's table, or use `-- HD2-Boot:` with a global `update`.
+- **Sharing between mods** goes through `chef.share` / `chef.require`, not globals.
+- **A mod that truly needs more** (swapping game files, say) has to ship its own `boot`, and then it isn't a loader
+  mod (see below).
+
 ## Compatibility with mods that still replace `boot`
 
 - **When Chef Shared Loader deploys after such a mod:** Chef Shared Loader also runs that mod's `boot` script, in its own
-  environment and crash-guarded. Identical copies run once.
+  environment and crash-guarded, with full access (as the game gives any boot script; the log says so). Identical
+  copies run once.
 - **When that mod deploys after Chef Shared Loader:** the game runs only that mod's `boot`, and no Chef Shared Loader mod runs.
 - So players who keep such a mod should deploy Chef Shared Loader last. The fix for good is to port the mod to `-- HD2-Boot:`.
+- Code such a boot loads with `loadstring`, `load` or `dofile` stays in its own environment too.
+- **Another mod loader's `boot`** (one that reads the patches for `-- HD2-Addon:` mods itself, such as Boot Mod Loader)
+  is not run: it would start every mod a second time. The log and the screen say so. Only one loader can run.
+- **Two copies of the same mod** (`-- HD2-Addon:` or `-- HD2-Boot:` with the same name): the one deployed last runs.
