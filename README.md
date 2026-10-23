@@ -1,11 +1,15 @@
-# Chef Shared Loader 0.2.0: source kit
+# Chef Shared Loader
+
+![Chef Shared Loader](media/gallery.png)
+
+**Download:** `Chef-Shared-Loader-1.0.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 A Lua mod loader for Helldivers 2 on the Lua 5.1 game build (PUC Lua 5.1, no LuaJIT, no `ffi`, Easy Anti-Cheat on).
 It replaces the game's `boot` script, finds every loader mod in the deployed patch archives, and runs each one in its
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 0.2.0
+- **Version:** 1.0.0
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
 - **Files on the player's computer:** `%APPDATA%\Arrowhead\Helldivers2\` (see [Files](#files-on-the-players-computer))
@@ -89,7 +93,12 @@ exactly one of these:
   off for the session and named on screen.
 - **Timing:** each mod's time per frame (average and worst, its timers and spread work included, over all of the
   loader's frames) goes into a status line when the numbers move, at most every 60 s, else every 10 minutes. A mod
-  over its budget is warned about once a minute.
+  over its budget is named in the log (at most every 10 minutes).
+- **Performance monitor** (the loader's own options, off by default): a panel with the game's frame time and every
+  mod's average milliseconds a frame, share of the frame and worst call, once a second, plus the loader's own share
+  and the panel's own cost (its text is drawn as rects, a few hundred a frame, so it shows that apart).
+- **Options menu (F9):** the list of mods in alphabetical order; Enter opens one mod's options, under a < Back row
+  (Backspace goes back too); Delete puts an option's default back; Escape or F9 closes the menu.
 - **Worlds:** engine handles (units, GUIs, cameras) are dropped whenever the main world changes, and nothing made in
   one world is used in the next.
   - **Settled:** a world counts as settled after 3 s.
@@ -256,7 +265,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 0.2.0 starting`
+- `==== Chef Shared Loader 1.0.0 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -299,7 +308,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 0.2.0 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.0.0 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
@@ -316,6 +325,7 @@ build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything e
 | `tools/build.py` | `python3 tools/build.py <out> --header-from <a Lua patch that works on the current game> [--test N]`. Byte-identical output, and it refuses to build when loader.lua is out of step. |
 | `tools/pack_addon.py` | Packs a loader mod from a `mod.json` into an Arsenal zip. |
 | `tools/hd2_patch.py` | The patch archive format. |
+| `art/` | The release art (`cards.py`: thumbnail, gallery, GitHub and AyakaMods pictures). |
 | `examples/` | `hello_addon`, `hello_boot` and `utilities_test`. |
 | `docs/MODDING.md` | The guide for mod makers. |
 

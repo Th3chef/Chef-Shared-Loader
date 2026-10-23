@@ -1,14 +1,18 @@
 # Changelog
 
-## 0.2.0 (in testing)
+## 1.0.0
+
+The first release on its own (Treasure Radar 0.5.x carried an earlier copy built in).
 
 - Open to every mod author: any mod with a
   `-- HD2-Addon: mods/<author>/<name>` or `-- HD2-Boot: mods/<author>/<name>` file runs, side by side and crash-guarded.
 - Shared services (api 2): `after_startup`, capabilities, saved settings per mod, shared values and events between
   mods, `require` of another mod's exports with version checks, a log of its own for any mod, and look-alikes of
   `CowboyBingusModLoader` and `ModOptionsMenu`.
-- An in-game options menu (F9) with every mod's options and key bindings, saved between launches, with doubled keys
-  marked, a search (/) and the loader's own Budget warning setting.
+- An in-game options menu (F9) with every mod's options and key bindings, saved between launches: the mods in
+  alphabetical order, each mod's options under a < Back row, doubled keys marked, a search (/) across every mod, and the
+  loader's own settings (Budget warning, Performance monitor).
+- A performance monitor: each mod's milliseconds a frame, share of the frame and worst call, once a second.
 - Utilities (api 3): safe unit access (calls known to end the game refused centrally), spawning, linking, particles
   and lights cleaned up when a world ends or a mod stops, timers and work spread over frames with a budget per mod,
   the game's settings file, host and player count, shapes, sprite sheets, on-screen messages, typed text, key labels,
