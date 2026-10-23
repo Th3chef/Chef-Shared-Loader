@@ -63,7 +63,8 @@ json.dump({'Version': 1, 'Guid': GUID, 'Name': name, 'IconPath': 'thumbnail.png'
                            "in your installed mods and runs each in its own space, side by side, with no fight over the game's "
                            "boot script (mods that still replace boot run too when Chef Shared Loader is deployed last). Puts back the "
                            "pure-Lua parts of LuaJIT mods use. A mod that crashes the game is switched off on the next launch "
-                           "and named in chef_loader.log (%LOCALAPPDATA%). Mod makers: see docs/MODDING.md in the source kit.")},
+                           "and named in chef_loader.log (%APPDATA%\\Arrowhead\\Helldivers2). Mods run locked down: no programs, no native code, "
+                           "files only in the game's own folders. Mod makers: see docs/MODDING.md in the source kit.")},
           open(os.path.join(d, 'manifest.json'), 'w'), indent=2)
 shutil.copy(os.path.join(HERE, 'tools', 'thumbnail.png'), d)
 z = os.path.join(OUT, f'Chef-Shared-Loader-{VERSION}' + (f'-Test-{TEST}' if TEST else '') + '.zip')
