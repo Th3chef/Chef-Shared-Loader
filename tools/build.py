@@ -20,8 +20,10 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, 'tools'))
 import hd2_patch as h
 
-VERSION = '1.0.0'
-GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader (the same id since its first test build)
+import re
+# the version comes from the loader itself, so the zip, the manifest and the log always agree
+VERSION = re.search(r"^local VERSION = '([^']+)'", open(os.path.join(HERE, 'src', 'loader.lua'), encoding='utf-8').read(), re.M).group(1)
+GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader's mod id (fixed: mod managers match updates by it)
 ZIP_DATE = (2026, 10, 23, 0, 0, 0)
 
 args = sys.argv[1:]
