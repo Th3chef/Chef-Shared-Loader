@@ -2,6 +2,6 @@
   "name": "Hello Boot",
   "version": "1.0.0",
   "guid": "a3c5e7f9-1b2d-4e6f-8a0c-3d5f7b9e1c24",
-  "description": "A Chef Shared Loader example: a boot-style script that runs next to the loader instead of replacing boot. Needs Chef Shared Loader 0.2.0 or newer.",
+  "description": "A Chef Shared Loader example: a boot-style script that runs next to the loader instead of replacing boot. Needs Chef Shared Loader 1.0.0 or newer.",
   "lua": [ { "resource": "mods/example/hello_boot", "file": "hello_boot.lua" } ]
 }
