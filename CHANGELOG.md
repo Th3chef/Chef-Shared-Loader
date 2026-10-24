@@ -8,7 +8,7 @@
   docs/MODDING.md are free to use. Reuploading the loader, or releasing it as another loader, still needs asking.
 
 **Mods made for the HD2 Lua Runtime**
-- Mods written for the HD2 Lua Runtime (such as HD2 Transmog and Native Notification) run on a look-alike of it:
+- Mods written for the HD2 Lua Runtime run on a look-alike of it:
   `HD2Runtime` and `require('hd2rt')`, `mod(spec)` handles with `on`, `log` and that runtime's engine calls, each one
   crash-guarded for the mod and undone when it stops. Its own boot script, which those mods carry, isn't needed (the
   log says so).
@@ -16,7 +16,7 @@
 - A mod file may return `true`, as those mods do.
 - Lua resources in envelope 1 (plain text too) are read as well as envelope 2.
 
-**From pull requests by tyrypyrking**
+**Boot scripts, the mod list and the resource index**
 - Boot scripts and `-- HD2-Boot:` mods that wrap the game's `update` (`local old = update ...`) no longer run the
   loader again from inside it every frame (it ran out of stack); code a boot script loads with `require` can't replace
   the loader's callbacks any more (they're put back, and the replaced one runs as that boot's).
@@ -41,9 +41,9 @@
   won't work with any loader, even when the mod carries on without them.
 
 **Trusted mods**
-- A short list in the loader gives a mod more than the locked-down space, only what it needs. HD2 Transmog gets the
-  Steam lobby (its own key, the lobby the game reports), its own files in %LOCALAPPDATA%, and game patch files for
-  its wardrobe once the player turns on "Game patch files: HD2 Transmog" in the options menu (F9).
+- A short list in the loader gives a named mod more than the locked-down space, only what it needs: the Steam lobby
+  (its own key, the lobby the game reports), its own files in %LOCALAPPDATA%, or game patch files once the player turns
+  on that mod's "Game patch files" row in the options menu (F9).
 - A game patch file is checked before it takes a patch's name: its table of contents must read as the layout the
   loader knows, it must not replace the game's boot script, and any Lua in it must be comments only. A file still open
   for writing is never renamed or removed.
