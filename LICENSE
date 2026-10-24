@@ -1,7 +1,19 @@
-Copyright (c) 2026 Th3chef. All rights reserved.
+Copyright (c) 2026 Th3chef. All rights reserved, except as below.
 
 You may read the source code in this repository, report bugs and suggest fixes, and write mods that run on Chef Shared
 Loader (see docs/MODDING.md); your own mods are yours.
-Ask before reusing any of the loader's code in your own projects or reuploading the loader anywhere.
+
+Compatibility grant: you may copy, adapt and include parts of this code in your own mods, free of charge, to call
+Chef Shared Loader's functions, to detect it, or to make your mod work with it or with the mods it runs, as long as
+you keep this credit line with the code you took (in a comment next to it, or in your mod's credits):
+
+    Parts adapted from Chef Shared Loader by Th3chef
+
+The code in examples/ and in docs/MODDING.md is free to use as you like, with no credit needed.
+
+Not allowed without asking first: reuploading Chef Shared Loader (anywhere, in any form), or releasing the loader, or
+most of it, under another name as your own loader.
+
+This code is given as it is, without any warranty; its author is not liable for anything that comes from using it.
 
 Helldivers 2 is a trademark of its respective owners. This is an unofficial fan mod.

@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.1.0
+
+**License**
+- A compatibility grant: other mod authors may copy and adapt parts of the loader's code into their own mods to call
+  its functions, detect it, or work with it and the mods it runs, with a credit line. The examples and the code in
+  docs/MODDING.md are free to use. Reuploading the loader, or releasing it as another loader, still needs asking.
+
+**Mods made for the HD2 Lua Runtime**
+- Mods written for the HD2 Lua Runtime (such as HD2 Transmog and Native Notification) run on a look-alike of it:
+  `HD2Runtime` and `require('hd2rt')`, `mod(spec)` handles with `on`, `log` and that runtime's engine calls, each one
+  crash-guarded for the mod and undone when it stops. Its own boot script, which those mods carry, isn't needed (the
+  log says so).
+- A mod's own `require` serves its `package.preload` (mods bundled as modules).
+- A mod file may return `true`, as those mods do.
+- Lua resources in envelope 1 (plain text too) are read as well as envelope 2.
+
+**From pull requests by tyrypyrking**
+- Boot scripts and `-- HD2-Boot:` mods that wrap the game's `update` (`local old = update ...`) no longer run the
+  loader again from inside it every frame (it ran out of stack); code a boot script loads with `require` can't replace
+  the loader's callbacks any more (they're put back, and the replaced one runs as that boot's).
+- `chef.mods()` gives each mod's state (running, off, kept off, not started, stopped) and why, its errors and its time a
+  frame; the same list is written to `chef_loader_health.txt`.
+- `chef.index()`: which mod's copy of each resource the game loads (`winner`, `providers`, `patches`, `conflicts`),
+  built a little each frame on first use. `-- HD2-Exclusive:` and `-- HD2-Fallback:` header lines say which resources
+  must win (reported in the log and on screen when another mod's copy wins) and which may be overridden.
+
+**Text**
+- The options menu, the performance monitor, notices and `chef.text` are drawn in the game's own font (FSSinclair
+  Medium, the HUD's; Regular or the locale's font where Medium isn't loaded), in capitals as before. Text is kept
+  between frames and only changed when it changes (the monitor costs about a tenth of what it did), laid out by
+  measured width, and long notices wrap. The pixel font stays as the fallback, and "Game font" in the loader's
+  options switches to it by hand.
+- New for mods: `chef.text_fit` and `chef.text_wrap`; `chef.text_width` measures in the font in use.
+
+**Mods written for Bingus Shared Loader**
+- Mods that find the engine with `rawget(_G, 'stingray')` and hook in by replacing the game's `update` (keeping the
+  one they found) now start and run; before, they looked started but did nothing.
+- A mod that asks for `ffi` or `jit` gets a log line saying the game has neither since 7.2.0, so what in it needs them
+  won't work with any loader, even when the mod carries on without them.
+
+**Trusted mods**
+- A short list in the loader gives a mod more than the locked-down space, only what it needs. HD2 Transmog gets the
+  Steam lobby (its own key, the lobby the game reports), its own files in %LOCALAPPDATA%, and game patch files for
+  its wardrobe once the player turns on "Game patch files: HD2 Transmog" in the options menu (F9).
+- A game patch file is checked before it takes a patch's name: its table of contents must read as the layout the
+  loader knows, it must not replace the game's boot script, and any Lua in it must be comments only. A file still open
+  for writing is never renamed or removed.
+
+**Lockdown**
+- Engine tables that aren't for mods are out of their reach in `stingray` and the globals too, not only through
+  `chef.call`: native code (PluginManager), Http and WebSocket, the Localizer, every lobby table, and GameSession's
+  writes to what other players see. Network and GameSession keep only their reads (`peer_id`, `game_session`,
+  `in_session`, `peers`, `game_object_field`, `is_*`, `has_*`, `get_*`, `num_*` and the like), without the lobby and connection
+  ones, so a call a game update adds stays out until it's known to be a read; an engine object's metatable gives the
+  same trimmed table.
+
 ## 1.0.1
 
 **Crash safety**
