@@ -63,10 +63,17 @@ function M.order(list)
   return out
 end
 
--- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only
+-- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only; the game's font takes the text as it is (in
+-- capitals, like the pixel font)
 local function plain(s)
   s = tostring(s or ''):upper()
   return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> ]', ' '))
+end
+local function caps(s) return tostring(s or ''):upper() end
+-- without the loader's measured fit (a host that has none): cut by the pixel font's fixed 6 cells a letter
+local function fit_cells(s, px, maxw)
+  local n = math.floor((maxw + px) / (6 * px))
+  return #s > n and s:sub(1, math.max(0, n)) or s
 end
 
 -- A mod's error as text for the log. tostring alone can raise (an error object whose __tostring errors or doesn't
@@ -720,6 +727,10 @@ function M.install(ctx)
     local white, green, gray = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255)
     local tx = 7 * px                          -- the text's left inset
     local function midy(y, hgt) return y + floor((hgt - 7 * px) / 2) end
+    -- text cut to the room it has, measured (the game's font is proportional), in the font's characters
+    local P = ctx.text_native and ctx.text_native() and caps or plain
+    local fit, tw = ctx.text_fit or fit_cells, ctx.text_width
+    local inner = pw - 2 * tx                  -- the width between the insets
     -- panel, frame, title bar
     ctx.rect(x0, y0 - ph, pw, ph, col(9, 11, 10, 238), top)
     local b = max(1, floor(px * 0.75))
@@ -727,10 +738,11 @@ function M.install(ctx)
     ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
     ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
     local head = menu.group and text_of(menu.group.title) or (ctx.LOADER .. ' OPTIONS')
-    ctx.text(x0 + tx, midy(y0 - hb, hb), plain(head):sub(1, cols - 8), px, ink, top + 2)
-    local right = (menu.typing or menu.search ~= '') and plain('/' .. menu.search .. (menu.typing and '_' or '')):sub(1, 22)
-      or plain(menu_key.value ~= 'off' and menu_key.value or '')
-    ctx.text(x0 + pw - tx - ctx.text_width(right, px), midy(y0 - hb, hb), right, px, ink, top + 2)
+    local right = fit((menu.typing or menu.search ~= '') and P('/' .. menu.search .. (menu.typing and '_' or ''))
+      or P(menu_key.value ~= 'off' and menu_key.value or ''), px, floor(inner * 0.45))
+    local rw = right ~= '' and tw(right, px) or 0
+    ctx.text(x0 + tx, midy(y0 - hb, hb), fit(P(head), px, inner - rw - (rw > 0 and 4 * px or 0)), px, ink, top + 2)
+    if rw > 0 then ctx.text(x0 + pw - tx - rw, midy(y0 - hb, hb), right, px, ink, top + 2) end
     local users = key_users()
     local y = y0 - hb - rh
     for i = menu.top, menu.top + shown - 1 do
@@ -742,18 +754,20 @@ function M.install(ctx)
       end
       local ty = midy(y, rh)
       if l.head then
-        ctx.text(x0 + tx, ty, plain(l.text):sub(1, cols - 2), px, yellow, top + 2)
+        ctx.text(x0 + tx, ty, fit(P(l.text), px, inner), px, yellow, top + 2)
       elseif l.back then
-        ctx.text(x0 + tx + 2 * px, ty, l.text, px, yellow, top + 2)
+        ctx.text(x0 + tx + 2 * px, ty, fit(P(l.text), px, inner - 2 * px), px, yellow, top + 2)
       elseif l.pick then
-        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(l.text)):sub(1, cols - 6), px, white, top + 2)
-        ctx.text(x0 + pw - tx - ctx.text_width('>', px), ty, '>', px, green, top + 2)
+        local aw = tw('>', px)
+        ctx.text(x0 + tx + 2 * px, ty, fit(P(text_of(l.text)), px, inner - 2 * px - aw - 4 * px), px, white, top + 2)
+        ctx.text(x0 + pw - tx - aw, ty, '>', px, green, top + 2)
       else
         local r = l.row
-        ctx.text(x0 + tx + 2 * px, ty, plain(text_of(r.spec.label or r.id)):sub(1, 24), px, white, top + 2)
-        local v = plain(value_text(r, users)):sub(1, 14)
-        local vw = ctx.text_width(v, px)
+        -- the value first (at most 40% of the row), then the label in what's left
+        local v = fit(P(value_text(r, users)), px, floor(inner * 0.4))
+        local vw = tw(v, px)
         local vx = x0 + pw - tx - vw
+        ctx.text(x0 + tx + 2 * px, ty, fit(P(text_of(r.spec.label or r.id)), px, vx - 6 * px - (x0 + tx + 2 * px)), px, white, top + 2)
         if r.spec.type == 'key' and menu.capture ~= r then
           -- a key: a light chip with the key's name in ink
           ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, white, top + 2)
@@ -770,7 +784,7 @@ function M.install(ctx)
       or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
       or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
       or ('ARROWS  ENTER OPEN  / SEARCH  ' .. (svc.util and svc.util.key_label(menu_key.value) or menu_key.value) .. ' CLOSE')
-    ctx.text(x0 + tx, midy(y0 - ph + px, rh), plain(hint):sub(1, cols), px, gray, top + 2)
+    ctx.text(x0 + tx, midy(y0 - ph + px, rh), fit(P(hint), px, inner), px, gray, top + 2)
   end
   local function menu_frame()
     local mk = menu_key.value
@@ -937,7 +951,7 @@ function M.install(ctx)
 
   -- A mod that stopped (switched off after errors, failed to start, or about to be started again in dev mode): its menu
   -- rows keep their values but drop its change callbacks, its event subscriptions and waiting after_startup callbacks
-  -- end, and the utilities drop its timers, jobs and what it spawned.
+  -- end, the utilities drop its timers, jobs and what it spawned, and the HD2Runtime look-alike undoes what it made.
   function svc.forget(owner)
     -- (its change callbacks on any row, a look-alike's shared ones too)
     for _, row in pairs(rows_by_id) do
@@ -954,6 +968,7 @@ function M.install(ctx)
     end
     for i = #after, 1, -1 do if after[i].owner == owner then after[i].off = true; table.remove(after, i) end end
     if svc.util then svc.util.forget(owner) end
+    if svc.runtime then svc.runtime.forget(owner) end
   end
 
   -- ---------------------------------------------------------------- the loader's hooks

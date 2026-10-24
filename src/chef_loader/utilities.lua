@@ -10,6 +10,7 @@
 --   6 typed (the text typed this frame) and key_label (a key's name on the player's keyboard)
 --   7 save_table / load_table
 --   8 mods (every mod the loader found, with its version and state)
+--   9 index (which mod's copy of each resource the game loads, and what overrides what)
 -- It only reaches the loader through ctx (services' table) and L (the loader's drawing and world internals). Lua 5.1.
 
 local M = { version = '0.1.0' }
@@ -32,6 +33,313 @@ local function finite(n) return type(n) == 'number' and n == n and n > -huge and
 local function io_ok(ok, r, e)
   if not ok or r == false then return false end
   return not (r == nil and e ~= nil)
+end
+
+-- ------------------------------------------------------------------ the index: which mod's file wins
+-- Every resource (type + id) in the patch files the loader reads at start-up (the boot archive's, 9ba626afa44a3aa3),
+-- which patch gives the copy the game loads (the highest number) and which it shadows. Built from the tables of contents
+-- (bodies are read only to tell two copies of one resource apart: the first 64 KB of each part), the first time a mod
+-- asks (chef.index) or right after start-up when a mod says which of its files must win (-- HD2-Exclusive:). It's
+-- built a little each frame (M.index runs as a coroutine and yields when its slice is used up), and the comparisons
+-- read at most READ_CAP bytes in all: past that, same-size copies count as different (the log says how many).
+-- ctx: open, log, FILES; P: patches() -> {{file, n}} ascending, owners() -> {[file] = {mod names}},
+-- policies() -> {[mod] = {exclusive = {sel}, fallback = {sel}}}, clock, notify, slice() (true: yield now).
+M.TYPES = { unit = 'e0a48d0be9a7453f', material = 'eac0b497876adedf', texture = 'cd4238c6a0c69e32',
+  package = 'ad9c6d9ed1e5e77a', lua = 'a14e8dfa2cd117e2', bones = '18dead01056b72e9', animation = '931e336d7646cc26',
+  state_machine = 'a486d4045106165c', particles = 'a8193123526fad64', wwise_bank = '535a7bd3e650d799',
+  wwise_stream = '504b55235d21440e', wwise_dep = 'af32095c82f2b070', font = '9efe0a916aae7880',
+  shader_library = 'e5ee32a477239a93', strings = '0d972bab10b40fd3', geometry_group = 'c4f0f4be7fb0c8d6',
+  physics = '5f7203c8f280dab8', prefab = 'ab2f78e885f513c6', level = '2a690fd348fe9ac5', entity = '9831ca893b0d087d',
+  render_config = '27862fe24795319c', speedtree = 'e985c5f61c169997' }
+M.NAME_OF = {}
+for k, v in pairs(M.TYPES) do M.NAME_OF[v] = k end
+M.READ_CAP = 64 * 1024 * 1024
+local co_lib = coroutine                         -- (taken when the loader starts: nothing a mod does later replaces it)
+local s_byte, s_sub = string.byte, string.sub
+local function u32(s, i) local a, b, c, d = s_byte(s, i, i + 3); return a + b * 256 + c * 65536 + d * 16777216 end
+local function u64(s, i) return u32(s, i) + u32(s, i + 4) * 4294967296 end
+local function hex_of(s, i)                      -- 8 little-endian bytes at i -> 16 hex digits
+  local a, b, c, d, e, f, g, h = s_byte(s, i, i + 7)
+  return fmt('%02x%02x%02x%02x%02x%02x%02x%02x', h, g, f, e, d, c, b, a)
+end
+-- a type name ('unit') or 16 hex digits -> 16 hex digits, or nil
+function M.type_hex(t)
+  if type(t) ~= 'string' then return nil end
+  t = t:lower()
+  if M.TYPES[t] then return M.TYPES[t] end
+  if #t == 16 and t:match('^%x+$') then return t end
+  return nil
+end
+-- "-- HD2-Exclusive: unit material:<16 hex>" and "-- HD2-Fallback: texture *" among a mod's first lines
+function M.policies(src)
+  local out = { exclusive = {}, fallback = {} }
+  for kind, words in s_sub(src, 1, 1200):gmatch('\n%-%- HD2%-(%a+):[ \t]*([^\r\n]*)') do
+    local list = kind == 'Exclusive' and out.exclusive or (kind == 'Fallback' and out.fallback or nil)
+    if list then
+      for w in words:gmatch('%S+') do
+        if w == '*' then list[#list + 1] = { any = true }
+        else
+          local t, id = w:match('^([%w_]+):(%x+)$')
+          local th = M.type_hex(t or w)
+          if th and (not id or #id == 16) then list[#list + 1] = { type = th, id = id and id:lower() } end
+        end
+      end
+    end
+  end
+  return out
+end
+local function matches(list, th, id)
+  for _, s in ipairs(list) do
+    if s.any or (s.type == th and (not s.id or s.id == id)) then return true end
+  end
+  return false
+end
+-- (yields only between patches and between comparisons: never inside a pcall, which a Lua 5.1 coroutine can't yield
+-- across)
+function M.index(ctx, P)
+  local t0, busy = P.clock(), 0
+  local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
+              compared = 0, read = 0, excl = 0 }
+  -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index
+  -- * 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
+  -- table by up to 200,000, and each doubling of it is one step of tens of ms no pause can split. The number is the
+  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits
+  -- go with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits are told apart. The rare
+  -- second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's low byte into 256, so no
+  -- single table grows to 200,000 keys (one rehash of that is tens of ms too).
+  local wins, shads, wins_s, shads_s, tix, ntypes = {}, {}, {}, {}, {}, 0
+  for b = 0, 255 do wins[b], shads[b] = {}, {} end
+  local list = P.patches()
+  if #list > 8191 then error('more than 8191 patch files') end   -- (the loader reads up to 4096)
+  local tocs = {}                -- patch index -> its table of contents' rows, in blocks of 512
+  local function pause()
+    if P.slice() then
+      local t1 = P.clock(); busy = busy + (t1 - t0)
+      co_lib.yield()
+      t0 = P.clock()
+    end
+  end
+  for pi, p in ipairs(list) do
+    local f = ctx.open('data/' .. p.file, 'rb')
+    if f then
+      -- The table of contents is read in blocks of 512 rows, with a pause between them (one read of a big patch's
+      -- whole table takes tens of ms); each read is under pcall, the walk isn't (it can't raise, and it has to yield).
+      -- A patch whose header or rows can't be read is left out and counted as bad.
+      local nt, ne
+      local ok = pcall(function()
+        local head = f:read(72) or ''
+        if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
+        local t_, e_ = u32(head, 5), u32(head, 9)
+        if t_ > 4096 or e_ > 200000 then return end
+        if t_ > 0 and #(f:read(t_ * 32) or '') < t_ * 32 then return end
+        nt, ne = t_, e_
+      end)
+      local blocks, good = {}, ok and nt ~= nil
+      local e0 = 0
+      while good and e0 < ne do
+        local n = min(512, ne - e0)
+        local s
+        good = pcall(function() s = f:read(n * 80) end) and s ~= nil and #s == n * 80
+        if good then
+          blocks[#blocks + 1] = s
+          for e = e0, e0 + n - 1 do
+            local at = (e - e0) * 80 + 1
+            local ts = s_sub(s, at + 8, at + 15)
+            local ti = tix[ts]
+            if not ti then ntypes = ntypes + 1; ti = ntypes; tix[ts] = ti end
+            local lo, hi = u32(s, at), u32(s, at + 4)
+            local b, top = lo % 256, floor(hi / 8192)
+            local code = pi * 262144 + e
+            local wt, st, k = wins[b], shads[b], ((hi % 8192) * 4294967296 + lo) * 256 + ti
+            local v = ti < 256 and wt[k] or nil
+            local was = v and floor(v / 2147483648) == top and v % 2147483648 or nil
+            if ti >= 256 or (v and not was) then                 -- (by its 16 bytes)
+              wt, st, k = wins_s, shads_s, s_sub(s, at, at + 15)
+              was = wt[k]
+            end
+            if was and floor(was / 262144) ~= pi then          -- (a resource listed twice in one patch: once)
+              local sh = st[k]
+              if not sh then sh = {}; st[k] = sh end
+              table.insert(sh, 1, was)
+            end
+            wt[k] = wt == wins_s and code or top * 2147483648 + code
+          end
+          e0 = e0 + n
+          pause()
+        end
+      end
+      pcall(f.close, f)
+      tocs[pi] = blocks              -- (rows taken from a patch whose later block then failed stay, with their block)
+      if good then I.files, I.rows = I.files + 1, I.rows + ne else I.bad, I.rows = I.bad + 1, I.rows + e0 end
+    end
+    pause()
+  end
+  local function row(code)
+    local pi, e = floor(code / 262144), code % 262144
+    local blocks = tocs[pi]
+    local b = floor(e / 512)
+    return list[pi], blocks and blocks[b + 1] or '', (e - b * 512) * 80 + 1
+  end
+  -- the first 64 KB of each of a resource's three parts: the main file, .stream and .gpu_resources (a texture's main
+  -- part is only its header; its pixels are in .gpu_resources)
+  local function part(path, off, size)
+    if size == 0 then return '' end
+    local f = ctx.open(path, 'rb')
+    if not f then return nil end
+    local got
+    pcall(function()
+      if f:seek('set', off) then got = f:read(min(size, 65536)) end
+      -- and the last 4 KB of a bigger part (a retexture can differ only past the first 64 KB)
+      if got and size > 65536 and f:seek('set', off + size - 4096) then
+        local tail = f:read(4096)
+        got = tail and (got .. tail) or nil
+      end
+    end)
+    pcall(f.close, f)
+    if got then I.read = I.read + #got end
+    return got
+  end
+  local function first_bytes(p, toc, at)
+    local main = part('data/' .. p.file, u64(toc, at + 16), u32(toc, at + 56))
+    local stream = part('data/' .. p.file .. '.stream', u64(toc, at + 24), u32(toc, at + 60))
+    local gpu = part('data/' .. p.file .. '.gpu_resources', u64(toc, at + 32), u32(toc, at + 64))
+    if not (main and stream and gpu) then return nil end
+    return main .. '\0' .. stream .. '\0' .. gpu
+  end
+  local owners, policies = P.owners(), P.policies()
+  local function mods_of(p) return owners[p.file] or {} end
+  local function label(p) local m = mods_of(p); return #m > 0 and concat(m, ',') or ('patch ' .. p.n) end
+  local pairs_said = {}
+  local steps = 0
+  local th_of = {}                                 -- a row's type -> its 16 hex digits (a few types, read once each)
+  local function type_hex(toc, at)
+    local ts = s_sub(toc, at + 8, at + 15)
+    local h = th_of[ts]
+    if not h then h = hex_of(toc, at + 8); th_of[ts] = h end
+    return h
+  end
+  -- two patches of different mods (or two unannounced ones) give one resource: a conflict unless the copies are the same
+  for b = 0, 256 do
+    local st, wt = shads[b] or shads_s, wins[b] or wins_s
+    for key, list_of in pairs(st) do            -- (nothing is added while this walks it: yielding is fine)
+      steps = steps + 1
+      if steps % 256 == 0 then pause() end
+      local wp, wtoc, wat = row(wt[key] % 2147483648)
+      for _, code in ipairs(list_of) do
+        local lp, ltoc, lat = row(code)
+        if label(wp) ~= label(lp) then
+          -- same sizes, then the same bytes of each part, while the reading cap lasts; past it, a same-size pair is
+          -- listed as unchecked (it may be the same: no notice for it)
+          -- (compared as numbers: a string per pair would grow Lua's string table, as the keys would)
+          local same = u32(wtoc, wat + 56) == u32(ltoc, lat + 56) and u32(wtoc, wat + 60) == u32(ltoc, lat + 60)
+            and u32(wtoc, wat + 64) == u32(ltoc, lat + 64)
+          local unchecked = false
+          if same and I.read < M.READ_CAP then
+            I.compared = I.compared + 1
+            local a, b = first_bytes(wp, wtoc, wat), first_bytes(lp, ltoc, lat)
+            same = a ~= nil and a == b
+            pause()
+          elseif same then same, unchecked, I.unread = false, true, I.unread + 1 end
+          if same then I.same = I.same + 1
+          elseif unchecked then
+            if #I.conflicts < 1000 then
+              local th = type_hex(wtoc, wat)
+              I.conflicts[#I.conflicts + 1] = { type = M.NAME_OF[th] or th, id = hex_of(wtoc, wat),
+                policy = 'unchecked', winner = { patch = wp.n, mods = mods_of(wp) }, loser = { patch = lp.n, mods = mods_of(lp) } }
+            else I.more = I.more + 1 end
+          else
+            local th, id = type_hex(wtoc, wat), nil      -- (the id's 16 hex digits only when something needs them)
+            local policy = 'shared'
+            for _, m in ipairs(mods_of(lp)) do
+              local pol = policies[m]
+              if pol then
+                id = id or hex_of(wtoc, wat)
+                if matches(pol.fallback, th, id) then policy = 'fallback' end
+                if policy ~= 'fallback' and matches(pol.exclusive, th, id) then policy = 'exclusive' end
+              end
+            end
+            if policy == 'fallback' then I.fallback = I.fallback + 1
+            else
+              if policy == 'shared' then I.shared = I.shared + 1 end
+              if #I.conflicts < 1000 or (policy == 'exclusive' and I.excl < 4000) then   -- (HD2-Exclusive: up to 4,000 more)
+                if policy == 'exclusive' and #I.conflicts >= 1000 then I.excl = I.excl + 1 end
+                I.conflicts[#I.conflicts + 1] = { type = M.NAME_OF[th] or th, id = id or hex_of(wtoc, wat), policy = policy,
+                  winner = { patch = wp.n, mods = mods_of(wp) }, loser = { patch = lp.n, mods = mods_of(lp) } }
+              else I.more = I.more + 1 end
+              local pk = wp.n .. ' ' .. lp.n .. ' ' .. policy
+              pairs_said[pk] = (pairs_said[pk] or 0) + 1
+            end
+          end
+        end
+      end
+    end
+  end
+  -- the index itself: key -> the winning patch, and the shadowed ones (numbers only; the tables of contents go)
+  local function bin(h)                          -- 16 hex digits -> the 8 little-endian bytes the tables hold
+    local t = {}
+    for i = 15, 1, -2 do t[#t + 1] = string.char(tonumber(s_sub(h, i, i + 1), 16)) end
+    return concat(t)
+  end
+  I.lookup = function(th, id)
+    local key = bin(id) .. bin(th)
+    local lo, hi, ti = u32(key, 1), u32(key, 5), tix[s_sub(key, 9, 16)]
+    local b = lo % 256
+    local k = ti and ti < 256 and ((hi % 8192) * 4294967296 + lo) * 256 + ti
+    local v = k and wins[b][k]
+    local w, sh
+    if v and floor(v / 2147483648) == floor(hi / 8192) then w, sh = v % 2147483648, shads[b][k]
+    else w, sh = wins_s[key], shads_s[key] end
+    if not w then return nil end
+    local out = {}
+    local pi = floor(w / 262144)
+    out[1] = { patch = list[pi].n, file = list[pi].file, mods = mods_of(list[pi]) }
+    for _, code in ipairs(sh or {}) do
+      local p = list[floor(code / 262144)]
+      out[#out + 1] = { patch = p.n, file = p.file, mods = mods_of(p) }
+    end
+    return out
+  end
+  I.patches = {}
+  for _, p in ipairs(list) do I.patches[#I.patches + 1] = { number = p.n, file = p.file, mods = mods_of(p) } end
+  tocs = nil
+  I.ms = (busy + P.clock() - t0) * 1000
+  -- the report (under pcall: a broken log or notice mustn't lose the index that's built)
+  local rep_ok, rep_err = pcall(function()
+  ctx.log(fmt('index: %d rows in %d patch files; between mods %d overridden (%d expected by a fallback), %d identical%s '
+    .. '(%.2f ms of work, %.1f MB compared)', I.rows, I.files, #I.conflicts + I.more + I.fallback - I.unread, I.fallback,
+    I.same, I.unread > 0 and fmt(', %d of the same size not compared (reading cap; listed as unchecked)', I.unread) or '',
+    I.ms, I.read / 1048576))
+  local keys, notified = {}, {}       -- notified: one notice a mod, however many patches override it
+  for k in pairs(pairs_said) do keys[#keys + 1] = k end
+  local function num_order(x, y)
+    local a1, a2 = x:match('^(%d+) (%d+)'); local b1, b2 = y:match('^(%d+) (%d+)')
+    a1, a2, b1, b2 = tonumber(a1), tonumber(a2), tonumber(b1), tonumber(b2)
+    if a1 ~= b1 then return a1 < b1 end
+    if a2 ~= b2 then return a2 < b2 end
+    return x < y
+  end
+  sort(keys, num_order)
+  for _, k in ipairs(keys) do
+    local w, l, policy = k:match('^(%d+) (%d+) (%a+)$')
+    local wp, lp
+    for _, p in ipairs(list) do if p.n == tonumber(w) then wp = p elseif p.n == tonumber(l) then lp = p end end
+    ctx.log(fmt('index: %s (patch %s) overrides %d resource(s) of %s (patch %s)%s', label(wp), w, pairs_said[k], label(lp), l,
+      policy == 'exclusive' and ': that mod says they must win (HD2-Exclusive); deploy it after the other or drop one' or ''))
+    if policy == 'exclusive' and P.notify then
+      for _, m in ipairs(mods_of(lp)) do
+        if not notified[m] then
+          notified[m] = true
+          local short = (m:match('([^/]+)$') or m):upper():gsub('_', ' ')
+          local tail = ' IS OVERRIDDEN BY ANOTHER MOD (SEE ' .. ctx.FILES:upper() .. '.LOG)'
+          if #short + #tail > 80 then short = s_sub(short, 1, max(8, 77 - #tail)) .. '...' end
+          P.notify({ text = short .. tail, dur = 20 })
+        end
+      end
+    end
+  end
+  end)
+  if not rep_ok then pcall(ctx.log, 'index: the report failed: ' .. tostring(rep_err)) end
+  return I
 end
 
 -- ------------------------------------------------------------------ the game's settings file (SJSON)
@@ -214,6 +522,9 @@ function M.install(ctx, L)
   -- the engine's Localizer, so there's nothing to look up), native code and the network
   local NEVER_TABLES = { Localizer = 'it ends the game', PluginManager = 'native code', Http = 'the network',
                          WebSocket = 'the network' }
+  -- (the lobby and GameSession's writes too: sandbox.lua's engine_off and CALLS_OFF, handed in as L.engine_off and
+  -- L.calls_off, the same rules a mod's own view of the engine follows)
+  local engine_off, calls_off = L.engine_off or function() return false end, L.calls_off or {}
   -- and single calls: writing other players' game
   local NEVER = { ['GameSession.set_game_object_field'] = "other players' game",
                   ['GameSession.create_game_object'] = "other players' game",
@@ -230,7 +541,9 @@ function M.install(ctx, L)
     c = false
     if type(name) == 'string' then
       local t = name:match('^([%w_]+)%.')
+      local f = t and name:sub(#t + 2)
       local why = NEVER[name] or (t and NEVER_TABLES[t])
+        or (t and engine_off(t) and 'the lobby') or (t and calls_off[t] and calls_off[t](f) and 'the lobby or other players\' game')
       if why then c = { why = name .. ' is not available to mods (' .. why .. ')' }
       elseif UNIT_ASKS[name] or name:match('^Unit%.teleport_') then c = 'unit'
       elseif name == 'Unit.has_camera' then c = 'camera' end
@@ -303,6 +616,28 @@ function M.install(ctx, L)
     return c.why
   end
   util.refused = refused
+  util.current, util.fresh, util.unit_kind = current, fresh, unit_kind
+  -- a unit stamped in an engine world before this one (calling anything on it ends the game); a unit not stamped yet,
+  -- in a world that hasn't settled, isn't known gone
+  function util.gone(u)
+    if u == nil then return true end
+    roll()
+    return seen.before[u] ~= nil and not seen.now[u]
+  end
+  -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
+  -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those
+  function util.unit_refused(owner, name, u)
+    if util.gone(u) then return GONE end
+    seen.now[u] = true                    -- stamped even before the world settles (the instance is already this one)
+    if class(name) ~= 'unit' then return nil end
+    local k = unit_kind(u, owner)
+    if k and BAD_KINDS[k] then
+      local why = bad_why[k]
+      if not why then why = 'a runtime-built unit (' .. k .. '): asking it that ends the game'; bad_why[k] = why end
+      return why
+    end
+    return nil
+  end
 
   -- ---------------------------------------------------------------- spawned things, cleaned up
   -- { owner, kind = 'unit' | 'particles', h = handle, instance }
@@ -495,8 +830,58 @@ function M.install(ctx, L)
       end
     end
   end
+  -- the index (M.index): built once, a little each frame (util.index_step), the first time a mod asks or right after
+  -- start-up when a mod declared HD2-Exclusive; nil and why while it's building or when it failed (logged once)
+  local index = { built = nil, failed = false, co = nil, slice_end = 0 }
+  local function owners_and_policies()
+    local owners, policies, seen = {}, {}, {}
+    for _, r in ipairs(L.found_rows and L.found_rows() or {}) do
+      local o = owners[r.file]
+      if not o then o = {}; owners[r.file] = o end
+      if not seen[r.file .. '|' .. r.name] then seen[r.file .. '|' .. r.name] = true; o[#o + 1] = r.name end
+      local pol = M.policies(r.src)
+      local p = policies[r.name]
+      if not p then p = { exclusive = {}, fallback = {} }; policies[r.name] = p end
+      for _, x in ipairs(pol.exclusive) do p.exclusive[#p.exclusive + 1] = x end
+      for _, x in ipairs(pol.fallback) do p.fallback[#p.fallback + 1] = x end
+    end
+    for _, o in pairs(owners) do sort(o) end
+    return owners, policies
+  end
+  function util.index()
+    if index.built then return index.built end
+    if index.failed then return nil, 'the index could not be built (see the log)' end
+    if not index.co then
+      local owners, policies = owners_and_policies()
+      local P = { patches = L.patches, owners = function() return owners end, policies = function() return policies end,
+                  clock = L.clock, notify = L.notify, slice = function() return L.clock() >= index.slice_end end }
+      if not co_lib then index.failed = true; return nil, 'unavailable' end
+      index.co = co_lib.create(function() return M.index(ctx, P) end)
+    end
+    return nil, 'building'
+  end
+  -- a slice of the build each frame (2 ms at most)
+  local function index_step()
+    local co = index.co
+    if not co or index.built or index.failed then return end
+    index.slice_end = L.clock() + 0.002
+    local ok, I = co_lib.resume(co)
+    if not ok then
+      index.failed, index.co = true, nil
+      log('the index failed: ' .. err_text(I))
+    elseif co_lib.status(co) == 'dead' then
+      index.built, index.co = I, nil
+    end
+  end
+  -- right after start-up: only when some mod wants to hear that its files lost (HD2-Exclusive), else on first use
+  function util.index_at_startup()
+    local _, policies = owners_and_policies()
+    for _, p in pairs(policies) do if #p.exclusive > 0 then util.index(); return true end end
+    return false
+  end
   function util.frame()
     local now = ctx.now()
+    if index.co then index_step() end
     timers_frame(now)
     jobs_frame()
     sweep_made(now)
@@ -1057,18 +1442,43 @@ function M.install(ctx, L)
     end
 
     -- 8 the mods the loader found
-    function chef.mods()
-      local out = {}
-      for _, m in ipairs(L.addons) do
-        -- (another mod's version read raw: its table can't raise into this call)
-        local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-        out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
-                          version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil }
+    function chef.mods() return util.mod_list() end
+
+    -- 9 which mod's copy of a resource the game loads (M.index: nil, 'building' until it's built, a little each frame)
+    local index_view                    -- (made once, when the index is there)
+    function chef.index()
+      if index_view then return index_view end
+      local I, why = util.index()
+      if not I then return nil, why end
+      local function copy(list)
+        local out = {}
+        for i, p in ipairs(list or {}) do
+          local mods = {}
+          for j, m in ipairs(p.mods or {}) do mods[j] = m end
+          out[i] = { patch = p.patch or p.number, number = p.number, file = p.file, mods = mods }
+        end
+        return out
       end
-      for _, b in ipairs(L.boots()) do
-        out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file }
+      local X = {}
+      function X.providers(t, id)
+        local th = M.type_hex(t)
+        if not th or type(id) ~= 'string' or not id:match('^%x+$') or #id ~= 16 then return {} end
+        return copy(I.lookup(th, id:lower()))
       end
-      return out
+      function X.winner(t, id) return X.providers(t, id)[1] end
+      function X.patches() return copy(I.patches) end
+      local conflicts_copy                  -- (this mod's copy, made once: up to 5,000 entries)
+      function X.conflicts()
+        if conflicts_copy then return conflicts_copy, I.more end
+        local out = {}
+        for i, c in ipairs(I.conflicts) do
+          out[i] = { type = c.type, id = c.id, policy = c.policy, winner = copy({ c.winner })[1], loser = copy({ c.loser })[1] }
+        end
+        conflicts_copy = out
+        return out, I.more
+      end
+      index_view = X
+      return X
     end
   end
 
@@ -1080,8 +1490,9 @@ function M.install(ctx, L)
   -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
   -- cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot
   -- script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on
-  -- the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a second I turn the last second into averages a frame: each mod's
-  -- milliseconds and its share of the frame (from the game's own frame time), the worst single call, and the total.
+  -- the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a second I turn
+  -- the last second into averages a frame: each mod's milliseconds and its share of the frame (from the game's own
+  -- frame time), the worst single call, and the total.
   -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
   -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
   local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
@@ -1136,18 +1547,23 @@ function M.install(ctx, L)
     local self = pm.self / n
     local loader = max(0, pm.loader / n - self)
     local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
-    -- { left, right, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod (1 ms or more), 6 off or dim
+    -- { left, { the MS, SHARE and WORST cells }, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod
+    -- (1 ms or more), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't monospaced,
+    -- so one string padded with spaces wouldn't line up).
+    local function ms(v) return fmt('%.2f', v) end
+    local function share(v) return fmt('%.1f%%', pct(v)) end
     local out = {
-      { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), 'MS  SHARE WORST', 2 },
-      { 'ALL MODS', fmt('%.2f %4.1f%%', total + loader, pct(total + loader)), 3 },
+      { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), { 'MS', 'SHARE', 'WORST' }, 2 },
+      { 'ALL MODS', { ms(total + loader), share(total + loader) }, 3 },
     }
     for i, r in ipairs(rows) do
       if i > 12 then break end
-      out[#out + 1] = { plain(r.name):sub(1, 20), r.on and fmt('%.2f %4.1f%% %4.1f', r.avg, pct(r.avg), r.worst) or 'OFF',
+      out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
+                        r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { 'OFF' },
                         r.on and (r.avg >= 1 and 5 or 4) or 6 }
     end
-    out[#out + 1] = { 'LOADER', fmt('%.2f %4.1f%%', loader, pct(loader)), 4 }
-    out[#out + 1] = { 'THIS MONITOR', fmt('%.2f %4.1f%%', self, pct(self)), 6 }
+    out[#out + 1] = { 'LOADER', { ms(loader), share(loader) }, 4 }
+    out[#out + 1] = { 'THIS MONITOR', { ms(self), share(self) }, 6 }
     return out
   end
   -- The panel, laid out once a second (when its numbers change) into a list of rects with a color index each; every
@@ -1172,9 +1588,23 @@ function M.install(ctx, L)
     local tx = 5 * px
     txt(x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
     local y = y1 - 2 * rh - px
+    local function width(t) return ctx.text_width and ctx.text_width(t, px) or #t * 6 * px - px end
+    -- three columns from the right edge, each as wide as its header or its widest number (measured), with a gap
+    local gap = 5 * px
+    local right, cw = {}, {}
+    for c, sample in ipairs({ '00.00', '100.0%', '0000.0' }) do cw[c] = max(width(ls[1][2][c]), width(sample)) end
+    right[3] = x0 + pw - tx
+    right[2] = right[3] - cw[3] - gap
+    right[1] = right[2] - cw[2] - gap
+    local name_room = right[1] - cw[1] - gap - (x0 + tx)
     for _, l in ipairs(ls) do
-      txt(x0 + tx, y + px, l[1], l[3])
-      if l[2] ~= '' then txt(x0 + pw - tx - (#l[2] * 6 * px - px), y + px, l[2], l[3] == 2 and 6 or l[3]) end
+      local cells = l[2]
+      -- the name cut (measured) to the room left of the first column; the frame line may run over it (header row)
+      local room = l[3] == 2 and (right[1] - cw[1] - (x0 + tx)) or name_room
+      txt(x0 + tx, y + px, ctx.text_fit and ctx.text_fit(l[1], px, room) or l[1]:sub(1, max(0, floor((room + px) / (6 * px)))), l[3])
+      for c, t in ipairs(cells) do
+        if t ~= '' then txt(right[c] - width(t), y + px, t, l[3] == 2 and 6 or l[3]) end
+      end
       y = y - rh
     end
     return out
@@ -1193,7 +1623,11 @@ function M.install(ctx, L)
     if not pm.lines then return end
     local t0 = L.clock()
     local w, h = ctx.screen()
-    if not pm.rects or pm.w ~= w or pm.h ~= h then pm.rects, pm.w, pm.h = pm_layout(pm.lines, w, h), w, h end
+    -- (laid out again when the screen size or the font changes: the game's font measures differently)
+    local native = ctx.text_native and ctx.text_native() or false
+    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native then
+      pm.rects, pm.w, pm.h, pm.native = pm_layout(pm.lines, w, h), w, h, native
+    end
     local cs = pm.cs or {}
     pm.cs = cs
     for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
@@ -1204,9 +1638,71 @@ function M.install(ctx, L)
     pm.self = pm.self + (L.clock() - t0) * 1000
   end
 
+  -- ---------------------------------------------------------------- the mod list and the health file
+  -- Every mod I found, with what it's doing and why: chef.mods() hands out a fresh copy, and chef_loader_health.txt
+  -- holds the same, one tab-separated line a mod, so a mod (a report, a menu) or a player can see why one isn't
+  -- running. state: running, off, kept off (it crashed the game), not started (a requirement, a compile error ...) or
+  -- stopped (too many errors). ms_avg / ms_max: its time a frame over the last status minute (nil before the first).
+  local function state_of(m)
+    if m.state == 'running' and not m.on then return 'off' end
+    return m.state or (m.on and 'running' or 'off')
+  end
+  function util.mod_list()
+    local out = {}
+    for _, m in ipairs(L.addons) do
+      -- (another mod's version read raw: its table can't raise into this call)
+      local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
+      local req = {}
+      for i, q in ipairs(m.requires or {}) do req[i] = q end
+      out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
+                        version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
+                        state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
+                        requires = req }
+    end
+    for _, b in ipairs(L.boots()) do
+      local r = b.a or b
+      out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file,
+                        state = b.on == false and (r.state == 'stopped' and 'stopped' or 'off') or 'running',
+                        why = r.why, errors = b.errors or 0, title = b.title }
+    end
+    local listed = {}                    -- (one that started later, after a reload, is listed once: as it is now)
+    for _, m in ipairs(out) do listed[m.name] = true end
+    for _, u in ipairs(L.unstarted and L.unstarted() or {}) do
+      if not listed[u.name] then
+        listed[u.name] = true
+        out[#out + 1] = { name = u.name, kind = u.kind, on = false, file = u.file, state = u.state, why = u.why, errors = 0 }
+      end
+    end
+    return out
+  end
+  local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
+  function util.health_text()
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile' }
+    for _, m in ipairs(util.mod_list()) do
+      out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file) }, '\t')
+    end
+    return concat(out, '\n') .. '\n'
+  end
+  -- written whole to a .tmp and put in place, like the settings
+  function util.write_health()
+    local path = ctx.DIR .. ctx.FILES .. '_health.txt'
+    local tmp = L.os and path .. '.tmp' or path
+    local f = ctx.open(tmp, 'w')
+    if not f then return false end
+    local okw = io_ok(pcall(f.write, f, util.health_text()))
+    local okc = io_ok(pcall(f.close, f))
+    if not (okw and okc) then
+      if tmp ~= path and L.os and L.os.remove then pcall(L.os.remove, tmp) end   -- (a cut-off .tmp isn't left behind)
+      return false
+    end
+    if tmp == path then return true end
+    return util.replace(tmp, path)
+  end
+
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,
-                mods = true }
+                mods = true, health = true, index = true }
   return util
 end
 
