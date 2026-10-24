@@ -225,7 +225,7 @@ The `chef` table each mod receives, by api level. The full list with signatures 
 |---|---|
 | 1 | Logging (`chef.log`, `chef.own_log`), options (`chef.options`), world and mission state, the camera, keys, guarded engine calls (`chef.call`), drawing (`rect`, `text`, `bitmap`, colors), unit kinds and loot scans. |
 | 2 | `after_startup`, read-only `capabilities` / `has`, saved settings, shared values and events, `chef.require` with `-- HD2-Requires:` version checks, the in-game options menu (F9), key bindings, the `CowboyBingusModLoader` / `ModOptionsMenu` look-alikes, dev mode (F11 reload; test builds only). |
-| 3 | Safe unit access (`units_near` over the shared scan), spawning, linking, particles and lights cleaned up at world changes, timers and work spread over frames with a frame budget per mod, the game's settings file, host and player count, shapes (triangles, circles, rings, arcs), sprite sheets, on-screen messages, typed text, key labels, `save_table`/`load_table`, the mod list. |
+| 3 | Safe unit access (`units_near` over the shared scan), spawning, linking, particles and lights cleaned up at world changes, timers and work spread over frames with a frame budget per mod, the game's settings file, host and player count, shapes (triangles, circles, rings, arcs), sprite sheets, on-screen messages, typed text, key labels, `save_table`/`load_table`, the mod list, the index (which mod's copy of each resource the game loads, `HD2-Exclusive` / `HD2-Fallback`). |
 
 **Colors below native Render Scale:** the loader draws in the UI world, which shows colors differently from the
 game's world. Every color a mod hands it is converted with per-channel curves measured in game

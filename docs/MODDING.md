@@ -40,6 +40,8 @@ Your `init`, `update`, `render` and `shutdown` are called as before, after Chef 
 
 - **The header** is the file's very first line, exactly `-- HD2-Addon: mods/<author>/<name>` (or `-- HD2-Boot:`, or
   `-- HD2-Options:` for an options file). `<author>` and `<name>` use letters, digits, `_` and `-`.
+- **`-- HD2-Exclusive:` / `-- HD2-Fallback:`** (optional, among the first lines): which of your resources must win
+  and which may be overridden (see "Which mod's copy the game loads").
 - **The author folder** should be unique to you (your handle). Two mods with the same full name run once: the one
   deployed last (the highest patch number).
 - **Load order:** `mods/chef/...` (my own mods) start first, then everyone else's by name. A mod's requirements start
@@ -351,6 +353,38 @@ jobs made inside a timer or job start on the next frame.
 |---|---|
 | `chef.save_table(name, t)` | Saves plain data (booleans, numbers, strings, tables of them; no functions or cycles, 16 deep, 256 KB) to `chef_data_<author>_<mod>__<name>.lua` in the log folder (characters other than `a-z 0-9 -` become `_` and two hex digits, so every mod and table has its own file; files from 1.0.0 are moved over once). Written to a `.tmp` first; returns true when saved, or false and why. |
 | `chef.load_table(name)` | Reads it back (run with nothing to reach), or nil and why. |
+
+### Which mod's copy the game loads (the index)
+
+When two patches ship the same resource (an armor unit, a texture, a material), the game loads the copy in the
+highest-numbered patch and the other is never seen. `chef.index()` (`chef.has('index')`) tells which:
+
+| Call | Returns |
+|---|---|
+| `X.winner(type, id)` | `{ patch, file, mods }` of the copy the game loads, or nil |
+| `X.providers(type, id)` | every patch that ships it, the winner first |
+| `X.patches()` | `{ { number, file, mods }, ... }`, lowest number first |
+| `X.conflicts()` | resources two different mods ship in different copies: `{ { type, id, policy, winner, loser }, ... }` (at most 1,000, then the count of the rest) |
+
+`type` is a name (`'unit'`, `'material'`, `'texture'`, `'package'`, `'bones'`, `'animation'` ...) or 16 hex digits,
+`id` 16 hex digits. `mods` are the names declared in that patch (empty for a patch with no `HD2-` header). The index
+is built in one go the first time a mod asks (or right after start-up when a mod declares `HD2-Exclusive`), from the
+patches' tables of contents, and kept for the session (one entry per resource). Two copies count as the same when their
+sizes and the first 64 KB of each part (the main file, `.stream`, `.gpu_resources`) match; up to 2,000 such
+comparisons a build, the rest count as different and the log says how many.
+
+Two header lines say what your mod expects:
+
+```lua
+-- HD2-Addon: mods/you/my_armor
+-- HD2-Exclusive: unit material:1a2b3c4d5e6f7a8b
+-- HD2-Fallback: texture
+```
+
+- `HD2-Exclusive`: these must be the copies the game loads. When another mod's copy wins, the log names both mods and
+  the screen says `<MOD> IS OVERRIDDEN BY ANOTHER MOD`, right after start-up.
+- `HD2-Fallback`: these are fine to be overridden (a default others replace); never reported.
+- Neither: an override is listed in the log, one line per pair of patches, once the index is built.
 
 ### The mod list
 

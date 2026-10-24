@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Between mods**
+- `chef.index()`: which mod's copy of each resource the game loads (`winner`, `providers`, `patches`, `conflicts`),
+  built on first use from the patches' tables of contents. `chef.has('index')`.
+- `-- HD2-Exclusive:` and `-- HD2-Fallback:` header lines: a mod says which of its resources must win (reported in the
+  log and on screen after start-up when another mod's copy wins) and which may be overridden (never reported).
+
 ## 1.0.1
 
 **Crash safety**

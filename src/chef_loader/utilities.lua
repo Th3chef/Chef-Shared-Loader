@@ -10,6 +10,7 @@
 --   6 typed (the text typed this frame) and key_label (a key's name on the player's keyboard)
 --   7 save_table / load_table
 --   8 mods (every mod the loader found, with its version and state)
+--   9 index (which mod's copy of each resource the game loads, and what overrides what)
 -- It only reaches the loader through ctx (services' table) and L (the loader's drawing and world internals). Lua 5.1.
 
 local M = { version = '0.1.0' }
@@ -32,6 +33,210 @@ local function finite(n) return type(n) == 'number' and n == n and n > -huge and
 local function io_ok(ok, r, e)
   if not ok or r == false then return false end
   return not (r == nil and e ~= nil)
+end
+
+-- ------------------------------------------------------------------ the index: which mod's file wins
+-- Every resource (type + id) in the deployed patches, which patch provides the copy the game loads (the highest
+-- number) and which it shadows. Built the first time a mod asks (chef.index), or right after start-up when a mod says
+-- which of its files must win (-- HD2-Exclusive:), from the patches' tables of contents only (bodies are read only to
+-- tell two copies of one resource apart, the first 64 KB). ctx: open, log; P: patches() -> {{file, n}} ascending,
+-- owners() -> {[file] = {mod names}}, policies() -> {[mod] = {exclusive = {sel}, fallback = {sel}}}, clock, notify.
+M.TYPES = { unit = 'e0a48d0be9a7453f', material = 'eac0b497876adedf', texture = 'cd4238c6a0c69e32',
+  package = 'ad9c6d9ed1e5e77a', lua = 'a14e8dfa2cd117e2', bones = '18dead01056b72e9', animation = '931e336d7646cc26',
+  state_machine = 'a486d4045106165c', particles = 'a8193123526fad64', wwise_bank = '535a7bd3e650d799',
+  wwise_stream = '504b55235d21440e', wwise_dep = 'af32095c82f2b070', font = '9efe0a916aae7880',
+  shader_library = 'e5ee32a477239a93', strings = '0d972bab10b40fd3', geometry_group = 'c4f0f4be7fb0c8d6',
+  physics = '5f7203c8f280dab8', prefab = 'ab2f78e885f513c6', level = '2a690fd348fe9ac5', entity = '9831ca893b0d087d',
+  render_config = '27862fe24795319c', speedtree = 'e985c5f61c169997' }
+M.NAME_OF = {}
+for k, v in pairs(M.TYPES) do M.NAME_OF[v] = k end
+local byte, sub = string.byte, string.sub
+local function u32(s, i) local a, b, c, d = byte(s, i, i + 3); return a + b * 256 + c * 65536 + d * 16777216 end
+local function u64(s, i) return u32(s, i) + u32(s, i + 4) * 4294967296 end
+local function hex_of(s, i)                      -- 8 little-endian bytes at i -> 16 hex digits
+  local a, b, c, d, e, f, g, h = byte(s, i, i + 7)
+  return fmt('%02x%02x%02x%02x%02x%02x%02x%02x', h, g, f, e, d, c, b, a)
+end
+-- a type name ('unit') or 16 hex digits -> 16 hex digits, or nil
+function M.type_hex(t)
+  if type(t) ~= 'string' then return nil end
+  t = t:lower()
+  if M.TYPES[t] then return M.TYPES[t] end
+  if #t == 16 and t:match('^%x+$') then return t end
+end
+-- "-- HD2-Exclusive: unit material:<16 hex>" and "-- HD2-Fallback: texture *" among a mod's first lines
+function M.policies(src)
+  local out = { exclusive = {}, fallback = {} }
+  for kind, words in src:sub(1, 1200):gmatch('\n%-%- HD2%-(%a+): ([^\r\n]*)') do
+    local list = kind == 'Exclusive' and out.exclusive or (kind == 'Fallback' and out.fallback or nil)
+    if list then
+      for w in words:gmatch('%S+') do
+        if w == '*' then list[#list + 1] = { any = true }
+        else
+          local t, id = w:match('^([%w_]+):(%x+)$')
+          local th = M.type_hex(t or w)
+          if th and (not id or #id == 16) then list[#list + 1] = { type = th, id = id and id:lower() } end
+        end
+      end
+    end
+  end
+  return out
+end
+local function matches(list, th, id)
+  for _, s in ipairs(list) do
+    if s.any or (s.type == th and (not s.id or s.id == id)) then return true end
+  end
+  return false
+end
+
+function M.index(ctx, P)
+  local t0 = P.clock()
+  local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
+              compared = 0 }
+  local win = {}        -- key (16 bytes: id, type) -> encoded patch index * 2^18 + entry
+  local shadowed = {}   -- key -> list of encoded rows it shadows, highest first
+  local list = P.patches()
+  local tocs, heads = {}, {}
+  for pi, p in ipairs(list) do
+    local f = ctx.open('data/' .. p.file, 'rb')
+    if f then
+      local ok = pcall(function()
+        local head = f:read(72) or ''
+        if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
+        local nt, ne = u32(head, 5), u32(head, 9)
+        if nt > 4096 or ne > 200000 then return end
+        local toc = f:read(nt * 32 + ne * 80) or ''
+        if #toc < nt * 32 + ne * 80 then return end
+        tocs[pi], heads[pi] = toc, nt * 32
+        for e = 0, ne - 1 do
+          local at = nt * 32 + e * 80 + 1
+          local key = sub(toc, at, at + 15)
+          local code = pi * 262144 + e
+          local was = win[key]
+          if was then
+            local s = shadowed[key]
+            if not s then s = {}; shadowed[key] = s end
+            table.insert(s, 1, was)
+          end
+          win[key] = code
+          I.rows = I.rows + 1
+        end
+      end)
+      if ok then I.files = I.files + 1 else I.bad = I.bad + 1 end
+      pcall(f.close, f)
+    end
+  end
+  local function row(code)
+    local pi, e = floor(code / 262144), code % 262144
+    local toc = tocs[pi]
+    local at = heads[pi] + e * 80 + 1
+    return list[pi], toc, at
+  end
+  -- the first 64 KB of each of a resource's three parts: the main file, .stream and .gpu_resources (a texture's main
+  -- part is only its header; its pixels are in .gpu_resources)
+  local function part(path, off, size)
+    if size == 0 then return '' end
+    local f = ctx.open(path, 'rb')
+    if not f then return nil end
+    local s
+    pcall(function() if f:seek('set', off) then s = f:read(min(size, 65536)) end end)
+    pcall(f.close, f)
+    return s
+  end
+  local function first_bytes(p, toc, at)
+    local main = part('data/' .. p.file, u64(toc, at + 16), u32(toc, at + 56))
+    local stream = part('data/' .. p.file .. '.stream', u64(toc, at + 24), u32(toc, at + 60))
+    local gpu = part('data/' .. p.file .. '.gpu_resources', u64(toc, at + 32), u32(toc, at + 64))
+    if not (main and stream and gpu) then return nil end
+    return main .. '\0' .. stream .. '\0' .. gpu
+  end
+  local owners, policies = P.owners(), P.policies()
+  local function mods_of(p) return owners[p.file] or {} end
+  local function label(p) local m = mods_of(p); return #m > 0 and concat(m, ',') or ('patch ' .. p.n) end
+  local pairs_said = {}
+  -- two patches of different mods (or two unannounced ones) give one resource: a conflict unless the copies are the same
+  for key, list_of in pairs(shadowed) do
+    local wp, wtoc, wat = row(win[key])
+    for _, code in ipairs(list_of) do
+      local lp, ltoc, lat = row(code)
+      if label(wp) ~= label(lp) then
+        -- same sizes, then the same first bytes of each part; at most 2,000 such comparisons a build (a texture pack
+        -- over another can give thousands of same-size pairs), the rest count as different
+        local same = sub(wtoc, wat + 56, wat + 67) == sub(ltoc, lat + 56, lat + 67)
+        if same and I.compared < 2000 then
+          I.compared = I.compared + 1
+          local a, b = first_bytes(wp, wtoc, wat), first_bytes(lp, ltoc, lat)
+          same = a ~= nil and a == b
+        elseif same then same, I.unread = false, I.unread + 1 end
+        if same then I.same = I.same + 1
+        else
+          local th, id = hex_of(key, 9), hex_of(key, 1)
+          local policy = 'shared'
+          for _, m in ipairs(mods_of(lp)) do
+            local pol = policies[m]
+            if pol and matches(pol.fallback, th, id) then policy = 'fallback' end
+            if pol and policy ~= 'fallback' and matches(pol.exclusive, th, id) then policy = 'exclusive' end
+          end
+          if policy == 'fallback' then I.fallback = I.fallback + 1
+          else
+            if policy == 'shared' then I.shared = I.shared + 1 end
+            if #I.conflicts < 1000 then
+              I.conflicts[#I.conflicts + 1] = { type = M.NAME_OF[th] or th, id = id, policy = policy,
+                winner = { patch = wp.n, mods = mods_of(wp) }, loser = { patch = lp.n, mods = mods_of(lp) } }
+            else I.more = I.more + 1 end
+            local pk = wp.n .. ' ' .. lp.n .. ' ' .. policy
+            pairs_said[pk] = (pairs_said[pk] or 0) + 1
+          end
+        end
+      end
+    end
+  end
+  -- the index itself: key -> the winning patch, and the shadowed ones (numbers only; the tables of contents go)
+  local function bin(h)                          -- 16 hex digits -> the 8 little-endian bytes the tables hold
+    local t = {}
+    for i = 15, 1, -2 do t[#t + 1] = string.char(tonumber(sub(h, i, i + 1), 16)) end
+    return concat(t)
+  end
+  I.lookup = function(th, id)
+    local key = bin(id) .. bin(th)
+    local w = win[key]
+    if not w then return nil end
+    local out = {}
+    local pi = floor(w / 262144)
+    out[1] = { patch = list[pi].n, file = list[pi].file, mods = mods_of(list[pi]) }
+    for _, code in ipairs(shadowed[key] or {}) do
+      local p = list[floor(code / 262144)]
+      out[#out + 1] = { patch = p.n, file = p.file, mods = mods_of(p) }
+    end
+    return out
+  end
+  I.patches = {}
+  for _, p in ipairs(list) do I.patches[#I.patches + 1] = { number = p.n, file = p.file, mods = mods_of(p) } end
+  tocs, heads = nil, nil
+  I.ms = (P.clock() - t0) * 1000
+  ctx.log(fmt('index: %d rows in %d patch files; between mods %d overridden (%d expected by a fallback), %d identical%s (%.2f ms)',
+    I.rows, I.files, #I.conflicts + I.more + I.fallback, I.fallback, I.same,
+    I.unread > 0 and fmt(', %d of the same size not compared', I.unread) or '', I.ms))
+  local keys, notified = {}, {}       -- notified: one notice a mod, however many patches override it
+  for k in pairs(pairs_said) do keys[#keys + 1] = k end
+  sort(keys)
+  for _, k in ipairs(keys) do
+    local w, l, policy = k:match('^(%d+) (%d+) (%a+)$')
+    local wp, lp
+    for _, p in ipairs(list) do if p.n == tonumber(w) then wp = p elseif p.n == tonumber(l) then lp = p end end
+    ctx.log(fmt('index: %s (patch %s) overrides %d resource(s) of %s (patch %s)%s', label(wp), w, pairs_said[k], label(lp), l,
+      policy == 'exclusive' and ': that mod says they must win (HD2-Exclusive); deploy it after the other or drop one' or ''))
+    if policy == 'exclusive' and P.notify then
+      for _, m in ipairs(mods_of(lp)) do
+        if not notified[m] then
+          notified[m] = true
+          local short = (m:match('([^/]+)$') or m):upper():gsub('_', ' ')
+          P.notify({ text = short .. ' IS OVERRIDDEN BY ANOTHER MOD (SEE ' .. ctx.FILES:upper() .. '.LOG)', dur = 20 })
+        end
+      end
+    end
+  end
+  return I
 end
 
 -- ------------------------------------------------------------------ the game's settings file (SJSON)
@@ -407,6 +612,39 @@ function M.install(ctx, L)
     if o and o.remove then pcall(o.remove, path) end
     return false, why
   end
+  -- the index (M.index): built once, the first time a mod asks or right after start-up when a mod declared
+  -- HD2-Exclusive; nil when it failed (logged once)
+  local index_built, index_failed = nil, false
+  local function owners_and_policies()
+    local owners, policies, seen = {}, {}, {}
+    for _, r in ipairs(L.found_rows and L.found_rows() or {}) do
+      local o = owners[r.file]
+      if not o then o = {}; owners[r.file] = o end
+      if not seen[r.file .. '|' .. r.name] then seen[r.file .. '|' .. r.name] = true; o[#o + 1] = r.name end
+      local pol = M.policies(r.src)
+      local p = policies[r.name]
+      if not p then p = { exclusive = {}, fallback = {} }; policies[r.name] = p end
+      for _, s in ipairs(pol.exclusive) do p.exclusive[#p.exclusive + 1] = s end
+      for _, s in ipairs(pol.fallback) do p.fallback[#p.fallback + 1] = s end
+    end
+    for _, o in pairs(owners) do sort(o) end
+    return owners, policies
+  end
+  function util.index()
+    if index_built or index_failed then return index_built end
+    local owners, policies = owners_and_policies()
+    local ok, I = pcall(M.index, ctx, { patches = L.patches, owners = function() return owners end,
+      policies = function() return policies end, clock = L.clock, notify = L.notify })
+    if ok then index_built = I else index_failed = true; log('the index failed: ' .. err_text(I)) end
+    return index_built
+  end
+  -- right after start-up: only when some mod wants to hear that its files lost (HD2-Exclusive), else on first use
+  function util.index_at_startup()
+    local _, policies = owners_and_policies()
+    for _, p in pairs(policies) do if #p.exclusive > 0 then util.index(); return true end end
+    return false
+  end
+
   -- is this a key name the keyboard knows
   function util.known_key(name) return type(name) == 'string' and L.key_index ~= nil and L.key_index(name) ~= nil end
 
@@ -1056,6 +1294,37 @@ function M.install(ctx, L)
       return t, err
     end
 
+    -- 9 which mod's copy of a resource the game loads (M.index, built once, on first use)
+    function chef.index()
+      local I = util.index()
+      if not I then return nil, 'the index could not be built (see the log)' end
+      local function copy(list)
+        local out = {}
+        for i, p in ipairs(list or {}) do
+          local mods = {}
+          for j, m in ipairs(p.mods or {}) do mods[j] = m end
+          out[i] = { patch = p.patch or p.number, number = p.number, file = p.file, mods = mods }
+        end
+        return out
+      end
+      local X = {}
+      function X.providers(t, id)
+        local th = M.type_hex(t)
+        if not th or type(id) ~= 'string' or not id:match('^%x+$') or #id ~= 16 then return {} end
+        return copy(I.lookup(th, id:lower()))
+      end
+      function X.winner(t, id) return X.providers(t, id)[1] end
+      function X.patches() return copy(I.patches) end
+      function X.conflicts()
+        local out = {}
+        for i, c in ipairs(I.conflicts) do
+          out[i] = { type = c.type, id = c.id, policy = c.policy, winner = copy({ c.winner })[1], loser = copy({ c.loser })[1] }
+        end
+        return out, I.more
+      end
+      return X
+    end
+
     -- 8 the mods the loader found
     function chef.mods()
       local out = {}
@@ -1206,7 +1475,7 @@ function M.install(ctx, L)
 
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,
-                mods = true }
+                mods = true, index = true }
   return util
 end
 
