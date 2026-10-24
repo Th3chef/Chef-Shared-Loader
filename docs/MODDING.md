@@ -187,6 +187,12 @@ Required mods start first. A mod whose requirement is missing, too old or in a c
 why (for example `not started: mods/you/my_mod needs mods/you/my_lib 1.2 or newer (1.1.0 is installed)`).
 `chef-loader` works as the loader's name too.
 
+`-- HD2-Requires: full-access` (an addon or an `HD2-Boot` mod) says the mod needs the game's whole Lua (it writes game files, renames or deletes
+files, uses `debug.sethook` ...). While the lockdown is on, such a mod isn't started and the log and the screen say
+why (`not started: mods/you/my_mod needs full access (the lockdown is on)`), instead of starting and failing half-way.
+With the lockdown off it starts with what another mod's `boot` script gets (its own globals over the game's,
+`loadstring`/`load`/`dofile` sealed to them), `chef.has('full_access')` is true, and the mod list says so.
+
 ### The options menu and key bindings
 
 The loader draws one menu for every mod's options, over everything, anywhere in the game. **F9** opens and
@@ -354,7 +360,19 @@ jobs made inside a timer or job start on the next frame.
 
 ### The mod list
 
-`chef.mods()` gives every mod the loader found: `{ name, kind = 'addon' | 'boot', on, dev, file, version }`.
+`chef.mods()` gives every mod the loader found: `{ name, kind = 'addon' | 'boot' | 'guest addon', on, dev, file,
+version, state, why, errors, ms_avg, ms_max, requires, full_access }`.
+
+- `state`: `running`, `off`, `kept off` (it crashed the game; an update turns it back on), `not started` (a missing
+  requirement, a compile error, an error while starting), `stopped` (too many errors this session), or
+  `run by <loader>` for a `guest addon`: one another mod loader starts itself (see "Compatibility with mods that
+  still replace `boot`").
+- `why`: the reason, as in the log. `errors`: Lua errors this session. `ms_avg` / `ms_max`: its time a frame over the
+  last status minute (nil before the first). `requires`: its `HD2-Requires` names. `full_access`: it runs with the
+  game's whole Lua.
+
+The same, one tab-separated line a mod, is in `chef_loader_health.txt` in the log folder: written after start-up, at
+most every 5 s after a change, and at shutdown (`chef.has('health')`). Mods can read it; it's meant for bug reports.
 
 ### The loader's own settings (options menu, Chef Shared Loader group)
 
@@ -421,8 +439,10 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
   paths are refused too.
 
 **Porting tips:**
-- **A mod that hooked the frame by assigning `_G.update`** no longer reaches the engine that way. Return `update`
-  from your module's table, or use `-- HD2-Boot:` with a global `update`.
+- **A mod that hooked the frame by assigning `_G.update`** no longer reaches the engine that way, but it still runs:
+  when an addon's file returns nothing, the `update`, `render` and `shutdown` it set as globals are its hooks (read
+  at every call, so one set later runs too). A mod that wraps them while it loads (`local old = update`) gets a no-op
+  as `old`, never the loader's own. Returning them from your module's table is still the clean way.
 - **Sharing between mods** goes through `chef.share` / `chef.require`, not globals.
 - **A mod that truly needs more** (swapping game files, say) has to ship its own `boot`, and then it isn't a loader
   mod (see below).
@@ -437,6 +457,16 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
 - Code such a boot loads with `loadstring`, `load` or `dofile` stays in its own environment too.
 - Its environment's metatable is locked (from 1.0.1), so no loader mod can reach the game's globals through it. A boot
   script that calls `setmetatable(_G, ...)` (a "strict mode" guard) gets an error there; port it to `-- HD2-Boot:`.
-- **Another mod loader's `boot`** (one that reads the patches for `-- HD2-Addon:` mods itself, such as Boot Mod Loader)
-  is not run: it would start every mod a second time. The log and the screen say so. Only one loader can run.
-- **Two copies of the same mod** (`-- HD2-Addon:` or `-- HD2-Boot:` with the same name): the one deployed last runs.
+- Code such a boot loads with `require` gets the game's globals (that's how `require` works); if it replaces the
+  game's `init`, `update`, `render` or `shutdown` there, the loader puts its own back and runs the replacement as that
+  boot script's own (the log says so). While a boot script loads, its environment's four callbacks are no-ops, so one
+  that wraps them never calls the loader's.
+- **The HD2 Lua Runtime's `boot`** (a mod loader that reads the patches for `-- HD2-Addon:` mods itself and starts
+  them through `require`) runs too, as a guest:
+  - the addons in its own patch are its to start (`chef.mods()` lists them as `guest addon`, `run by <loader>`);
+  - every other addon is the loader's, and is marked as loaded before the guest runs, so it can't start one twice;
+  - it runs in the game's globals (its addons read what it puts there, like the HD2 Lua Runtime's `HD2Runtime`),
+    with its four callbacks kept apart from the loader's and called after them, crash-guarded like any boot script;
+  - it sees the loader's addons as loaded modules (a mark table), so its own log may list them as loaded.
+- **Any other mod loader's `boot`** (Boot Mod Loader, ...) is not run: it may start addons without `require`, which
+  would start every mod a second time. The log and the screen say so. Only one such loader can run.- **Two copies of the same mod** (`-- HD2-Addon:` or `-- HD2-Boot:` with the same name): the one deployed last runs.

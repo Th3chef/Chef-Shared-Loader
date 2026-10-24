@@ -211,11 +211,18 @@ A mod that ships its own `boot` (instead of `HD2-Boot`) would normally replace t
   - **Identical copies** (fingerprint) run once.
 - **When it deploys after the loader:** the game runs only that mod's `boot`, and no loader mod runs. Nothing a loader
   can do about it.
-- **Skipped:**
-  - Boots that are copies of this loader (they carry the `--@@LOADER@@` marker).
-  - Other mod loaders: a boot whose source mentions both `HD2-Addon` and `9ba626afa44a3aa3`, or carries
-    `__boot_mod_loader`, such as Boot Mod Loader. Running one would start every addon a second time. The log and the
-    screen name it.
+  - **Callbacks it sets through `require`:** code a boot loads with `require` gets the game's globals. A callback
+    replaced there is put back and run as that boot's own. While a boot loads, its own four callbacks are no-ops, so
+    one that wraps them (`local old = update`) never calls the loader's (it used to re-enter it every frame).
+- **Other mod loaders** (a boot whose source mentions both `HD2-Addon` and `9ba626afa44a3aa3`, or carries
+  `__boot_mod_loader`):
+  - **The HD2 Lua Runtime** (it starts its addons through `require`) runs as a guest. The addons in its own patch are
+    its to start; the loader leaves them alone and lists them as `run by <loader>` (or `not started` when it didn't
+    run). Every other addon is the loader's, marked as loaded before the guest runs, so it can't start one twice. It
+    runs in the game's globals (its addons read what it puts there), with its callbacks kept apart from the loader's.
+  - **Any other** (Boot Mod Loader, ...) is not run: it may start addons without `require`, which would start every
+    addon a second time. The log and the screen name it.
+- **Skipped:** boots that are copies of this loader (they carry the `--@@LOADER@@` marker).
 
 ## Services and helpers
 
@@ -289,8 +296,10 @@ The old place keeps a trace:
 - `blocked: <mod> tried to open ...`
 
 **Other boots:**
-- `running another mod's boot script too, with full access ...`
-- `another mod loader's boot script in <patch> (...): not run ...`
+- `running another mod's boot script too, with full access ...` (`; it is another mod loader ...` for a guest loader)
+- `N addon(s) in other mod loaders' patches are theirs to start: ...`
+- `another mod loader's boot script in <patch> (...): not run ...` (a loader that isn't the HD2 Lua Runtime)
+- `the boot script in <patch> replaced the game's update (through code it loaded); I put mine back ...`
 
 **When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`
 
@@ -351,7 +360,8 @@ Lua 5.1's limit of 200 active locals (about a dozen free), so new start-up code 
 - **No time limit:** a mod can still loop forever or allocate without limit, which hangs the game. Lua 5.1 has no
   cheap instruction limit.
 - **Bingus-style hooks:** a mod that hooked the frame by assigning `_G.update` reached the engine in older builds; it
-  no longer does. Such a mod should return `update` from its table or use `HD2-Boot`.
+  no longer does. When its file returns nothing, the loader calls the `update`, `render` and `shutdown` it set as its
+  hooks instead.
 
 ## Support
 

@@ -407,6 +407,64 @@ function M.install(ctx, L)
     if o and o.remove then pcall(o.remove, path) end
     return false, why
   end
+  -- ---------------------------------------------------------------- the mod list and the health file
+  -- Every mod I found, with what it's doing and why: chef.mods() hands out a fresh copy, and chef_loader_health.txt
+  -- holds the same, one tab-separated line a mod, so a mod (a report, a menu) or a player can see why one isn't
+  -- running. state: running, off, kept off (it crashed the game), not started (a requirement, a compile error ...),
+  -- stopped (too many errors), or run by <another loader> for the addons another mod loader starts itself.
+  -- ms_avg / ms_max: its time a frame over the last status minute (nil before the first).
+  local function state_of(m)
+    if m.state == 'running' and not m.on then return 'off' end
+    return m.state or (m.on and 'running' or 'off')
+  end
+  function util.mod_list()
+    local out = {}
+    for _, m in ipairs(L.addons) do
+      -- (another mod's version read raw: its table can't raise into this call)
+      local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
+      local req = {}
+      for i, q in ipairs(m.requires or {}) do req[i] = q end
+      out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
+                        version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
+                        state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
+                        requires = req, full_access = m.full_access == true }
+    end
+    for _, b in ipairs(L.boots()) do
+      local r = b.a or b
+      out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file,
+                        state = b.on == false and (r.state == 'stopped' and 'stopped' or 'off') or 'running',
+                        why = r.why, errors = b.errors or 0, title = b.title, full_access = r.full_access == true }
+    end
+    -- (on and errors are the other loader's to know: nil)
+    for _, g in ipairs(L.guests and L.guests() or {}) do
+      out[#out + 1] = { name = g.name, kind = 'guest addon', file = g.file, state = g.state or ('run by ' .. g.loader),
+                        why = g.why or 'it sits in the patch of another mod loader, which starts it' }
+    end
+    return out
+  end
+  local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
+  function util.health_text()
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfull_access\tfile' }
+    for _, m in ipairs(util.mod_list()) do
+      out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', m.full_access and 'yes' or '',
+        field(m.file) }, '\t')
+    end
+    return concat(out, '\n') .. '\n'
+  end
+  -- written whole to a .tmp and put in place, like the settings
+  function util.write_health()
+    local path = ctx.DIR .. ctx.FILES .. '_health.txt'
+    local tmp = L.os and path .. '.tmp' or path
+    local f = ctx.open(tmp, 'w')
+    if not f then return false end
+    local okw = io_ok(pcall(f.write, f, util.health_text()))
+    local okc = io_ok(pcall(f.close, f))
+    if not (okw and okc) then return false end
+    if tmp == path then return true end
+    return util.replace(tmp, path)
+  end
+
   -- is this a key name the keyboard knows
   function util.known_key(name) return type(name) == 'string' and L.key_index ~= nil and L.key_index(name) ~= nil end
 
@@ -1057,19 +1115,7 @@ function M.install(ctx, L)
     end
 
     -- 8 the mods the loader found
-    function chef.mods()
-      local out = {}
-      for _, m in ipairs(L.addons) do
-        -- (another mod's version read raw: its table can't raise into this call)
-        local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-        out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
-                          version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil }
-      end
-      for _, b in ipairs(L.boots()) do
-        out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file }
-      end
-      return out
-    end
+    function chef.mods() return util.mod_list() end
   end
 
   -- the frame budget behind chef.budget: the loader's own "Budget warning (ms)" row (util.budget_row, set by the
@@ -1206,7 +1252,7 @@ function M.install(ctx, L)
 
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,
-                mods = true }
+                mods = true, health = true }
   return util
 end
 

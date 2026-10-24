@@ -38,6 +38,8 @@ local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-]+$' --@@ALLOW@@ any author's mods/<author>/<name> (mine still start first)
 local VERSION = '1.0.1'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
+local LOCKDOWN = true --@@LOCKDOWN@@      mods run locked down (sandbox.lua); a mod that says "-- HD2-Requires:
+                                         -- full-access" starts only while this is false (the lockdown option sets it)
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
 local PROBE_MIN = 1000                   -- a smaller world (title, loading) is never probed for mission loot
@@ -949,6 +951,8 @@ function M.install(ctx)
     local caps = { api = M.api, after_startup = true, settings = true, share = true, events = true, require = true,
                    bind = true, menu = true, shims = true, dev = true, logs = true, own_log = true }
     if svc.util then for k, v in pairs(svc.util.caps) do caps[k] = v end end
+    -- this mod runs with the game's whole Lua ("-- HD2-Requires: full-access", the lockdown off)
+    caps.full_access = a.full_access == true
     chef.capabilities = setmetatable({}, { __index = caps,
       __newindex = function() error('chef.capabilities is read-only', 2) end })
     function chef.has(name) return chef.capabilities[name] == true or (name == 'api' and true) end
@@ -1912,6 +1916,64 @@ function M.install(ctx, L)
     if o and o.remove then pcall(o.remove, path) end
     return false, why
   end
+  -- ---------------------------------------------------------------- the mod list and the health file
+  -- Every mod I found, with what it's doing and why: chef.mods() hands out a fresh copy, and chef_loader_health.txt
+  -- holds the same, one tab-separated line a mod, so a mod (a report, a menu) or a player can see why one isn't
+  -- running. state: running, off, kept off (it crashed the game), not started (a requirement, a compile error ...),
+  -- stopped (too many errors), or run by <another loader> for the addons another mod loader starts itself.
+  -- ms_avg / ms_max: its time a frame over the last status minute (nil before the first).
+  local function state_of(m)
+    if m.state == 'running' and not m.on then return 'off' end
+    return m.state or (m.on and 'running' or 'off')
+  end
+  function util.mod_list()
+    local out = {}
+    for _, m in ipairs(L.addons) do
+      -- (another mod's version read raw: its table can't raise into this call)
+      local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
+      local req = {}
+      for i, q in ipairs(m.requires or {}) do req[i] = q end
+      out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
+                        version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
+                        state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
+                        requires = req, full_access = m.full_access == true }
+    end
+    for _, b in ipairs(L.boots()) do
+      local r = b.a or b
+      out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file,
+                        state = b.on == false and (r.state == 'stopped' and 'stopped' or 'off') or 'running',
+                        why = r.why, errors = b.errors or 0, title = b.title, full_access = r.full_access == true }
+    end
+    -- (on and errors are the other loader's to know: nil)
+    for _, g in ipairs(L.guests and L.guests() or {}) do
+      out[#out + 1] = { name = g.name, kind = 'guest addon', file = g.file, state = g.state or ('run by ' .. g.loader),
+                        why = g.why or 'it sits in the patch of another mod loader, which starts it' }
+    end
+    return out
+  end
+  local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
+  function util.health_text()
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfull_access\tfile' }
+    for _, m in ipairs(util.mod_list()) do
+      out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', m.full_access and 'yes' or '',
+        field(m.file) }, '\t')
+    end
+    return concat(out, '\n') .. '\n'
+  end
+  -- written whole to a .tmp and put in place, like the settings
+  function util.write_health()
+    local path = ctx.DIR .. ctx.FILES .. '_health.txt'
+    local tmp = L.os and path .. '.tmp' or path
+    local f = ctx.open(tmp, 'w')
+    if not f then return false end
+    local okw = io_ok(pcall(f.write, f, util.health_text()))
+    local okc = io_ok(pcall(f.close, f))
+    if not (okw and okc) then return false end
+    if tmp == path then return true end
+    return util.replace(tmp, path)
+  end
+
   -- is this a key name the keyboard knows
   function util.known_key(name) return type(name) == 'string' and L.key_index ~= nil and L.key_index(name) ~= nil end
 
@@ -2562,19 +2624,7 @@ function M.install(ctx, L)
     end
 
     -- 8 the mods the loader found
-    function chef.mods()
-      local out = {}
-      for _, m in ipairs(L.addons) do
-        -- (another mod's version read raw: its table can't raise into this call)
-        local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-        out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
-                          version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil }
-      end
-      for _, b in ipairs(L.boots()) do
-        out[#out + 1] = { name = b.owner or b.file, kind = 'boot', on = b.on ~= false, file = b.file }
-      end
-      return out
-    end
+    function chef.mods() return util.mod_list() end
   end
 
   -- the frame budget behind chef.budget: the loader's own "Budget warning (ms)" row (util.budget_row, set by the
@@ -2711,7 +2761,7 @@ function M.install(ctx, L)
 
   util.caps = { units = true, spawn = true, timers = true, budget = true, session = true, settings_file = true,
                 shapes = true, sprite_sheets = true, notify = true, typed = true, key_labels = true, save_table = true,
-                mods = true }
+                mods = true, health = true }
   return util
 end
 return M
@@ -4686,6 +4736,7 @@ svc.util = services.utilities.install(svc.ctx, { api = api, xyz = xyz, rect = re
   notify = function(n) notices[#notices + 1] = n end,
   notes_of = function(o) local k = 0; for _, n in ipairs(notices) do if n.owner == o then k = k + 1 end end return k end,
   addons = addons, boots = function() return svc.ctx.boots or {} end, frame_no = function() return frame_no end,
+  guests = function() return svc.ctx.guest_addons or {} end,
   clock = clock, os = os_, new_world_hooks = new_world_hooks, bad_kinds = res.bad, settings_text = cfg_text,
   found = function()
     local t = {}
@@ -4869,6 +4920,154 @@ end
 
 -- the start-up steps for one mod and switching one off (a table: the loader is near Lua 5.1's 200 locals)
 local starter = {}
+-- What a mod is doing and why, for chef.mods() and chef_loader_health.txt (written at most every 5 s after a change).
+function starter.state(a, state, why)
+  a.state, a.why = state, why
+  svc.ctx.health_dirty = true
+end
+-- The four game callbacks as stand-ins, put in a mod's or a boot script's environment before its code runs. One that
+-- wraps them ("local old = update ... old(dt)") gets a stand-in instead of mine through the game's globals: mine runs
+-- every mod and boot script again, so it re-entered itself each frame until the stack ran out. The stand-ins it didn't
+-- replace are taken out again once it ran, so they never count as its own.
+starter.SEEDS = { init = function() end, update = function() end, render = function() end, shutdown = function() end }
+function starter.seed(env) for k, fn in pairs(starter.SEEDS) do rawset(env, k, fn) end end
+function starter.unseed(env) for k, fn in pairs(starter.SEEDS) do if rawget(env, k) == fn then rawset(env, k, nil) end end end
+-- An addon that returned nothing but set update, render or shutdown as globals (how mods hooked the frame before
+-- loaders): those are its hooks. They're read raw from its environment at every call (a.globals; run_hook), so one it
+-- sets later runs too. Never through a metatable: its environment's __index reaches the game's globals, mine among them.
+-- Its exports (a.module, what chef.require hands out) stay an empty table, as before: its environment is its own.
+function starter.adopt(a, env)
+  a.hooks, a.ran, a.module, a.hooks_mt, a.version, a.globals = {}, {}, {}, false, nil, env
+  local set = {}
+  for _, k in ipairs({ 'update', 'render', 'shutdown' }) do if type(rawget(env, k)) == 'function' then set[#set + 1] = k end end
+  return set
+end
+-- "-- HD2-Requires: full-access": the mod needs the game's whole Lua (it writes game files, say). It gets what another
+-- mod's boot script gets (its own globals over the game's, sealed loadstring/load/dofile), only while LOCKDOWN is off.
+function starter.wants_full(src)
+  for _, q in ipairs(services.requirements(src)) do if q.name == 'full-access' then return true end end
+  return false
+end
+function starter.full_env(name)
+  local env = setmetatable({}, { __index = G, __metatable = 'locked' })
+  env._G = env
+  starter.seal(env)
+  if svc.sandbox and type(svc.sandbox.register_full) == 'function' then svc.sandbox.register_full(env, name) end
+  return env
+end
+-- Other mod loaders I run as guests: only ones known to start their addons through require, so the marks in
+-- package.loaded (starter.mark) keep them from starting mine a second time. One that reads the patches and loadstrings
+-- each addon itself would start every mod of mine again, with the game's whole Lua: those stay refused, as before.
+-- Matched on the first line of the boot script.
+starter.GUESTS = { '^%-%- HD2 Lua Runtime[ %(]' }      -- the HD2 Lua Runtime (HD2 Transmog 1.0.x, Native Notification)
+function starter.guest_loader(src)
+  local first = src:match('^[^\r\n]*') or ''
+  for _, p in ipairs(starter.GUESTS) do if first:match(p) then return true end end
+  return false
+end
+-- A guest loader starts the addons in its own patch: they were made for it, not for me (the HD2 Lua Runtime's need
+-- its library). Those leave my list before I start anything, and the mod list shows them as run by that loader (or as
+-- not started, when it didn't run: starter.orphans).
+function starter.split_guests()
+  local loaders = {}
+  for _, b in ipairs(found_boots) do
+    if starter.other_loader(b.src) and starter.guest_loader(b.src) then
+      loaders[b.file] = { fp = fingerprint(b.src), title = (b.src:match('^%-%-%s*([^\r\n]+)') or 'no title'):sub(1, 90) }
+    end
+  end
+  local mine, guests = {}, {}
+  for _, r in ipairs(found_addons) do
+    local l = loaders[r.file]
+    if l then guests[#guests + 1] = { name = r.name, file = r.file, fp = l.fp, loader = l.title }
+    else mine[#mine + 1] = r end
+  end
+  for i = #found_addons, 1, -1 do found_addons[i] = nil end
+  for i, r in ipairs(mine) do found_addons[i] = r end
+  svc.ctx.guest_addons = guests
+  if #guests > 0 then
+    local names = {}
+    for i, g in ipairs(guests) do names[i] = g.name end
+    log(fmt('%d addon(s) in other mod loaders\' patches are theirs to start: %s', #guests, concat(names, ', ')))
+  end
+end
+-- Before another loader's boot script runs: every addon I found (started or not) and the other loaders' addons are
+-- marked as loaded, so a loader that requires every "-- HD2-Addon:" it finds can't start them a second time. Mine stay
+-- marked; the other loaders' are taken back once it loaded. Returns those to take back.
+function starter.mark(fp)
+  local P = rawget(G, 'package')
+  local loaded = type(P) == 'table' and rawget(P, 'loaded')
+  if type(loaded) ~= 'table' then return {} end
+  local back = {}
+  for _, list in ipairs({ found_addons, found_named }) do
+    for _, r in ipairs(list) do
+      if rawget(loaded, r.name) == nil then
+        rawset(loaded, r.name, { chef_shared_loader = 'started by Chef Shared Loader',
+          description = 'a mark, not the module: Chef Shared Loader starts this addon itself' })
+      end
+    end
+  end
+  for _, g in ipairs(svc.ctx.guest_addons or {}) do
+    if g.fp ~= fp and rawget(loaded, g.name) == nil then
+      local m = { chef_shared_loader = 'run by ' .. g.loader, description = 'a mark, not the module: another loader starts it' }
+      rawset(loaded, g.name, m)
+      back[#back + 1] = { loaded, g.name, m }
+    end
+  end
+  return back
+end
+-- After the boot scripts started: a guest addon whose loader isn't running (it didn't compile, crashed at load, is kept
+-- off) is started by nobody, and says so.
+function starter.orphans()
+  local running = {}
+  for _, b in ipairs(svc.ctx.boots or {}) do if b.on ~= false then running[b.owner] = true end end
+  for _, g in ipairs(svc.ctx.guest_addons or {}) do
+    if not running['boot:' .. g.fp] then
+      g.state, g.why = 'not started', 'its loader (' .. g.loader .. ') did not run'
+      svc.ctx.health_dirty = true
+      log(fmt('not started: %s (its loader, %s, did not run)', g.name, g.loader))
+    end
+  end
+end
+function starter.unmark(back)
+  for _, b in ipairs(back or {}) do if rawget(b[1], b[2]) == b[3] then rawset(b[1], b[2], nil) end end
+end
+-- The game's four callbacks (mine) before a boot script runs, and after it: one it replaced in the game's own globals
+-- (code it loads with require gets those, not its environment) is put back and becomes that script's own, unless it
+-- has one of its own already.
+function starter.callbacks()
+  local t = {}
+  for k in pairs(starter.SEEDS) do t[k] = rawget(G, k) end
+  return t
+end
+function starter.restore(mine, env, file, quiet)
+  for k, fn in pairs(mine) do
+    local now = rawget(G, k)
+    rawset(G, k, fn)
+    if now ~= starter.SEEDS[k] and now ~= fn then
+      local own = rawget(env, k)
+      if own == nil or own == starter.SEEDS[k] then
+        rawset(env, k, now)
+        if not quiet then
+          log(fmt('%s replaced the game\'s %s (through code it loaded); I put mine back and run its %s as its own', file, k, k))
+        end
+      else
+        log(fmt('%s replaced the game\'s %s (through code it loaded) and has a %s of its own: I put mine back and run its own',
+          file, k, k))
+      end
+    end
+  end
+end
+-- run(): a boot script's or full-access mod's load. While it runs, the game's four callbacks are stand-ins too, not only
+-- its environment's: code it loads with require gets the game's globals, so a wrapper there ("local old = update")
+-- must capture a stand-in as well. Whatever happens in run, mine go back.
+function starter.seeded(env, file, quiet, run)
+  local mine = starter.callbacks()
+  for k, fn in pairs(starter.SEEDS) do rawset(G, k, fn) end
+  local ok, r1, r2 = pcall(run)
+  starter.restore(mine, env, file, quiet)
+  if not ok then error(r1, 0) end
+  return r1, r2
+end
 -- A mod that stops (switched off after errors, or a start that failed half-way): it's off for the session, its watches
 -- and loot kinds go, and the services forget it (no more events or change callbacks to it; its timers, jobs and what it
 -- spawned go too).
@@ -4894,6 +5093,7 @@ local function run_hook(a, hook, ...)
   if not ran then return end
   local fn = rawget(a.module, hook)
   if fn == nil and a.hooks_mt then fn = a.hooks[hook] end
+  if fn == nil and a.globals then fn = rawget(a.globals, hook) end
   if type(fn) ~= 'function' then return end
   local k = ran[hook]
   if k == false then return end
@@ -4917,6 +5117,7 @@ local function run_hook(a, hook, ...)
     if a.errors <= 3 then log('[' .. a.short .. '] ' .. hook .. ' error: ' .. tr.why(err)) end
     if a.errors >= MAX_ERRORS then
       starter.off(a)
+      starter.state(a, 'stopped', 'after ' .. a.errors .. ' errors')
       log('switched off ' .. a.name .. ' for this session after ' .. a.errors .. ' errors')
       notices[#notices + 1] = { text = a.short:upper():gsub('_', ' ') .. ' STOPPED AFTER ERRORS', dur = 20 }
     end
@@ -4952,7 +5153,9 @@ end
 function starter.requires_ok(r)
   if r.cycle then return false, 'its requirements go round in a circle' end
   for _, q in ipairs(services.requirements(r.src)) do
-    if q.name == 'chef-shared-loader' or q.name == 'chef-loader' then
+    if q.name == 'full-access' then
+      if LOCKDOWN then return false, 'needs full access (the lockdown is on)' end
+    elseif q.name == 'chef-shared-loader' or q.name == 'chef-loader' then
       if q.version and not services.version_at_least(VERSION, q.version) then
         return false, fmt('needs Chef Shared Loader %s or newer (this is %s)', q.version, VERSION)
       end
@@ -4968,8 +5171,9 @@ function starter.requires_ok(r)
 end
 function starter.addon(r)
   local a = { name = r.name, short = r.name:match('([^/]+)$'), file = r.file, fp = fingerprint(r.src),
-              on = true, errors = 0, ms = 0, max_ms = 0, dev = r.dev }
+              on = true, errors = 0, ms = 0, max_ms = 0, dev = r.dev, requires = {} }
   addons[#addons + 1] = a
+  for _, q in ipairs(services.requirements(r.src)) do a.requires[#a.requires + 1] = q.name end
   v1.off(a.name, r.src, a.fp)
   local was = off[a.name]
   -- A mod can ask to stay on after a crash ("-- HD2-Keep-On-Crash: yes" in its first lines): then only
@@ -4983,6 +5187,7 @@ function starter.addon(r)
   end
   if was and was.fp == a.fp then
     a.on = false
+    starter.state(a, 'kept off', was.why)
     log('kept off: ' .. a.name .. ' (' .. was.why .. '); an update of the mod turns it back on')
     notices[#notices + 1] = { text = a.short:upper():gsub('_', ' ') .. ' IS OFF AFTER A CRASH (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
   elseif was then
@@ -4994,37 +5199,53 @@ function starter.addon(r)
     local rok, why = starter.requires_ok(r)
     if not rok then
       a.on = false
+      starter.state(a, 'not started', why)
       log('not started: ' .. a.name .. ' ' .. why)
       notices[#notices + 1] = { text = a.short:upper():gsub('_', ' ') .. ' IS OFF (SEE ' .. FILES:upper() .. '.LOG)', dur = 20 }
       return a
     end
     a.options = options_for(a.name)
+    a.full_access = not LOCKDOWN and starter.wants_full(r.src)
     local chunk, cerr = loadstring(r.src, '@' .. r.name)
     if not chunk then
       a.on = false
+      starter.state(a, 'not started', 'could not compile: ' .. tostring(cerr))
       log('could not compile ' .. a.name .. ': ' .. tostring(cerr))
-    elseif not svc.sandbox then
+    elseif not svc.sandbox and not a.full_access then
       -- no locked-down space, no start: a mod never runs with the game's whole Lua by mistake
       a.on = false
+      starter.state(a, 'not started', 'the locked-down space for mods could not be set up')
       log('not started: ' .. a.name .. ' (the locked-down space for mods could not be set up)')
     else
-      -- its own locked-down space (src/chef_loader/sandbox.lua)
-      local env = starter.env_for(a.name)
+      -- its own locked-down space (src/chef_loader/sandbox.lua), or the game's whole Lua when it needs that and may
+      local env = a.full_access and starter.full_env(a.name) or starter.env_for(a.name)
+      starter.seed(env)
       setfenv(chunk, env)
       crumb('> ' .. a.name .. '|start')
-      local ok, m = pcall(chunk, make_api(a))
+      local ok, m
+      if a.full_access then
+        ok, m = starter.seeded(env, a.name, false, function() return pcall(chunk, make_api(a)) end)
+      else
+        ok, m = pcall(chunk, make_api(a))
+      end
       crumb('< ' .. a.name .. '|start')
+      starter.unseed(env)
       if ok and type(m) == 'table' then
         starter.read_module(a, m)
-        log(fmt('started %s %s (%s)', a.name, a.version or '', a.file))
+        starter.state(a, 'running')
+        log(fmt('started %s %s (%s%s)', a.name, a.version or '', a.file, a.full_access and '; full access' or ''))
       elseif ok and m == nil then
-        -- a file that does its work when it runs and returns nothing ran fine: it simply has no update or
-        -- shutdown of mine to call
-        starter.read_module(a, {})
-        log(fmt('started %s (%s; it returned nothing, so it has no update or shutdown)', a.name, a.file))
+        -- a file that does its work when it runs and returns nothing ran fine; what it set as globals
+        -- (update, render, shutdown) are its hooks
+        local set = starter.adopt(a, env)
+        starter.state(a, 'running')
+        log(fmt('started %s (%s; it returned nothing, %s)', a.name, a.file, #set > 0
+          and ('so I call the ' .. concat(set, ', ') .. ' it set as globals') or 'so it has no update or shutdown'))
       else
         starter.off(a)                 -- it may have set up timers, watches or events before it failed
-        log('could not start ' .. a.name .. ': ' .. (ok and ('it returned a ' .. type(m) .. ', not a table') or tr.why(m)))
+        local why = ok and ('it returned a ' .. type(m) .. ', not a table') or tr.why(m)
+        starter.state(a, 'not started', why)
+        log('could not start ' .. a.name .. ': ' .. why)
       end
     end
   end
@@ -5102,6 +5323,11 @@ local function frame(dt)
   if not ok then frame_error(err) end
   ok, err = pcall(draw_flush)
   if not ok then frame_error(err) end
+  if svc.ctx.health_dirty and elapsed >= (svc.ctx.health_at or 0) then
+    svc.ctx.health_dirty, svc.ctx.health_at = false, elapsed + 5
+    ok, err = pcall(svc.util.write_health)
+    if not ok then frame_error(err) end
+  end
   if elapsed >= st.next_status then
     st.next_status = elapsed + STATUS_EVERY
     -- Each mod's time (hooks, timers, spread jobs) over the loader's frames this minute, checked against its budget
@@ -5117,6 +5343,7 @@ local function frame(dt)
         any_on = true
         if frames > 0 then svc.util.budget_check(a, avg, a.max_ms) end
       end
+      a.last_avg, a.last_max = frames > 0 and avg or nil, frames > 0 and a.max_ms or nil
       a.ms, a.max_ms = 0, 0
     end
     sig = concat(sig, ' ')
@@ -5216,27 +5443,31 @@ function starter.named_one(r)
     log('could not compile ' .. r.name .. ': ' .. tostring(cerr))
     return
   end
-  if not svc.sandbox then
+  local full = not LOCKDOWN and starter.wants_full(r.src)
+  if not svc.sandbox and not full then
     log('not started: ' .. r.name .. ' (the locked-down space for mods could not be set up)')
     return
   end
-  -- the same locked-down space as an addon (its own _G, loadstring, load; src/chef_loader/sandbox.lua)
-  local env = starter.env_for(r.name)
+  -- the same locked-down space as an addon (its own _G, loadstring, load; src/chef_loader/sandbox.lua), or the game's
+  -- whole Lua when it needs that and may
+  local env = full and starter.full_env(r.name) or starter.env_for(r.name)
+  starter.seed(env)
   -- One table is both its mod (the chef helpers, its timers and jobs add their time to it) and its row in the boot
   -- scripts (its callbacks' time), so the performance monitor shows all of its time on its own row.
   local a = { name = r.name, short = short, file = r.file, fp = fp, on = true, errors = 0, ms = 0, max_ms = 0,
-              owner = r.name, env = env }
+              owner = r.name, env = env, full_access = full }
   a.a = a
   a.options = options_for(r.name)
   env.chef = make_api(a)
   setfenv(chunk, env)
-  local ok, err = guarded(r.name, 'load', chunk)
+  local ok, err = starter.seeded(env, r.name, false, function() return guarded(r.name, 'load', chunk) end)
+  starter.unseed(env)
   if err ~= nil and ok == nil then
     starter.off(a)                     -- it may have set up timers, watches or events before it failed
     log(fmt('%s failed to run: %s', r.name, tr.why(err)))
   else
     boots[#boots + 1] = a
-    log(fmt('started %s (boot-style, %s)', r.name, r.file))
+    log(fmt('started %s (boot-style, %s%s)', r.name, r.file, full and '; full access' or ''))
   end
 end
 local function start_named()
@@ -5290,14 +5521,16 @@ function starter.boot_one(b, seen)
   local title = (b.src:match('^%-%-%s*([^\r\n]+)') or 'no title'):sub(1, 90)
   if seen[fp] then
     log(fmt('another copy of a boot script I already run (%s): skipped', b.file))
-  elseif starter.other_loader(b.src) then
-    seen[fp] = true
-    log(fmt('another mod loader\'s boot script in %s (%s): not run, it would start every addon a second time. ' ..
-      'Only one loader can run: remove that mod (deployed after me, it would run instead of me)', b.file, title))
-    local short = (title:match('^([^%(%.;]+)') or 'another loader'):gsub('%s+$', ''):sub(1, 24)
-    notices[#notices + 1] = { text = 'OTHER LOADER NOT RUN: ' .. short:upper() .. ' (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
   else
     seen[fp] = true
+    local loader = starter.other_loader(b.src)
+    if loader and not starter.guest_loader(b.src) then
+      log(fmt('another mod loader\'s boot script in %s (%s): not run, it would start every addon a second time. ' ..
+        'Only one loader can run: remove that mod (deployed after me, it would run instead of me)', b.file, title))
+      local short = (title:match('^([^%(%.;]+)') or 'another loader'):gsub('%s+$', ''):sub(1, 24)
+      notices[#notices + 1] = { text = 'OTHER LOADER NOT RUN: ' .. short:upper() .. ' (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
+      return
+    end
     local chunk, cerr = loadstring(b.src, '@boot (' .. b.file .. ')')
     local owner = 'boot:' .. fp
     v1.boot(b.src, owner)
@@ -5308,20 +5541,37 @@ function starter.boot_one(b, seen)
     else
       -- its metatable locked, and known to the locked-down space as someone else's: no loader mod can reach the game's
       -- globals through it (getfenv on one of its functions gives the mod its own environment)
-      local env = setmetatable({}, { __index = G, __metatable = 'locked' })
-      env._G = env
-      starter.seal(env)
-      if svc.sandbox and type(svc.sandbox.register_full) == 'function' then svc.sandbox.register_full(env, owner) end
-      setfenv(chunk, env)
-      local ok, err = guarded(owner, 'load', chunk)
+      local env, ok, err
+      if loader then
+        -- A guest loader runs in the game's globals: the addons it starts get those (require), and they look for what it
+        -- put there (the HD2 Lua Runtime's HD2Runtime, say). The callbacks it leaves in the game's globals are its own
+        -- (env holds them) and mine go back (starter.seeded). Its own addons are its to start; mine are marked as loaded
+        -- so it can't start them a second time.
+        env = {}
+        setfenv(chunk, G)
+        local back = starter.mark(fp)
+        ok, err = starter.seeded(env, 'the boot script in ' .. b.file, true, function() return guarded(owner, 'load', chunk) end)
+        starter.unmark(back)
+      else
+        env = setmetatable({}, { __index = G, __metatable = 'locked' })
+        env._G = env
+        starter.seal(env)
+        starter.seed(env)
+        if svc.sandbox and type(svc.sandbox.register_full) == 'function' then svc.sandbox.register_full(env, owner) end
+        setfenv(chunk, env)
+        ok, err = starter.seeded(env, 'the boot script in ' .. b.file, false, function() return guarded(owner, 'load', chunk) end)
+        starter.unseed(env)
+      end
       if err ~= nil and ok == nil then
         log(fmt('the boot script in %s failed to run: %s', b.file, tr.why(err)))
       else
         boots[#boots + 1] = { owner = owner, file = b.file, env = env, errors = 0, on = true, title = title }
         -- full access, as the game would give it if it were deployed after me: locking it down would only
         -- break it (the file-mod installer swaps game files), and a boot that wants everything can take it anyway
-        log(fmt('running another mod\'s boot script too, with full access as the game gives any boot script: %s (%s)',
-          b.file, title))
+        log(fmt('running another mod\'s boot script too, with full access as the game gives any boot script: %s (%s)%s',
+          b.file, title, loader and '; it is another mod loader that starts its addons through require, so it runs in the '
+          .. 'game\'s globals (its addons read what it puts there) with its callbacks kept apart from mine; it starts the '
+          .. 'addons in its own patch, and mine are marked as loaded so it can\'t start them a second time' or ''))
       end
     end
   end
@@ -5348,6 +5598,7 @@ local function call_boots(hook, ...)
         if b.errors <= 3 then log(fmt('the boot script in %s: %s error: %s', b.file, hook, err)) end
         if b.errors >= MAX_ERRORS then
           b.on = false
+          b.state, b.why, svc.ctx.health_dirty = 'stopped', 'after ' .. b.errors .. ' errors', true
           if b.a then starter.off(b.a) end   -- a boot-style mod's timers, watches, events and spawns stop with it
           log(fmt('the boot script in %s stopped after %d errors', b.file, b.errors))
         end
@@ -5398,6 +5649,7 @@ function shutdown()
   -- the other boot scripts' shutdown before the services close the mods' own logs and my trace closes (the file-mod
   -- installer does its work here)
   if #boots > 0 then pcall(call_boots, 'shutdown') end
+  pcall(svc.util.write_health)
   pcall(svc.shutdown)
   pcall(svc.util.shutdown)
   pcall(log, 'shutdown (clean)')
@@ -5521,13 +5773,20 @@ do
   end
   if services.MOVED then log('moved from %LOCALAPPDATA% to %APPDATA%\\Arrowhead\\Helldivers2: ' .. concat(services.MOVED, ', ')) end
 end
+ok, err = pcall(starter.split_guests)
+if not ok then log('sorting out other loaders\' addons failed: ' .. tr.why(err)) end
 start_addons()
 ok, err = pcall(start_named)
 if not ok then log('starting the boot-style scripts failed: ' .. tr.why(err)) end
 ok, err = pcall(start_boots)
 if not ok then log('starting the other boot scripts failed: ' .. tr.why(err)) end
+ok, err = pcall(starter.orphans)
+if not ok then log('checking other loaders\' addons failed: ' .. tr.why(err)) end
 ok, err = pcall(svc.startup_done)
 if not ok then log('after startup failed: ' .. tr.why(err)) end
+svc.ctx.health_dirty = false
+ok, err = pcall(svc.util.write_health)
+if not ok then log('writing the health file failed: ' .. tr.why(err)) end
 
 end
 end)

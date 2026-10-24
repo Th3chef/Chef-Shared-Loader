@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+**Compatibility**
+- The HD2 Lua Runtime's `boot` (a mod loader that starts its addons through `require`) now runs as a guest instead
+  of being refused: the addons in its own patch are its to start, every other addon is marked as loaded first so it
+  can't start one a second time, and it runs in the game's globals with its callbacks kept apart. Mods built on it
+  (HD2 Transmog 1.0.x, Native Notification) run beside loader mods when the loader is deployed last. Other mod loaders
+  (which may start addons without `require`) are still refused, as before.
+- An addon whose file returns nothing gets the `update`, `render` and `shutdown` it set as globals called as its hooks
+  (mods written before loaders).
+- `-- HD2-Requires: full-access` (addons and `HD2-Boot` mods): a mod that needs the game's whole Lua is not started
+  while the lockdown is on, and says so, instead of failing half-way. `chef.has('full_access')`.
+
+**Fixes**
+- A boot script that wraps the game's callbacks (`local old = update`), in its own file or in code it loads with
+  `require`, no longer re-enters the loader's own: every mod ran again inside it, nesting until the stack ran out, each
+  frame. While a boot script, an `HD2-Boot` mod or an addon loads, the callbacks it can wrap are no-ops.
+- A boot script that replaced the game's callbacks through code it loaded with `require` stopped every loader mod;
+  the loader now puts its own back and runs the replacement as that script's own.
+
+**Mod list**
+- `chef.mods()` also gives each mod's `state` and `why`, `errors`, `ms_avg` / `ms_max`, `requires` and `full_access`,
+  and lists the addons other loaders run. The same goes to `chef_loader_health.txt` (`chef.has('health')`).
+
 ## 1.0.1
 
 **Crash safety**

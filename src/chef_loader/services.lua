@@ -450,6 +450,8 @@ function M.install(ctx)
     local caps = { api = M.api, after_startup = true, settings = true, share = true, events = true, require = true,
                    bind = true, menu = true, shims = true, dev = true, logs = true, own_log = true }
     if svc.util then for k, v in pairs(svc.util.caps) do caps[k] = v end end
+    -- this mod runs with the game's whole Lua ("-- HD2-Requires: full-access", the lockdown off)
+    caps.full_access = a.full_access == true
     chef.capabilities = setmetatable({}, { __index = caps,
       __newindex = function() error('chef.capabilities is read-only', 2) end })
     function chef.has(name) return chef.capabilities[name] == true or (name == 'api' and true) end
