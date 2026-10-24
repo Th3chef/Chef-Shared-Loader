@@ -4,7 +4,7 @@ the middle the site's mod cards show). HTML rendered with Playwright Chromium ov
 (scene.jpg): the title and badge in
 Anton and Barlow Condensed, the log and the options menu in JetBrains Mono (all SIL Open Font License, from
 @fontsource, in fonts/). The menu and the monitor follow the loader's own (its pixel font redrawn in a mono face).
-python3 art/cards.py <out dir> [version, e.g. 1.0.0]"""
+python3 art/cards.py <out dir> [version, e.g. 1.1.0]"""
 import base64, io, os, sys
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from playwright.sync_api import sync_playwright
@@ -13,8 +13,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FONTS = {'Anton': 'anton-latin-400-normal.woff2', 'Barlow Condensed': 'barlow-condensed-latin-600-normal.woff2',
          'Barlow Condensed B': 'barlow-condensed-latin-800-normal.woff2', 'Mono': 'jetbrains-mono-latin-500-normal.woff2',
          'Mono B': 'jetbrains-mono-latin-700-normal.woff2'}
-TAGLINE = 'One shared Lua loader for every Helldivers 2 mod: side by side, crash-guarded and locked down, with an in-game options menu and a performance monitor'
-FEATURES = ['ANY AUTHOR', 'F9 OPTIONS MENU', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'MOD API + GUIDE']
+TAGLINE = 'One shared Lua loader for every Helldivers 2 mod, HD2 Lua Runtime mods too: side by side, crash-guarded and locked down, with an in-game options menu and a performance monitor'
+FEATURES = ['ANY AUTHOR', 'F9 OPTIONS MENU', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'HD2 LUA RUNTIME MODS', 'MOD API + GUIDE']
 
 
 def background(W, H):
@@ -111,7 +111,7 @@ def render(page, W, H, body):
 
 def main():
     out = sys.argv[1]
-    ver = sys.argv[2] if len(sys.argv) > 2 else '1.0.0'
+    ver = sys.argv[2] if len(sys.argv) > 2 else '1.1.0'
     badge = 'v' + '.'.join(ver.split('.')[:2])
     os.makedirs(out, exist_ok=True)
     v = {'b': badge, 't': TAGLINE}
@@ -134,8 +134,8 @@ def main():
         <div style="margin-top:30px">%(f)s</div>
       </div>""" % dict(v, f=feats(30)) + menu(790, 150, 780, 34) + perf(1060, 500, 790, 31)),
         ('GitHub-Social-1280x640.png', 1280, 640, """
-      <div class="plate" style="left:48px;top:58px;width:470px;padding:30px 30px 32px">
-        <div class="title" style="font-size:78px">Chef Shared<br>Loader</div>
+      <div class="plate" style="left:48px;top:40px;width:470px;padding:28px 30px 30px">
+        <div class="title" style="font-size:72px">Chef Shared<br>Loader</div>
         <div style="margin:18px 0 20px"><span class="badge" style="font-size:34px">%(b)s</span></div>
         <div class="tag" style="font-size:25px">%(t)s</div>
         <div style="margin-top:20px">%(f)s</div>
