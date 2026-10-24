@@ -5,7 +5,7 @@
   python3 tools/build.py <out dir> --header-from <a working Lua patch> --test N   -> Chef-Shared-Loader-<ver>-Test-N.zip
 
 The zip holds one patch with the game's `boot` script replaced by src/loader.lua (with compat.lua, probe.lua,
-services.lua, utilities.lua and sandbox.lua copied in; tools/splice.py --check must pass), plus manifest.json and
+services.lua, utilities.lua, sandbox.lua and runtime.lua copied in; tools/splice.py --check must pass), plus manifest.json and
 thumbnail.png.
 Same zip byte for byte on every build. Test builds share the loader's own GUID and update it in place.
 
@@ -63,7 +63,8 @@ h.write_lua_archive(os.path.join(d, '9ba626afa44a3aa3.patch_0'), [(h.resource_ha
 json.dump({'Version': 1, 'Guid': GUID, 'Name': name, 'IconPath': 'thumbnail.png',
            'Description': ("Runs Lua mods on the current game build (Lua 5.1) for any mod author: finds every Chef Shared Loader mod "
                            "in your installed mods and runs each in its own space, side by side, with no fight over the game's "
-                           "boot script (mods that still replace boot run too when Chef Shared Loader is deployed last). Puts back the "
+                           "boot script (mods that still replace boot run too when Chef Shared Loader is deployed last). Mods made for "
+                           "the HD2 Lua Runtime run too, without it. Puts back the "
                            "pure-Lua parts of LuaJIT mods use. A mod that crashes the game is switched off on the next launch "
                            "and named in chef_loader.log (%APPDATA%\\Arrowhead\\Helldivers2). Mods run locked down: no programs, no native code, "
                            "files only in the game's own folders. F9 opens the options menu of every mod (and the loader's performance monitor). Mod makers: see docs/MODDING.md at github.com/Th3chef/Chef-Shared-Loader.")},

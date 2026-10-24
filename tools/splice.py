@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Copies src/chef_loader/compat.lua, probe.lua, services.lua, utilities.lua and sandbox.lua into src/loader.lua between their @@BEGIN/@@END lines.
-The game runs boot as one script, so the loader carries them inline; these five files stay the tested originals.
+"""Copies src/chef_loader/compat.lua, probe.lua, services.lua, utilities.lua, sandbox.lua and runtime.lua into src/loader.lua between their @@BEGIN/@@END lines.
+The game runs boot as one script, so the loader carries them inline; these six files stay the tested originals.
   python3 tools/splice.py          -> rewrites loader.lua
   python3 tools/splice.py --check  -> exits 1 if loader.lua's copies differ from the originals"""
 import os, re, sys
@@ -18,7 +18,8 @@ def block(name, var):
 
 def spliced(src):
     for name, var in (('compat.lua', 'compat'), ('probe.lua', 'probe'), ('services.lua', 'services'),
-                      ('utilities.lua', 'services.utilities'), ('sandbox.lua', 'services.sandbox')):
+                      ('utilities.lua', 'services.utilities'), ('sandbox.lua', 'services.sandbox'),
+                      ('runtime.lua', 'services.runtime')):
         pat = re.compile(r'^-- @@BEGIN %s@@.*?^-- @@END %s@@' % (re.escape(name), re.escape(name)), re.S | re.M)
         assert len(pat.findall(src)) == 1, name
         src = pat.sub(lambda m: block(name, var), src)
@@ -29,4 +30,4 @@ new = spliced(src)
 if '--check' in sys.argv:
     sys.exit(0 if new == src else 1)
 open(LOADER, 'w', encoding='utf-8').write(new)
-print('spliced compat.lua, probe.lua, services.lua, utilities.lua and sandbox.lua into loader.lua')
+print('spliced compat.lua, probe.lua, services.lua, utilities.lua, sandbox.lua and runtime.lua into loader.lua')
