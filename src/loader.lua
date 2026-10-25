@@ -55,7 +55,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.2.0'
+local VERSION = '1.2.1'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
@@ -1113,7 +1113,7 @@ function M.install(ctx)
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
     -- the loader's old folder (%LOCALAPPDATA%), so a mod can pick up its own old files
-    -- once (mods may read their .log .txt .json .csv .dat .ini files there); nil when nothing moved
+    -- once (mods may read their .log .txt .json .csv .dat .ini .marker .fatal files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
       if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 or name:lower():find('^chef_loader') then
@@ -1177,15 +1177,15 @@ function M.install(ctx)
   -- ---------------------------------------------- the menu's look, controller and mouse
   -- Rows of their own in the loader's group. The controller: the engine's own pads (Pad1..Pad8, the first one active,
   -- its buttons found by the names the pad itself lists), the D-pad moves, cross/A picks, circle/B goes back (and closes
-  -- at the list of mods), square/X puts the default back, L1/R1 a page. The mouse: my own cursor, moved by the mouse's
-  -- delta axis (the game holds the mouse, so its cursor axis doesn't follow), hover picks, a left click acts, a right
-  -- click goes back, the wheel scrolls, a slider's bar takes a drag. The game still sees every key, button and mouse
-  -- move (Lua can't take input from it), so in a mission the menu is the compact panel, the mouse is off by default and
-  -- the controller never opens it; the full screen look is for the ship. While the menu is closed (off a mission) only
-  -- the touchpad / View button is read (held two seconds it opens the menu; it's the one button the game leaves free
-  -- off a mission), and not even that when the controller row says so. Only plain numbers are kept between frames: the
-  -- pad's number and button indexes, the cursor, the boxes drawn last frame; every engine table and value is fetched in
-  -- the frame it's used.
+  -- at the list of mods), square/X puts the default back, L1/R1 a page. The mouse: my own cursor (moved by the
+  -- engine's cursor axis while I hold the mouse from the camera, below, else by its delta axis), hover picks, a left
+  -- click acts, a right click goes back, the wheel scrolls, a slider's bar takes a drag. The game still sees every key
+  -- and button (Lua can't take input from it), so in a mission the menu is the compact panel, the mouse is off by
+  -- default and the controller never opens it; the full screen look is for the ship. While the menu is closed (off a
+  -- mission) only the touchpad / View button is read (held two seconds it opens the menu; it's the one button the game
+  -- leaves free off a mission), and not even that when the controller row says so. Only plain numbers are kept between
+  -- frames: the pad's number and button indexes, the cursor, the boxes drawn last frame; every engine table and value
+  -- is fetched in the frame it's used.
   local look_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_look', { type = 'choice', label = 'Menu look',
     choices = { 'Full screen', 'Compact' }, default = 1, section = 'menu' })
   local mouse_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_mouse', { type = 'choice', label = 'Mouse in this menu',
@@ -1279,12 +1279,104 @@ function M.install(ctx)
     local m = mouse_row.value
     return m == 2 or (m == 1 and nav.on_ship())
   end
+  -- The mouse held from the game while my menu has it: a dead zone far above any movement on the mouse's delta axis
+  -- (the one the game's camera reads) leaves the camera still, and my cursor follows the engine's cursor axis instead,
+  -- which keeps moving. What the axis had is put back as soon as the menu lets the mouse go (closed, the mouse off for
+  -- it, a mission without it) and at shutdown. HOLD is a size of my own (an odd one, exact as a float): a dead zone
+  -- found at it later (another mod put back what it found while I held the mouse) is mine again while the menu is
+  -- open, and put back to what I found once it's closed, checked once a second. A dead zone already far up (another mod
+  -- holds the mouse) is left alone, and my cursor follows the cursor axis all the same (other: asked again once a
+  -- second). No dead zone or cursor answer: the camera turns with the mouse, as before.
+  -- on: mine; had: what I found; off: not this session; paused: not until the menu closes; ever: a cursor was read
+  local HOLD = 917351
+  nav.hold = { on = false, had = nil, off = false, paused = false, other = nil, ever = false, heal_at = 0, bad = 0 }
+  function nav.hold_take()
+    local H, A = nav.hold, nav.axes
+    if H.on or H.off or H.paused or not (A and A.move and A.cursor) then return end
+    if H.other and ctx.now() < H.other then return end
+    local mode, size = eng('Mouse.dead_zone', A.move)
+    if type(mode) ~= 'number' or type(size) ~= 'number' then
+      H.off = true
+      log('options menu: the mouse turns the camera while the menu is open (no dead zone answer)')
+      return
+    end
+    if size == HOLD and H.had then                      -- (mine, put back by another mod: what I found is still under it)
+      H.on, H.other, H.px, H.py, H.bad = true, nil, nil, nil, 0
+      return
+    end
+    if size >= 1e5 then
+      if not H.other then H.px, H.py, H.bad = nil, nil, 0 end
+      H.other = ctx.now() + 1
+      return
+    end
+    H.other = nil
+    eng('Mouse.set_dead_zone', A.move, 1, HOLD)
+    local _, now = eng('Mouse.dead_zone', A.move)
+    if now ~= HOLD then
+      H.off = true
+      log('options menu: the mouse turns the camera while the menu is open (the dead zone stayed ' .. tostring(now) .. ')')
+      return
+    end
+    H.on, H.had, H.px, H.py, H.bad = true, { mode, size }, nil, nil, 0
+    if not H.said then
+      H.said = true
+      log(fmt('options menu: the mouse is held from the game while the menu has it (its dead zone was %s, %s)', tostring(mode),
+        tostring(size)))
+    end
+  end
+  function nav.hold_give()
+    local H, A = nav.hold, nav.axes
+    if not H.on then return end
+    H.on = false
+    local _, size = eng('Mouse.dead_zone', A.move)
+    if size == HOLD then eng('Mouse.set_dead_zone', A.move, H.had[1], H.had[2]) end
+    if ctx.TEST then
+      local m2, s2 = eng('Mouse.dead_zone', A.move)
+      log(fmt('options menu (test): the mouse given back to the game (dead zone now %s, %s)', tostring(m2), tostring(s2)))
+    end
+  end
+  function nav.hold_heal()
+    local H, A = nav.hold, nav.axes
+    if H.on or not H.had then return end
+    local t = ctx.now()
+    if t < H.heal_at then return end
+    H.heal_at = t + 1
+    local _, size = eng('Mouse.dead_zone', A.move)
+    if size == HOLD then
+      eng('Mouse.set_dead_zone', A.move, H.had[1], H.had[2])
+      log('options menu: the mouse\'s dead zone was found held after the menu let it go: put back')
+    end
+  end
+  -- the engine's cursor (window pixels from the bottom left) as menu pixels, or nil when it isn't in the window
+  function nav.cursor_at(w, h)
+    local v = eng('Mouse.axis', nav.axes.cursor)
+    if v == nil then return nil end
+    local x, y = eng('Vector3.to_elements', v)
+    local H = nav.hold
+    if not H.res_at or ctx.now() >= H.res_at then        -- (the window's size, asked once a second)
+      local a, b = eng('Application.resolution')
+      H.rw, H.rh, H.res_at = tonumber(a), tonumber(b), ctx.now() + 1
+    end
+    local rw, rh
+    x, y, rw, rh = tonumber(x), tonumber(y), H.rw, H.rh
+    if not (x and y and rw and rh and rw > 0 and rh > 0 and x >= 0 and y >= 0 and x <= rw and y <= rh) then
+      H.res_at = 0                                       -- (asked again next frame: the window may have changed size)
+      return nil
+    end
+    local mx, my = x * w / rw, y * h / rh
+    if ctx.TEST and (H.logs or 0) < 40 and ctx.now() >= (H.log_at or 0) then        -- (test builds: where it reads)
+      H.logs, H.log_at = (H.logs or 0) + 1, ctx.now() + 1
+      log(fmt('options menu (test): cursor %.0f, %.0f of %.0f x %.0f -> menu %.0f, %.0f of %d x %d', x, y, rw, rh, mx, my, w, h))
+    end
+    return mx, my
+  end
   -- the cursor (screen pixels, y up like the drawing), the wheel, and this frame's clicks
   function nav.mouse_read(w, h)
     -- (no answer yet, the mouse not ready in the first frames on some setups: asked again every 2 s)
     if not nav.axes or (not nav.axes.move and ctx.now() >= nav.axes.at) then
       local had = nav.axes
       nav.axes = { move = eng('Mouse.axis_index', 'mouse') or false, wheel = eng('Mouse.axis_index', 'wheel') or false,
+                   cursor = eng('Mouse.axis_index', 'cursor') or false,
                    l = eng('Mouse.button_index', 'left') or false, r = eng('Mouse.button_index', 'right') or false,
                    at = ctx.now() + 2 }
       if not had or nav.axes.move then log('options menu: mouse ' .. (nav.axes.move and 'found' or 'missing')) end
@@ -1299,12 +1391,47 @@ function M.install(ctx)
       local x, y = eng('Vector3.to_elements', v)
       return tonumber(x) or 0, tonumber(y) or 0
     end
-    local dx, dy = xy(A.move)
-    nav.moved = dx ~= 0 or dy ~= 0
-    local k = h / 1080
-    -- (the delta counts y down; the menu's y grows upward)
-    nav.mx = max(0, min(w - 1, nav.mx + dx * k))
-    nav.my = max(0, min(h - 1, nav.my - dy * k))
+    nav.hold_take()
+    local H = nav.hold
+    if H.on or H.other then
+      -- (held, by me or another mod: the delta reads nothing now; the cursor axis's movement moves my cursor. The game
+      -- puts its hidden cursor back in the middle of the window when it moves far, so a frame whose cursor lands in the
+      -- middle, or jumps more than a third of the screen, moves nothing. Ten frames running with no usable cursor (out
+      -- of the window) give the mouse back until the menu closes; for the session when no cursor was ever read)
+      local cx, cy = nav.cursor_at(w, h)
+      if cx then
+        H.bad, H.ever = 0, true
+        local px, py = H.px, H.py
+        H.px, H.py = cx, cy
+        if px then
+          local dx, dy = cx - px, cy - py
+          local mid = cx - w / 2 <= 3 and w / 2 - cx <= 3 and cy - h / 2 <= 3 and h / 2 - cy <= 3
+          local jump = dx > w / 3 or -dx > w / 3 or dy > h / 3 or -dy > h / 3
+          if (dx ~= 0 or dy ~= 0) and not mid and not jump then
+            nav.moved = true
+            nav.mx = max(0, min(w - 1, nav.mx + dx))
+            nav.my = max(0, min(h - 1, nav.my + dy))
+          end
+        end
+      else
+        H.bad = H.bad + 1
+        if H.bad >= 10 then
+          nav.hold_give(); H.other, H.bad = nil, 0
+          if H.ever then H.paused = true
+          else
+            H.off = true
+            log('options menu: the mouse turns the camera while the menu is open (no cursor position)')
+          end
+        end
+      end
+    else
+      local dx, dy = xy(A.move)
+      nav.moved = dx ~= 0 or dy ~= 0
+      local k = h / 1080
+      -- (the delta counts y down; the menu's y grows upward)
+      nav.mx = max(0, min(w - 1, nav.mx + dx * k))
+      nav.my = max(0, min(h - 1, nav.my - dy * k))
+    end
     if A.wheel then local _, wy = xy(A.wheel); nav.wheel = wy end
     local function down(i) if not i then return false end local v = eng('Mouse.button', i); return type(v) == 'number' and v > 0.5 end
     local l, r = down(A.l), down(A.r)
@@ -1453,7 +1580,7 @@ function M.install(ctx)
   -- order below (any other row of a section after those, in the order it was made).
   local SECTIONS = { menu = { 1, 'MENU' }, monitor = { 2, 'PERFORMANCE' }, permissions = { 3, 'PERMISSIONS' } }
   local ORDER = { menu_key = 1, menu_look = 2, menu_place = 3, menu_mouse = 4, menu_pad = 5, font = 6, lang = 7,
-                  perf = 1, perf_place = 2, budget = 3 }
+                  perf = 1, perf_place = 2, budget = 3, perf_hide = 4 }
   local function section_of(r) return r.owner == 'loader' and SECTIONS[r.spec.section] or nil end
   local function group_lines(g, out)
     local rows, any = {}, false
@@ -1986,6 +2113,8 @@ function M.install(ctx)
     end
     nav.draw_cursor(top, h)
   end
+  -- where the menu's cursor is (menu pixels, y up; nil before the mouse was read)
+  function svc.menu_cursor() return nav.mx, nav.my end
   -- the layer my full screen menu covers from, while it's open (nil while it isn't)
   function svc.covering()
     if menu.open and look_row.value == 1 and nav.on_ship() then return ctx.TOP + 950 end
@@ -2012,19 +2141,25 @@ function M.install(ctx)
     if not combo then nav.combo = false end
     -- the mouse (only while open): the cursor, the wheel and the clicks of this frame
     nav.mouse = menu.open and nav.mouse_on()
-    if nav.mouse then local w, h = ctx.screen(); nav.mouse_read(w, h) else nav.click, nav.rclick, nav.wheel = false, false, 0 end
+    if nav.mouse then local w, h = ctx.screen(); nav.mouse_read(w, h) else
+      nav.click, nav.rclick, nav.wheel = false, false, 0
+      local H = nav.hold
+      H.paused, H.other = false, nil
+      if H.on then nav.hold_give() elseif H.had then nav.hold_heal() end
+    end
     -- the controller's back (circle/B) or a right click: one level back, at the list of mods it closes (Start isn't
     -- used: the game would open its own pause menu with it too)
+    -- (a step back is still drawn this frame, so the menu never leaves a frame with nothing drawn: no flash)
+    local stepped = false
     if menu.open and menu.capture == nil and not menu.typing and (nav.act.back or nav.rclick) then
-      if menu.group or menu.search ~= '' then go_back() else menu.open = false end
-      return
+      if menu.group or menu.search ~= '' then go_back(); stepped = true else menu.open = false; return end
     end
-    if menu.open and menu.capture == nil and not menu.typing and pressed('backspace') and (menu.group or menu.search ~= '') then
+    if not stepped and menu.open and menu.capture == nil and not menu.typing and pressed('backspace')
+       and (menu.group or menu.search ~= '') then
       -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
-      go_back()
-      return
+      go_back(); stepped = true
     end
-    if menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
+    if not stepped and menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
       menu.open, menu.typing, nav.drag = false, false, nil
       return
     end
@@ -2042,10 +2177,10 @@ function M.install(ctx)
     end
     -- the open mod stopped and its options went: back to the list
     if menu.group and #menu.group.rows == 0 then menu.group, menu.sel, menu.top = nil, 1, 1 end
-    local typing = menu.capture == nil and search_input()
+    local typing = not stepped and menu.capture == nil and search_input()
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
-    if not typing then menu_input(ls) end
+    if not typing and not stepped then menu_input(ls) end
     nav.nhits = 0
     -- (the lines again: what was picked this frame may have opened a mod or gone back)
     -- (the full screen look covers the game: on the ship only; in a mission the compact panel)
@@ -2887,6 +3022,7 @@ function M.install(ctx)
     menu_frame()
   end
   function svc.shutdown()
+    pcall(nav.hold_give)                   -- (the mouse back to the game first: nothing below may keep it)
     -- the guards stop first, then the look-alike's on_shutdown(id, fn) hooks; its on_shutdown(fn) ones run last (after
     -- every mod's and boot script's shutdown), before the settings are saved and the mods' logs close
     for _, list in ipairs({ shim.guards, shim.ended }) do
@@ -4405,19 +4541,20 @@ function M.install(ctx, L)
     end
   end
 
-  -- the frame budget behind chef.budget: the loader's own "Budget warning (ms)" row (util.budget_row, set by the
-  -- loader), 2 ms until it's there
-  util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
+  -- the frame budget behind chef.budget: the loader's own "Budget (ms)" row (util.budget_row, set by the loader;
+  -- a mod over it is named in the log and marked in the monitor), 1 ms until it's there
+  util.default_budget = function() return util.budget_row and util.budget_row.value or 1.0 end
 
   -- ---------------------------------------------------------------- the performance monitor
   -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel (where "Monitor position" puts it)
-  -- with each mod's cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs,
-  -- a boot script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a,
-  -- shown on the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a
-  -- second I turn the last second into averages a frame: each mod's milliseconds and its share of the frame (from the
-  -- game's own frame time), the worst single call, and the total. Off, it costs one check a frame; nothing is drawn or
-  -- added up. Its own drawing (the loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its
-  -- own line, so it never counts against the loader or a mod.
+  -- with each mod's cost ("Hide mods under N ms" folds the ones under their budget into one line). Every mod's time
+  -- (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot script's into b.pm_ms (and an
+  -- HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on the same line), and the
+  -- loader's own share of its update into pm.loader (all from the loader). Once a second I turn the last second into
+  -- averages a frame: each mod's milliseconds and its share of the frame (from the game's own frame time), the worst
+  -- single call, and the total. Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the
+  -- loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its own line, so it never counts
+  -- against the loader or a mod.
   local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
   util.pm = pm
   -- the mods' time so far (the loader asks before and after its update, to find its own share)
@@ -4449,10 +4586,11 @@ function M.install(ctx, L)
     local n = max(1, pm.frames)
     local frame_ms = (now - pm.t0) * 1000 / n
     local rows, total = {}, 0
+    local budget = util.default_budget()               -- (the Budget row; a row's budget: its mod's chef.budget, else this)
     for _, a in ipairs(L.addons) do
       local avg = ((a.pm_ms or 0) - (a.pm_base or 0)) / n
       total = total + avg
-      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on }
+      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on, budget = a.budget or budget }
     end
     for _, b in ipairs(L.boots()) do
       local a = b.a ~= b and b.a or nil
@@ -4463,7 +4601,8 @@ function M.install(ctx, L)
       -- time still counts in All Mods
       local name = boot_name(b)
       if not name:lower():find('file%-mod installer') then
-        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false }
+        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false,
+                            budget = type(b.a) == 'table' and b.a.budget or budget }
       end
     end
     sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
@@ -4471,19 +4610,32 @@ function M.install(ctx, L)
     local loader = max(0, pm.loader / n - self)
     local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
     -- { left, { the MS, SHARE and WORST cells }, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod
-    -- (1 ms or more), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't monospaced,
-    -- so one string padded with spaces wouldn't line up).
+    -- (at or over its budget), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't
+    -- monospaced, so one string padded with spaces wouldn't line up).
     local function ms(v) return fmt('%.2f', v) end
     local function share(v) return fmt('%.1f%%', pct(v)) end
     local out = {
       { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), { 'MS', 'SHARE', 'WORST' }, 2 },
       { 'ALL MODS', { ms(total + loader), share(total + loader) }, 3 },
     }
-    for i, r in ipairs(rows) do
-      if i > 12 then break end
-      out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
-                        r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { 'OFF' },
-                        r.on and (r.avg >= 1 and 5 or 4) or 6 }
+    -- "Hide mods under N ms" (util.perf_hide): the mods running under their budget (the Budget row, or their own
+    -- chef.budget) share one line, their sum and the worst call among them (a mod that's off keeps its line: OFF
+    -- says something)
+    local hide = util.perf_hide ~= nil and util.perf_hide.value == true
+    local shown, low, low_worst, low_n = 0, 0, 0, 0
+    for _, r in ipairs(rows) do
+      if hide and r.on and r.avg < r.budget then
+        low, low_n = low + r.avg, low_n + 1
+        if r.worst > low_worst then low_worst = r.worst end
+      elseif shown < 12 then
+        shown = shown + 1
+        out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
+                          r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { 'OFF' },
+                          r.on and (r.avg >= r.budget and 5 or 4) or 6 }
+      end
+    end
+    if low_n > 0 then
+      out[#out + 1] = { fmt('MODS UNDER %g MS', budget), { ms(low), share(low), fmt('%.1f', low_worst) }, 6 }
     end
     out[#out + 1] = { 'LOADER', { ms(loader), share(loader) }, 4 }
     out[#out + 1] = { 'THIS MONITOR', { ms(self), share(self) }, 6 }
@@ -4647,8 +4799,8 @@ services.sandbox = (function()
 --     functions, _G is its own environment, no require of the game's modules (require('_G') would hand out everything),
 --     no module() (package.seeall), and the metatables of its environment are locked
 --   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
---     and writes only .log .txt .json .csv .dat .ini files in the loader's folder, never the loader's own files or another
---     mod's saved tables
+--     and writes only .log .txt .json .csv .dat .ini .marker .fatal files in the loader's folder, never the loader's
+--     own files or another mod's saved tables
 -- It still can use: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
 -- os.clock/time/date/getenv, reading and writing its own files.
 -- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, and of every engine table
@@ -4664,7 +4816,7 @@ services.sandbox = (function()
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.2.0' }
+local M = { version = '1.2.1' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -4677,7 +4829,8 @@ local t_concat = table.concat
 local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
-local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true }
+local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true,
+                  marker = true, fatal = true }   -- (.marker and .fatal: a mod's own crash notes)
 local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true, ['clock$'] = true }
 -- (0 to 9, and the superscripts 1 2 3 Windows also counts as their digits, in the ANSI code page)
 for _, n in ipairs({ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '\185', '\178', '\179' }) do
@@ -4687,8 +4840,8 @@ local LIBS = { 'string', 'table', 'math', 'coroutine', 'bit' }
 local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
 local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
 -- engine tables that aren't for mods (M.engine_off), and calls left out of engine tables mods otherwise keep
--- (M.CALLS_OFF): Network and GameSession keep only their reads (no lobby, connection or writes to what other players
--- see). (utilities.lua refuses the same through chef.call.)
+-- (M.CALLS_OFF): Network, GameSession and UnitSynchronizer keep only their reads (no lobby, connection or writes to
+-- what other players see). (utilities.lua refuses the same through chef.call.)
 function M.engine_off(k)
   return k == 'PluginManager' or k == 'Http' or k == 'WebSocket' or k == 'Localizer' or s_find(k, 'Lobby', 1, true) ~= nil
     or s_find(k, 'GameServer', 1, true) ~= nil
@@ -4706,16 +4859,30 @@ M.CALLS_OFF = {
       or s_find(f, 'send', 1, true) or s_find(f, 'dump', 1, true)) ~= nil
   end,
   -- GameSession the same way: its reads stay (in_session, peers, game_session_host, game_object_field / _exists /
-  -- _owner / _is_type, objects_owned_by, is_ / has_ / get_ / num_), every write to what other players see is left out,
-  -- and so is a call a game update adds. (Network.object_info, a game object type's field list, is a read too.)
+  -- _owner / _is_type, objects_owned_by, other_peers, unit_synchronizer, is_ / has_ / get_ / num_), every write to what
+  -- other players see is left out, and so is a call a game update adds. (Network.object_info, a game object type's
+  -- field list, is a read too.) unit_synchronizer hands out the session's unit <-> game object map (UnitSynchronizer
+  -- below keeps only its lookups). game_object_field_batched is a read but stays out: it has crashed the game on
+  -- other players' objects.
   GameSession = function(f)
     f = s_lower(f)
-    local read = f == 'in_session' or f == 'peers' or f == 'game_session_host' or f == 'game_object_field'
+    local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'unit_synchronizer'
+      or f == 'game_session_host' or f == 'game_object_field'
       or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
     return (s_find(f, 'send', 1, true) or s_find(f, 'set', 1, true) or s_find(f, 'create', 1, true)
       or s_find(f, 'destroy', 1, true) or s_find(f, 'migrate', 1, true)) ~= nil
+  end,
+  -- UnitSynchronizer keeps its lookups (unit <-> game object id, is_ / has_ / get_ / num_); its spawns and destroys
+  -- make game objects every player sees
+  UnitSynchronizer = function(f)
+    f = s_lower(f)
+    local read = f == 'game_object_id_to_unit' or f == 'unit_to_game_object_id' or s_match(f, '^is_')
+      or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
+    if not read then return true end
+    return (s_find(f, 'spawn', 1, true) or s_find(f, 'destroy', 1, true) or s_find(f, 'set', 1, true)
+      or s_find(f, 'create', 1, true) or s_find(f, 'send', 1, true)) ~= nil
   end,
 }
 
@@ -4830,12 +4997,15 @@ function M.install(ctx)
     local file = names[#names]
     local ext = s_match(file, '%.(%w+)$')
     if root == ODIR and not (#names == 1 and ext and MOD_EXT[ext]) then
-      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini files'
+      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini .marker '
+        .. '.fatal files'
     end
     if not writes then return true, root, names, ext end
     if root ~= WDIR then return nil, 'mods write only in the loader\'s folder' end
     if #names ~= 1 then return nil, 'mods write only straight into the loader\'s folder, not below it' end
-    if not (ext and MOD_EXT[ext]) then return nil, 'mods write only .log .txt .json .csv .dat .ini files' end
+    if not (ext and MOD_EXT[ext]) then
+      return nil, 'mods write only .log .txt .json .csv .dat .ini .marker .fatal files'
+    end
     if not s_match(file, '^[%w_%-%.]+$') then return nil, 'file names are letters, digits, _ - and .' end
     if s_sub(file, 1, #OWN) == OWN or s_sub(file, 1, 11) == 'chef_loader' or s_sub(file, 1, 10) == 'chef_data_' then
       return nil, 'the loader\'s own files and saved tables are off limits (chef.save_table saves a table)'
@@ -4888,7 +5058,8 @@ function M.install(ctx)
       elseif M.CALLS_OFF[k] then base[k] = (type(S) == 'table' and S[k] == v and base.stingray[k]) or trimmed(k, v) end
     end
   end
-  setmetatable(base, { __index = G, __metatable = 'locked' })
+  local base_mt = { __index = G, __metatable = 'locked' }     -- (its __index narrowed below, once base is filled)
+  setmetatable(base, base_mt)
   -- an engine object's metatable whose __index is one of those tables: a mod gets the table as it sees it
   -- (trimmed, or nothing), so the calls left out aren't a method call away
   local as_seen = {}
@@ -4957,6 +5128,66 @@ function M.install(ctx)
   -- (the engine's names in base read as false from now on: a mod that sets its stingray or Unit to nil finds nothing
   -- behind it, not the shared tables; each environment holds its own copies as its own keys)
   for k, v in pairs(engine_names) do if is_engine[v] then base[k] = false end end
+  -- Lua's own base functions as each mod's own keys too: mods written for the old loaders check
+  -- rawget(_G, 'unpack') and the like before hooking anything. Never the game's update, render and shutdown, so a mod
+  -- chaining rawget(_G, 'update') never finds (and calls) the game's own.
+  local plain = {}
+  for _, k in ipairs({ 'assert', 'collectgarbage', 'dofile', 'error', 'gcinfo', 'ipairs', 'loadfile', 'module', 'next',
+    'pairs', 'pcall', 'print', 'rawequal', 'rawget', 'rawset', 'select', 'setmetatable', 'tonumber', 'tostring',
+    'type', 'unpack', 'xpcall', '_VERSION' }) do
+    local v = base[k]                                -- (base's own, else the game's)
+    if type(v) == 'function' or type(v) == 'string' then plain[k] = v end
+  end
+  -- what sb.env makes each mod's own reads as false behind it: a mod that sets one of them to nil finds nothing there,
+  -- never the game's own (its io, os, debug, require, loadstring, getfenv / setfenv, _G, or the shared libraries)
+  for _, k in ipairs(LIBS) do if rawget(base, k) == nil then rawset(base, k, false) end end
+  for _, k in ipairs({ 'os', 'io', 'debug', 'package', 'require', 'load', 'loadstring', 'getfenv', 'setfenv',
+    'getmetatable', 'newproxy', 'xpcall', '_G' }) do
+    if rawget(base, k) == nil then rawset(base, k, false) end
+  end
+  -- The game's other lower case globals (whatever its engine adds next to Lua's own), taken once, here: each mod gets
+  -- a value as it is and a table as its own copy (sb.env), so nothing a mod writes into one reaches the game or another
+  -- mod. From here on a lower case name behind base is nothing: the game's callbacks (init, update, render, shutdown:
+  -- mine) and whatever is set later (a boot script's) aren't reached. Capitalized names still read the game's.
+  local CALLBACKS = { init = true, update = true, render = true, shutdown = true }
+  local extra = {}
+  for k, v in pairs(G) do
+    if type(k) == 'string' and not s_match(k, '^%u') and not CALLBACKS[k] and rawget(base, k) == nil and plain[k] == nil then
+      plain[k] = v
+      local n = 0
+      if type(v) == 'table' then
+        -- (what a mod's copy holds: the entries of every table reached from it and their metatables, counted up to
+        -- 10,000; the game's globals, the libraries and the engine's tables aren't copied with it, so not counted)
+        local seen, todo = { [v] = true }, { v }
+        local function reach(x)
+          if type(x) == 'table' and not seen[x] and is_engine[x] == nil and as_seen[x] == nil and x ~= string_mt then
+            seen[x] = true; todo[#todo + 1] = x
+          end
+        end
+        while todo[1] and n < 10000 do
+          local t = table.remove(todo)
+          reach(raw_mt(t))
+          for _, x in pairs(t) do
+            n = n + 1
+            if n >= 10000 then break end
+            reach(x)
+          end
+        end
+      end
+      extra[#extra + 1] = k .. (type(v) == 'table' and (' (table, ' .. (n >= 10000 and '10,000+' or n) .. ' entries)') or '')
+    end
+  end
+  if extra[1] and ctx.log then
+    table.sort(extra)
+    ctx.log('the game\'s other lower case globals, each mod its own: ' .. t_concat(extra, ', '))
+  end
+  base_mt.__index = function(_, k)
+    if type(k) == 'string' then
+      local b = s_byte(k, 1)                         -- (a byte test: this runs on every miss past base)
+      if not (b and b >= 65 and b <= 90) then return nil end
+    end
+    return G[k]
+  end
   -- sb.on_global(env, key, value): told of each new global a mod sets (the runtime look-alike shares some between its
   -- mods); the assignment itself always happens first
   local env_mt = { __index = base, __metatable = 'locked', __newindex = function(t, k, v)
@@ -5524,7 +5755,8 @@ function M.install(ctx)
         end
       end
       local lib = REQUIRE_OK[name]
-      if lib and env[lib] ~= nil then return env[lib] end
+      local own_lib = lib and rawget(env, lib)                -- (its own copy: one it cleared isn't looked for behind it)
+      if type(own_lib) == 'table' then return own_lib end
       if name == 'table.new' or name == 'table.clear' then
         local fn = env.table and env.table[s_sub(name, 7)]
         if fn then return fn end
@@ -5548,6 +5780,11 @@ function M.install(ctx)
     for _, n in ipairs({ 'os', 'io', 'debug', 'package' }) do
       local lib = rawget(G, n)
       if type(lib) == 'table' and type(rawget(env, n)) == 'table' then mine[lib] = rawget(env, n) end
+    end
+    -- (the base functions this environment doesn't replace above, and the game's other lower case globals: a table as
+    -- this mod's own copy)
+    for k, v in pairs(plain) do
+      if rawget(env, k) == nil then rawset(env, k, type(v) == 'table' and own(v, true) or v) end
     end
     return env
   end
@@ -9586,7 +9823,7 @@ local addons, notices = {}, {}
 -- values and events, require, key bindings, the options menu, the look-alikes, dev mode (test builds)
 local svc = services.install({ log = log, guarded = guarded, fn_of = fn_of, open = open, DIR = DIR, FILES = FILES, LOADER = LOADER,
   OLD_DIR = services.OLD_DIR ~= DIR and services.OLD_DIR or nil,
-  VERSION = VERSION, ALLOW = ALLOW, TOP = TOP_FROM, world = world, color = color, rect = rect, text = text, text_width = text_width,
+  VERSION = VERSION, TEST = TEST, ALLOW = ALLOW, TOP = TOP_FROM, world = world, color = color, rect = rect, text = text, text_width = text_width,
   bitmap = bitmap, cover = function(l) draw.cover, draw.cover_set = type(l) == 'number' and l - TOP_FROM or nil, true end,
   text_fit = draw.text_fit, text_wrap = draw.text_wrap, text_native = function() return draw.nt_on() end,
   tr = function(s) return draw.tr(s) end, tr_keep = function(s) return draw.tr_keep(s) end,
@@ -9631,14 +9868,17 @@ svc.util = services.utilities.install(svc.ctx, { api = api, xyz = xyz, rect = re
     return t
   end })
 -- my own row in the options menu: the frame budget behind chef.budget
-svc.util.budget_row = svc.loader_option('budget', { type = 'slider', label = 'Budget warning (ms)', min = 0.5, max = 10,
-  step = 0.5, default = 2, section = 'monitor' })
+svc.util.budget_row = svc.loader_option('budget', { type = 'slider', label = 'Budget (ms)', min = 0.5, max = 10,
+  step = 0.5, default = 1, section = 'monitor' })
 -- and the performance monitor (utilities: each mod's cost, drawn once a second's numbers are in)
 svc.util.perf_row = svc.loader_option('perf', { type = 'toggle', label = 'Performance monitor', default = false,
   section = 'monitor' })
 -- (where the monitor sits: the player keeps it clear of what they want to see)
 svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label = 'Monitor position', default = 1,
   choices = { 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left' }, section = 'monitor' })
+-- (the mods under their budget on one line, so the heavy ones stand out; the label names the Budget row's value)
+svc.util.perf_hide = svc.loader_option('perf_hide', { type = 'toggle', default = false, section = 'monitor',
+  label = function() return fmt('Hide mods under %g ms', svc.util.budget_row and svc.util.budget_row.value or 1) end })
 -- and the font (on: the game's own, off: the pixel font)
 draw.nt.row = svc.loader_option('font', { type = 'toggle', label = 'Game font', default = true, section = 'menu' })
 -- the HD2Runtime look-alike (src/chef_loader/runtime.lua): its callbacks run through the mod's own hooks (a.rt)
