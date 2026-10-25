@@ -1,7 +1,11 @@
--- Chef Shared Loader - the game's `boot` script, replaced
+-- Chef Shared Loader - its core (mods/chef_shared_loader/core_1), or the game's `boot` script replaced
 -- Runs Lua mods on the game's plain Lua 5.1 (no LuaJIT, no ffi).
 -- What it's built on:
 --   * the game runs `boot` at start-up and calls its init/update/render/shutdown; its own boot does nothing
+--   * the game runs only the `boot` in the highest-numbered patch. My patch's `boot` is a small frozen stub
+--     (src/stub.lua) that does what the game's boot does and then loads this file with
+--     require('mods/chef_shared_loader/core_1'); any mod may ship that stub as its own `boot`, so whichever copy the
+--     game runs, every loader mod runs. A mod with me built in runs this file as its `boot`.
 --   * Lua can read the deployed patch files (io), so I find addons myself: Lua resources whose text starts with
 --     "-- HD2-Addon: mods/<author>/<name>", option resources starting with "-- HD2-Options: mods/<author>/<name>",
 --     and boot-style scripts starting with "-- HD2-Boot: mods/<author>/<name>" (open to every mod author; see
@@ -23,6 +27,21 @@
 -- Files (in %APPDATA%\Arrowhead\Helldivers2), named after FILES below (chef_loader): .log (what happened),
 -- _state.txt (calls that crashed the game, addons turned off), _trace.txt (this launch's breadcrumbs).
 
+-- Once per Lua state: a second copy of me, or another loader handing off to me after I started (see "For other
+-- loaders" in docs/MODDING.md), finds me already running and does nothing.
+if rawget(_G, 'ChefSharedLoader') ~= nil then return end
+-- How I was started, kept before I set anything: require hands this chunk the name it asked for (as the game's `boot`
+-- I get nothing); the callbacks the boot that loaded me set (they run after mine, as that boot's); and the other
+-- loaders' tables, their lists of the mods they started, before my look-alikes take those names.
+local chef_before = { via = ..., cb = {}, loaders = {} }
+for _, k in ipairs({ 'init', 'update', 'render', 'shutdown' }) do
+  local f = rawget(_G, k)
+  if type(f) == 'function' then chef_before.cb[k] = f end
+end
+for _, k in ipairs({ '__boot_mod_loader', 'HD2ModLoader', 'CowboyBingusModLoader' }) do
+  local L = rawget(_G, k)
+  if type(L) == 'table' then chef_before.loaders[k] = L end
+end
 function init() end
 function shutdown() end
 function update(dt) end
@@ -35,8 +54,8 @@ local loader_ok, loader_err = pcall(function()
 -- runs are that mod's own.
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
-local ALLOW = '^mods/[%w_%-]+/[%w_%-]+$' --@@ALLOW@@ any author's mods/<author>/<name> (mine still start first)
-local VERSION = '1.1.0'
+local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
+local VERSION = '1.2.0'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
@@ -59,13 +78,40 @@ local CAMERA_RETRY = 1                   -- seconds between searches for the cam
 --   files: its own files in %LOCALAPPDATA% (below dir, names starting with name)
 --   patches: game patch files in data\ (its scratch file, and patches carrying its marker; sandbox.lua checks a file
 --   before it takes a patch's name)
+--   view: the one global of its own the other runtime mods may read, as a read-only view (runtime.lua): the calls
+--   listed (a list of keys keeps only those of the first answer), every answer copied as plain values
+--   accepts: the other runtime mods' shared globals it takes, each from the one mod named (its own copy of the top
+--   level); it gets none of the others
 local TRUSTED = {
   ['mods/hd2tm/transmog'] = { title = 'HD2 Transmog', network = true, lobby_key = 'hd2tm',
     files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' } },
-    patches = { scratch = 'hd2tm-wardrobe.tmp', marker = '-- HD2 Transmog wardrobe' } },
+    patches = { scratch = 'hd2tm-wardrobe.tmp', marker = '-- HD2 Transmog wardrobe' },
+    -- the shared globals it takes, each from the one mod named: the notification library its package carries (its
+    -- notices: the wardrobe built, a problem to report)
+    accepts = { NativeNotification = 'mods/native_notification/core' },
+    -- what it has on (snapshot without its catalog), the native pieces it wears and its own avatar (worn), and what its
+    -- last apply spawned (report): reads only, nothing that applies, saves, builds or opens anything
+    view = { global = 'TransmogUI', fields = { 'version' },
+             calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
+                       worn = true, report = true } } },
 }
 
 local G = _G
+-- my public mark, read-only: other loaders find me by it (and hand off to me through it; docs/MODDING.md)
+-- (a userdata where the game has newproxy: rawset can't change its fields; a locked table where it hasn't)
+do
+  local fields = { name = LOADER, version = VERSION, api = 1, revision = 'chef-shared-loader-' .. VERSION,
+                   core = 'mods/chef_shared_loader/core_1' }
+  local mark = newproxy and newproxy(true)
+  if mark then
+    local mt = getmetatable(mark)
+    mt.__index, mt.__metatable = fields, false
+    mt.__newindex = function() error('read-only', 2) end
+  else
+    mark = setmetatable({}, { __metatable = false, __newindex = function() error('read-only', 2) end, __index = fields })
+  end
+  rawset(G, 'ChefSharedLoader', mark)
+end
 local S = rawget(G, 'stingray') or {}
 local io_, os_ = rawget(G, 'io'), rawget(G, 'os')
 local pairs, ipairs, pcall, type, tostring, tonumber = pairs, ipairs, pcall, type, tostring, tonumber
@@ -313,9 +359,13 @@ M.xpcall, M.load = xpcall_args, load_compat
 -- Install
 ---------------------------------------------------------------------------------------------------
 
--- Is this already LuaJIT? Then its own bit, xpcall and load are the real thing and I stay out of the way.
+-- Is this already LuaJIT? Then its own bit, xpcall and load are the real thing and I stay out of the way. A jit table
+-- alone isn't enough (another loader's stand-in can leave one): LuaJIT also compiles goto, which Lua 5.1 never does.
 local function is_luajit(G)
-  return type(rawget(G, 'jit')) == 'table'
+  local ls = rawget(G, 'loadstring')
+  if type(rawget(G, 'jit')) ~= 'table' or type(ls) ~= 'function' then return false end
+  local ok, f = pcall(ls, 'do goto s end ::s::')
+  return ok and f ~= nil
 end
 
 -- Fills in only what's missing in the shared globals. The game's own scripts never see a changed
@@ -452,6 +502,20 @@ function M.run(G, opts)
   r['loaded.ffi'] = (loaded and loaded.ffi ~= nil) and 'yes' or 'no'
   r['loaded.jit'] = (loaded and loaded.jit ~= nil) and 'yes' or 'no'
   r['loaded.bit'] = (loaded and loaded.bit ~= nil) and 'yes' or 'no'
+  -- An ffi written in Lua is another loader's stand-in (it can't reach memory), not the real one. string.dump takes
+  -- only a Lua function (debug, the other way to tell, is only there on the game's non-release builds).
+  local f, dbg = rawget(G, 'ffi') or (loaded and loaded.ffi), rawget(G, 'debug')
+  local str = rawget(G, 'string')
+  local dump = type(str) == 'table' and rawget(str, 'dump') or nil
+  if type(f) == 'table' and type(rawget(f, 'cdef')) == 'function' then
+    local lua = nil
+    if type(dump) == 'function' then lua = pcall(dump, f.cdef)
+    elseif type(dbg) == 'table' and type(dbg.getinfo) == 'function' then
+      local ok, i = pcall(dbg.getinfo, f.cdef, 'S')
+      lua = ok and type(i) == 'table' and i.what == 'Lua'
+    end
+    if lua ~= nil then r['ffi.kind'] = lua and 'lua-stub' or 'native' end
+  end
 
   -- Syntax LuaJIT accepts and plain 5.1 doesn't.
   r['syntax.goto'] = compiles(G, 'do goto skip end ::skip::')
@@ -516,7 +580,8 @@ local services = (function()
 --     events between mods, require() of another mod's exports with version requirements ("-- HD2-Requires:" lines)
 --   * key bindings players can change, with conflicts flagged
 --   * an in-game options menu (F9 by default) listing every mod's options and bindings, saved between launches
---   * look-alikes of CowboyBingusModLoader and ModOptionsMenu, so Lua-only mods written for them run
+--   * look-alikes of the other loaders' APIs (CowboyBingusModLoader / HD2ModLoader, ModOptionsMenu,
+--     ModBindingsMenu, BingusRuntime), so Lua-only mods written for them run
 --   * dev mode (test builds of the loader only): mods loaded from loose files listed in chef_loader_dev.txt, reloaded
 --     with a key
 -- It only reaches the loader through the ctx table install() is given. Lua 5.1 syntax only.
@@ -573,11 +638,11 @@ function M.order(list)
   return out
 end
 
--- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only; the game's font takes the text as it is (in
--- capitals, like the pixel font)
+-- the pixel font has capitals, digits and . , : - + / % ( ) ! ? only (a UTF-8 character shows as one '?'); the game's
+-- font takes the text as it is (in capitals, like the pixel font)
 local function plain(s)
   s = tostring(s or ''):upper()
-  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> ]', ' '))
+  return (s:gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%?<> \128-\255]', ' '))   -- (UTF-8 kept: the pixel font shows it as '?')
 end
 local function caps(s) return tostring(s or ''):upper() end
 -- without the loader's measured fit (a host that has none): cut by the pixel font's fixed 6 cells a letter
@@ -772,7 +837,7 @@ function M.install(ctx)
   -- key (saved under), spec, value, owner, changed = { fn, ... } }.
   local groups, group_of, rows_by_id = {}, {}, {}
   -- the menu's line list and the key users are kept until a row is added or moved (layout) or a binding changes (keys)
-  local ver = { layout = 0, keys = 0 }
+  local ver = { layout = 0, keys = 0, rows = 0 }
   local function group(mod, title)
     local g = group_of[mod]
     if not g then
@@ -853,7 +918,8 @@ function M.install(ctx)
     elseif spec.type == 'choice' then default = default or 1
     elseif spec.type == 'slider' then default = default or spec.min
     elseif spec.type == 'key' then default = default or 'off' end
-    row = { id = full, key = row_key(id), mod = mod, spec = spec, owner = owner, changed = {} }
+    ver.rows = ver.rows + 1
+    row = { id = full, key = row_key(id), mod = mod, spec = spec, owner = owner, changed = {}, n = ver.rows, short = id }
     row.default = clean(spec, default)
     row.value = clean(spec, get(mod, row.key, row.default))
     rows_by_id[full] = row
@@ -995,9 +1061,12 @@ function M.install(ctx)
     end
     function chef.emit(event, ...) if type(event) == 'string' then return as_caller(a, emit, event, ...) end end
     -- another mod's exports (the table it returned), optionally at a version or newer
+    -- (a trusted mod's exports never: nothing it holds goes to other mods)
     function chef.require(name, want)
       local other = ctx.addon(name)
       if not other or not other.on or type(other.module) ~= 'table' then return nil, name .. ' is not running' end
+      local sbx = svc.sandbox
+      if sbx and sbx.trusted and sbx.trusted(name) then return nil, name .. ' shares nothing' end
       if want and not M.version_at_least(other.version, want) then
         return nil, fmt('%s is %s, %s or newer is needed', name, tostring(other.version), want)
       end
@@ -1044,7 +1113,7 @@ function M.install(ctx)
     chef.log_directory = ctx.DIR:gsub('\\$', '')
     chef.log_file = ctx.DIR .. ctx.FILES .. '.log'
     -- the loader's old folder (%LOCALAPPDATA%), so a mod can pick up its own old files
-    -- once (mods may read their .log .txt .json .csv .dat files there); nil when nothing moved
+    -- once (mods may read their .log .txt .json .csv .dat .ini files there); nil when nothing moved
     chef.previous_directory = ctx.OLD_DIR and ctx.OLD_DIR:gsub('\\$', '') or nil
     function chef.own_log(name)
       if type(name) ~= 'string' or not name:match('^[%w_%-]+$') or #name > 48 or name:lower():find('^chef_loader') then
@@ -1070,7 +1139,11 @@ function M.install(ctx)
   -- going back never touches the game's own Escape menu.)
   local menu = { open = false, sel = 1, top = 1, capture = nil, said = false, search = '', typing = false, group = nil, back = 1 }
   local loader_mod = '_loader'
-  local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu', menu = true })
+  local menu_key = add_row('loader', loader_mod, ctx.LOADER, 'menu_key', { type = 'key', default = 'f9', label = 'Open this menu',
+    menu = true, section = 'menu' })
+  -- (where the compact panel sits: the player keeps it clear of what they want to see)
+  local menu_place = add_row('loader', loader_mod, ctx.LOADER, 'menu_place', { type = 'choice', label = 'Menu position (Compact look)',
+    choices = { 'Left', 'Center', 'Right' }, default = 1, section = 'menu' })
   local reload_key = nil
   -- more rows in the loader's own group (the frame budget)
   function svc.loader_option(id, spec)
@@ -1079,9 +1152,290 @@ function M.install(ctx)
     return r
   end
   function svc.set_row(r, v) set_row(r, v) end
+  -- every text of my options menu (the mods' titles, the options' labels and choices, the headings), for a language
+  -- to note the ones it has no entry for; and the version of that list (it changes with the menu's layout)
+  function svc.option_texts()
+    local out = { 'MENU', 'PERFORMANCE', 'PERMISSIONS', 'MOD OPTIONS', 'ALL MODS', 'ALSO USED BY:' }
+    for _, g in ipairs(groups) do
+      if #g.rows > 0 then
+        out[#out + 1] = text_of(g.title)
+        for _, r in ipairs(g.rows) do
+          out[#out + 1] = text_of(r.spec.label or r.id)
+          if r.spec.type == 'choice' and type(r.spec.choices) == 'table' then
+            for _, c in ipairs(r.spec.choices) do out[#out + 1] = text_of(c) end
+          end
+        end
+      end
+    end
+    return out
+  end
+  function svc.layout_ver() return ver.layout end
+  -- the loader's own saved values that aren't a row (the language picked, by name)
+  function svc.loader_get(key) return get(loader_mod, key) end
+  function svc.loader_put(key, v) return put(loader_mod, key, v) end
   function svc.menu_key_name() return menu_key.value end
+  -- ---------------------------------------------- the menu's look, controller and mouse
+  -- Rows of their own in the loader's group. The controller: the engine's own pads (Pad1..Pad8, the first one active,
+  -- its buttons found by the names the pad itself lists), the D-pad moves, cross/A picks, circle/B goes back (and closes
+  -- at the list of mods), square/X puts the default back, L1/R1 a page. The mouse: my own cursor, moved by the mouse's
+  -- delta axis (the game holds the mouse, so its cursor axis doesn't follow), hover picks, a left click acts, a right
+  -- click goes back, the wheel scrolls, a slider's bar takes a drag. The game still sees every key, button and mouse
+  -- move (Lua can't take input from it), so in a mission the menu is the compact panel, the mouse is off by default and
+  -- the controller never opens it; the full screen look is for the ship. While the menu is closed (off a mission) only
+  -- the touchpad / View button is read (held two seconds it opens the menu; it's the one button the game leaves free
+  -- off a mission), and not even that when the controller row says so. Only plain numbers are kept between frames: the
+  -- pad's number and button indexes, the cursor, the boxes drawn last frame; every engine table and value is fetched in
+  -- the frame it's used.
+  local look_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_look', { type = 'choice', label = 'Menu look',
+    choices = { 'Full screen', 'Compact' }, default = 1, section = 'menu' })
+  local mouse_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_mouse', { type = 'choice', label = 'Mouse in this menu',
+    choices = { 'On the ship', 'Always', 'Off' }, default = 1, section = 'menu' })
+  local pad_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_pad', { type = 'choice', label = 'Controller in this menu',
+    choices = { 'On, hold touchpad / View 2 s to open', 'On', 'Off' }, default = 1, section = 'menu' })
+  local nav = { pad = nil, look_at = 0, ix = {}, held = {}, rep = {}, act = {}, ps = false,
+                mx = nil, my = nil, moved = false, wheel = 0, mouse = false, axes = nil, lmb = true, rmb = true,
+                click = false, rclick = false, hits = {}, nhits = 0, ltop = 1 }
+  local PAD_NAMES = { up = { 'd_up', 'up', 'dpad_up' }, down = { 'd_down', 'down', 'dpad_down' },
+    left = { 'd_left', 'left', 'dpad_left' }, right = { 'd_right', 'right', 'dpad_right' },
+    enter = { 'a', 'cross' }, back = { 'b', 'circle' }, delete = { 'x', 'square' },
+    ['page up'] = { 'left_shoulder', 'l1' }, ['page down'] = { 'right_shoulder', 'r1' },
+    touch = { 'touch', 'touchpad', 'back', 'view', 'select' } }
+  local PAD_ORDER = { 'up', 'down', 'left', 'right', 'enter', 'back', 'delete', 'page up', 'page down', 'touch' }
+  local PAD_REPEAT = { up = true, down = true, left = true, right = true }
+  local function eng(name, ...) return guarded('loader', name, fn_of(name), ...) end
+  -- the first pad that answers, looked for once a second until one does. Its buttons come from the names the pad
+  -- lists itself (num_buttons, button_name), so no name a pad doesn't know is ever asked about; the call names are
+  -- made once per pad found.
+  function nav.pad_find()
+    local t = ctx.now()
+    if t < nav.look_at then return end
+    nav.look_at = t + 1
+    for n = 1, 8 do
+      local p = 'Pad' .. n
+      if eng(p .. '.active') == true or eng(p .. '.connected') == true then
+        local count, by = eng(p .. '.num_buttons'), {}
+        if type(count) == 'number' and count > 0 and count <= 64 then
+          for i = 0, count - 1 do
+            local nm = eng(p .. '.button_name', i)
+            if type(nm) == 'string' and nm ~= '' then by[nm:lower()] = i end
+          end
+        end
+        local ix, miss, ps = {}, {}, false
+        for _, a in ipairs(PAD_ORDER) do
+          for k, c in ipairs(PAD_NAMES[a]) do
+            if by[c] then ix[a] = by[c]; if a == 'enter' and k == 2 then ps = true end; break end
+          end
+          if not ix[a] then miss[#miss + 1] = a end
+        end
+        if ix.enter and ix.up then
+          local name = eng(p .. '.name')
+          nav.pad, nav.ix, nav.held, nav.ps, nav.pname = n, ix, {}, ps, type(name) == 'string' and name or '?'
+          nav.calls = { active = p .. '.active', connected = p .. '.connected', button = p .. '.button', name = p .. '.name' }
+          nav.name_at = t + 1
+          log(fmt('options menu: controller %s (%s)%s', p, nav.pname,
+            #miss > 0 and ('; no button for ' .. concat(miss, ', ')) or ''))
+          return
+        end
+      end
+    end
+  end
+  -- this frame's presses into nav.act (the D-pad repeats while held); nav.held[a]: since when a button is down
+  -- (closed: the touchpad / View only: one call a frame)
+  function nav.pad_read(closed)
+    if not nav.pad then nav.pad_find(); if not nav.pad then return end end
+    local C, now = nav.calls, ctx.now()
+    if eng(C.active) ~= true and eng(C.connected) ~= true then nav.pad, nav.look_at, nav.held = nil, 0, {}; return end
+    -- (another pad put in the same slot: its buttons are found again; asked once a second)
+    if now >= nav.name_at then
+      nav.name_at = now + 1
+      local nm = eng(C.name)
+      if (type(nm) == 'string' and nm or '?') ~= nav.pname then nav.pad, nav.look_at, nav.held = nil, 0, {}; return end
+    end
+    -- (the first read after the menu opened: a button already down is held, not pressed, and never repeats)
+    local seed = nav.seed and not closed
+    if seed then nav.seed = nil end
+    for a, i in pairs(nav.ix) do
+      local v = false
+      if not closed or a == 'touch' then v = eng(C.button, i) end
+      if v == true or (type(v) == 'number' and v > 0.5) then
+        if seed and not nav.held[a] then
+          nav.held[a] = now; nav.rep[a] = math.huge
+        elseif not nav.held[a] then
+          nav.held[a] = now; nav.rep[a] = now + 0.4; nav.act[a] = true
+          if not closed then menu.dev = 'pad' end          -- (the hints show the controller's buttons)
+        elseif PAD_REPEAT[a] and now >= nav.rep[a] then nav.rep[a] = now + 0.09; nav.act[a] = true end
+      else nav.held[a] = nil end
+    end
+  end
+  -- On the ship (or the title screen), told by what I know, never guessed: a settled world, not being looked at again,
+  -- not a mission, and no bigger than the ship (about 3,800 units; the smallest missions are about 4,800). Anything
+  -- else counts as a mission: a world still loading, a small mission not recognized as one.
+  local SHIP_UNITS = 4300
+  function nav.on_ship()
+    local w = ctx.world
+    return w.stable == true and not w.checking and w.mission ~= true and (w.last_n or w.units or 0) <= SHIP_UNITS
+  end
+  function nav.mouse_on()
+    local m = mouse_row.value
+    return m == 2 or (m == 1 and nav.on_ship())
+  end
+  -- the cursor (screen pixels, y up like the drawing), the wheel, and this frame's clicks
+  function nav.mouse_read(w, h)
+    -- (no answer yet, the mouse not ready in the first frames on some setups: asked again every 2 s)
+    if not nav.axes or (not nav.axes.move and ctx.now() >= nav.axes.at) then
+      local had = nav.axes
+      nav.axes = { move = eng('Mouse.axis_index', 'mouse') or false, wheel = eng('Mouse.axis_index', 'wheel') or false,
+                   l = eng('Mouse.button_index', 'left') or false, r = eng('Mouse.button_index', 'right') or false,
+                   at = ctx.now() + 2 }
+      if not had or nav.axes.move then log('options menu: mouse ' .. (nav.axes.move and 'found' or 'missing')) end
+    end
+    local A = nav.axes
+    nav.moved, nav.wheel, nav.click, nav.rclick = false, 0, false, false
+    if not A.move then return end
+    if not nav.mx then nav.mx, nav.my = w / 2, h / 2 end
+    local function xy(i)
+      local v = eng('Mouse.axis', i)
+      if v == nil then return 0, 0 end
+      local x, y = eng('Vector3.to_elements', v)
+      return tonumber(x) or 0, tonumber(y) or 0
+    end
+    local dx, dy = xy(A.move)
+    nav.moved = dx ~= 0 or dy ~= 0
+    local k = h / 1080
+    -- (the delta counts y down; the menu's y grows upward)
+    nav.mx = max(0, min(w - 1, nav.mx + dx * k))
+    nav.my = max(0, min(h - 1, nav.my - dy * k))
+    if A.wheel then local _, wy = xy(A.wheel); nav.wheel = wy end
+    local function down(i) if not i then return false end local v = eng('Mouse.button', i); return type(v) == 'number' and v > 0.5 end
+    local l, r = down(A.l), down(A.r)
+    nav.click, nav.rclick = l and not nav.lmb, r and not nav.rmb
+    nav.lmb, nav.rmb = l, r
+    if nav.moved or nav.click or nav.rclick or nav.wheel ~= 0 then menu.dev = 'mouse' end   -- (the hints show the mouse's)
+  end
+  -- the boxes drawn this frame, for the mouse next frame: x, y, w, h, kind, index (flat, no table per box)
+  function nav.hit(x, y, w, h, kind, i)
+    local H, b = nav.hits, nav.nhits * 6
+    H[b + 1], H[b + 2], H[b + 3], H[b + 4], H[b + 5], H[b + 6] = x, y, w, h, kind, i
+    nav.nhits = nav.nhits + 1
+  end
+  -- the box under the cursor (the last drawn wins): kind, index, its x and width
+  function nav.under()
+    local x, y, H = nav.mx, nav.my, nav.hits
+    if not (nav.mouse and x) then return nil end
+    for j = nav.nhits, 1, -1 do
+      local b = (j - 1) * 6
+      if x >= H[b + 1] and x < H[b + 1] + H[b + 3] and y >= H[b + 2] and y < H[b + 2] + H[b + 4] then
+        return H[b + 5], H[b + 6], H[b + 1], H[b + 3]
+      end
+    end
+  end
+  -- the controller's buttons as small pictures: each shape a distance function sampled once a screen pixel, the edge
+  -- coverage as alpha (4 levels), runs of equal alpha merged into one rect, and rows of the same runs into one taller
+  -- rect. Pads with shape buttons: the shape in a ring; pads with letter buttons: the letter in a ring; the D-pad as an
+  -- outlined cross. Worked out once a size into plain numbers.
+  local GLYPH_OF = { enter = { 'cross', 'A' }, back = { 'circle', 'B' }, delete = { 'square', 'X' }, dpad = { 'dpad' } }
+  local glyph_cache = {}
+  local function glyph_runs(kind, s)
+    local key = kind .. s
+    if glyph_cache[key] then return glyph_cache[key] end
+    local sqrt, abs = math.sqrt, math.abs
+    local function seg(px, py, ax, ay, bx, by)
+      local dx, dy = bx - ax, by - ay
+      local t = max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+      local ex, ey = px - ax - t * dx, py - ay - t * dy
+      return sqrt(ex * ex + ey * ey)
+    end
+    local function box(px, py, hx, hy)
+      local qx, qy = abs(px) - hx, abs(py) - hy
+      local ox, oy = max(qx, 0), max(qy, 0)
+      return sqrt(ox * ox + oy * oy) + min(max(qx, qy), 0)
+    end
+    local SHAPES = {
+      cross = function(x, y, r) local k, w = r * 0.36, r * 0.085; return min(seg(x, y, -k, -k, k, k), seg(x, y, -k, k, k, -k)) - w end,
+      circle = function(x, y, r) return abs(sqrt(x * x + y * y) - r * 0.36) - r * 0.08 end,
+      square = function(x, y, r) return abs(box(x, y, r * 0.33, r * 0.33)) - r * 0.075 end,
+      ring = function(x, y, r) return abs(sqrt(x * x + y * y) - r * 0.9) - r * 0.07 end,
+      dpad = function(x, y, r) return abs(min(box(x, y, r * 0.30, r * 0.9), box(x, y, r * 0.9, r * 0.30))) - r * 0.06 end }
+    local f, ring = SHAPES[kind], kind ~= 'dpad' and kind ~= 'ring' and SHAPES.ring
+    if kind == 'letter' then f = SHAPES.ring; ring = nil end
+    local r, rows, out = s / 2, {}, {}
+    for j = 0, s - 1 do                        -- each row's runs: x, width, alpha (as one string, to merge rows)
+      local py, runs, run_a, run_i = (j + 0.5) - r, {}, 0, 0
+      for i = 0, s do
+        local a = 0
+        if i < s then
+          local px = (i + 0.5) - r
+          local d = f(px, py, r)
+          if ring then d = min(d, ring(px, py, r)) end
+          a = floor(max(0, min(1, 0.5 - d)) * 4 + 0.5)
+        end
+        if a ~= run_a then
+          if run_a > 0 then runs[#runs + 1] = run_i .. ',' .. (i - run_i) .. ',' .. run_a end
+          run_a, run_i = a, i
+        end
+      end
+      rows[j] = runs
+    end
+    local j = 0
+    while j < s do                             -- rows with the same runs become one rect each, x, y from the top, w, h, alpha
+      local sig, h = concat(rows[j], ';'), 1
+      while j + h < s and concat(rows[j + h], ';') == sig do h = h + 1 end
+      for _, run in ipairs(rows[j]) do
+        local x, wd, a = run:match('(%d+),(%d+),(%d+)')
+        out[#out + 1] = tonumber(x); out[#out + 1] = j; out[#out + 1] = tonumber(wd); out[#out + 1] = h; out[#out + 1] = tonumber(a)
+      end
+      j = j + h
+    end
+    glyph_cache[key] = out
+    return out
+  end
+  -- draws one at x, y (its bottom left), 9 c pixels square; returns its width
+  function nav.glyph(what, x, y, c, layer)
+    local g = GLYPH_OF[what]
+    if not g then return 0 end
+    local s, col = 9 * c, ctx.color
+    local letter = not nav.ps and g[2]
+    local R = glyph_runs(letter and 'letter' or g[1], s)
+    local cols = { col(232, 232, 226, 64), col(232, 232, 226, 128), col(232, 232, 226, 191), col(232, 232, 226, 255) }
+    for i = 1, #R, 5 do ctx.rect(x + R[i], y + s - R[i + 1] - R[i + 3], R[i + 2], R[i + 3], cols[R[i + 4]], layer) end
+    if letter and ctx.text then
+      local lp = max(1, floor(c * 0.75))
+      local lw = ctx.text_width(letter, lp)
+      ctx.text(x + floor((s - lw) / 2), y + floor((s - 7 * lp) / 2), letter, lp, cols[4], layer + 1)
+    end
+    return s
+  end
+  -- the title picture: 534 x 74 pixels, a texture in my own patch (BANNER_TEX, the resource
+  -- mods/chef_shared_loader/menu_banner; tools/build.py checks the id), drawn one screen pixel a picture pixel at 1080p
+  -- (two at 4K) through the bitmap path: one draw a frame. BANNER_AH: the height of its figure, at the bottom. No
+  -- texture (not loaded, or a host without bitmaps): nil, and the caller writes the title instead.
+  local BANNER_W, BANNER_H, BANNER_AH = 534, 74, 64
+  local BANNER_TEX = 'b20c9c97bcd6c5d8'
+  function nav.banner(x, y, c, layer)
+    local white = ctx.color(255, 255, 255, 255)
+    if ctx.bitmap and white and ctx.bitmap(BANNER_TEX, x, y, BANNER_W * c, BANNER_H * c, white, layer) then return BANNER_W * c end
+    return nil
+  end
+  -- the cursor: an arrow, ink edged
+  function nav.draw_cursor(top, h)
+    if not (nav.mouse and nav.mx) then return end
+    local c = max(2, floor(h / 400 + 0.5))
+    local x, y, col = floor(nav.mx), floor(nav.my), ctx.color
+    local edge, fill = col(17, 17, 17, 255), col(255, 231, 16, 255)
+    for i = 0, 9 do
+      local wd = (i < 7) and (i + 1) or (10 - i) * 2 - 1
+      ctx.rect(x - c, y - (i + 2) * c, (wd + 2) * c, 2 * c, edge, top + 8)
+    end
+    for i = 0, 8 do
+      local wd = (i < 7) and i or (9 - i) * 2 - 2
+      if wd > 0 then ctx.rect(x, y - (i + 1) * c, wd * c, c, fill, top + 9) end
+    end
+  end
   -- the mods with rows, by title in alphabetical order (case ignored; the mod's name breaks a tie)
+  -- (kept until the layout changes: the full screen look asks for it every frame)
+  local sorted_cache = { ver = -1, gs = nil }
   local function sorted_groups()
+    if sorted_cache.ver == ver.layout then return sorted_cache.gs end
     local gs = {}
     for _, g in ipairs(groups) do if #g.rows > 0 then gs[#gs + 1] = g end end
     table.sort(gs, function(a, b)
@@ -1089,11 +1443,42 @@ function M.install(ctx)
       if ta ~= tb then return ta < tb end
       return a.mod < b.mod
     end)
+    sorted_cache.ver, sorted_cache.gs = ver.layout, gs
     return gs
   end
   -- the lines shown: the list of mods; the open mod's options; or, with a search typed after '/', every mod whose
   -- title has it (whole) and every option whose label has it, under its mod's title
   local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
+  -- A group's rows as lines. My own rows carry a section: they're shown by section, each under its heading, in the
+  -- order below (any other row of a section after those, in the order it was made).
+  local SECTIONS = { menu = { 1, 'MENU' }, monitor = { 2, 'PERFORMANCE' }, permissions = { 3, 'PERMISSIONS' } }
+  local ORDER = { menu_key = 1, menu_look = 2, menu_place = 3, menu_mouse = 4, menu_pad = 5, font = 6, lang = 7,
+                  perf = 1, perf_place = 2, budget = 3 }
+  local function section_of(r) return r.owner == 'loader' and SECTIONS[r.spec.section] or nil end
+  local function group_lines(g, out)
+    local rows, any = {}, false
+    for i, r in ipairs(g.rows) do rows[i] = r; if section_of(r) then any = true end end
+    if not any then
+      for _, r in ipairs(rows) do out[#out + 1] = { row = r } end
+      return out
+    end
+    table.sort(rows, function(a, b)
+      local sa, sb = section_of(a), section_of(b)
+      local ka, kb = sa and sa[1] or 99, sb and sb[1] or 99
+      if ka ~= kb then return ka < kb end
+      local oa, ob = ORDER[a.short] or 50, ORDER[b.short] or 50
+      if oa ~= ob then return oa < ob end
+      return a.n < b.n
+    end)
+    local last = nil
+    for _, r in ipairs(rows) do
+      local sec = section_of(r)
+      if sec and sec ~= last then out[#out + 1] = { head = true, text = sec[2] } end
+      last = sec
+      out[#out + 1] = { row = r }
+    end
+    return out
+  end
   local function lines()
     if lines_cache.ver == ver.layout and lines_cache.search == menu.search and lines_cache.group == menu.group then
       return lines_cache.out
@@ -1115,12 +1500,50 @@ function M.install(ctx)
         end
       end
     elseif menu.group then
-      for _, r in ipairs(menu.group.rows) do out[#out + 1] = { row = r } end
+      group_lines(menu.group, out)
     else
       for _, g in ipairs(sorted_groups()) do out[#out + 1] = { pick = g, text = g.title } end
     end
     lines_cache.ver, lines_cache.search, lines_cache.group, lines_cache.out = ver.layout, menu.search, menu.group, out
     return out
+  end
+  -- the hint for a key row marked '!' (its key bound more than once): which other options use the key, by mod and
+  -- label, two at most then a count ('F7 ALSO USED BY: SOME MOD (TOGGLE) +2'); nil for any other line. Worked out
+  -- again only when a binding, the selected row or the language changes.
+  -- (with a language on, its parts are translated before they're joined, and the joined line, as drawn, is kept as it
+  -- is: the language translates 'ALSO USED BY:' and the mods' titles and labels once each, never every pairing. A part
+  -- the frame's pattern budget cut leaves the line uncached, so it's made again next frame.)
+  local clash_cache = { ver = -1, row = nil, lv = nil, text = nil }
+  local function clash_hint(l, users)
+    local r = l and l.row
+    if not r or r.spec.type ~= 'key' or r.value == 'off' or (users[r.value] or 0) < 2 or menu.capture then return nil end
+    local lv = ctx.lang_v and ctx.lang_v()
+    if clash_cache.ver ~= ver.keys or clash_cache.row ~= r or clash_cache.lv ~= lv then
+      local tr = ctx.tr or text_of
+      if ctx.tr_cut then ctx.tr_cut(true) end
+      local others, n = {}, 0
+      for _, g in ipairs(groups) do
+        for _, o in ipairs(g.rows) do
+          if o ~= r and o.spec.type == 'key' and o.value == r.value then
+            n = n + 1
+            if n <= 2 then others[#others + 1] = tr(text_of(g.title)) .. ' (' .. tr(text_of(o.spec.label or o.id)) .. ')' end
+          end
+        end
+      end
+      local key = svc.util and svc.util.key_label(r.value) or r.value
+      clash_cache.text = n > 0 and (key .. ' ' .. tr('ALSO USED BY:') .. ' ' .. concat(others, ', ')
+                                    .. (n > 2 and fmt(' +%d', n - 2) or '')) or nil
+      clash_cache.ver, clash_cache.row, clash_cache.lv = ver.keys, r, lv
+      if ctx.tr_cut and ctx.tr_cut() then clash_cache.ver = -1 end
+    end
+    return clash_cache.text
+  end
+  -- the clash hint as drawn (in the look's capitals), kept as it is each time it's shown: the language's list of texts
+  -- drawn as they are is two generations
+  local function clash_drawn(clash, P)
+    local s = P(clash)
+    if ctx.tr_keep then ctx.tr_keep(s) end
+    return s
   end
   local function value_text(r, users)
     local s, v = r.spec, r.value
@@ -1136,7 +1559,10 @@ function M.install(ctx)
     end
     return tostring(v)
   end
-  local function pressed(name) return ctx.key_pressed(name) end
+  -- (a key pressed: the hints show the keys)
+  local function pressed(name) local v = ctx.key_pressed(name); if v then menu.dev = 'keys' end; return v end
+  -- a menu action this frame: its key, or the controller's button or the mouse standing in for it
+  local function act(name) return nav.act[name] == true or pressed(name) end
   local function capture_key()
     -- any key pressed this frame, by its engine name (Escape cancels, Delete clears)
     local n = guarded('loader', 'Keyboard.num_buttons', fn_of('Keyboard.num_buttons'))
@@ -1153,7 +1579,7 @@ function M.install(ctx)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top = true, '', 2, 1 end
+      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top, nav.drag = true, '', 2, 1, nil end
       if menu.typing then menu.group = nil end
       return false
     end
@@ -1165,8 +1591,16 @@ function M.install(ctx)
     if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
     return true
   end
+  -- a mod opened (from the list's line `back`): the cursor on its first row, past any heading
+  local function open_group(back, g)
+    menu.back, menu.group, menu.search, menu.top, nav.drag = back, g, '', 1, nil
+    local ls, i = lines(), 2
+    while ls[i] and ls[i].head do i = i + 1 end
+    menu.sel = ls[i] and i or 1
+  end
   -- back to the list of mods, where its cursor was (the Back row, or Backspace)
   local function go_back()
+    nav.drag = nil
     if menu.group then menu.sel, menu.top = menu.back, 1 else menu.sel, menu.top = 1, 1 end
     menu.group, menu.search = nil, ''
   end
@@ -1174,7 +1608,7 @@ function M.install(ctx)
     if menu.capture then
       local k = capture_key()
       local r = menu.capture
-      if k == 'escape' then menu.capture = nil
+      if k == 'escape' or nav.act.back then menu.capture = nil
       -- Delete: none (the menu's own key goes back to its default instead)
       elseif k == 'delete' then set_row(r, r.spec.menu and r.default or 'off'); menu.capture = nil
       -- the menu's own key can't be one the menu uses: it keeps waiting for another
@@ -1191,31 +1625,75 @@ function M.install(ctx)
       end
     end
     if ls[menu.sel] == nil or ls[menu.sel].head then step(1) end
-    if pressed('down') then step(1) elseif pressed('up') then step(-1)
-    elseif pressed('page down') then for _ = 1, 8 do step(1) end
-    elseif pressed('page up') then for _ = 1, 8 do step(-1) end end
+    -- the mouse: hover picks a line, a click acts on it (a choice or a slider steps on), the arrows step it, a slider's
+    -- bar takes the value under the cursor while the button is held, a click on another mod opens it, the wheel scrolls
+    if nav.mouse then
+      local kind, i, bx, bw = nav.under()
+      -- a slider's bar held: that row keeps the drag until the button is let go (or its line isn't that row any more)
+      local d = nav.drag
+      if d and (not nav.lmb or not ls[d.i] or ls[d.i].row ~= d.r) then nav.drag = nil end
+      -- The wheel scrolls the lines in view, a line a notch (parts of a notch add up), and keeps the picked line among
+      -- them. In a frame the wheel turns I skip the hover and the clicks: last frame's boxes are under the old
+      -- scroll, and a hover after the scroll would put the picked line back. Not while a slider is held.
+      if nav.wheel ~= 0 and not nav.drag then
+        local vis = nav.visible or 8
+        if (nav.wacc or 0) * nav.wheel > 0 then nav.wacc = 0 end   -- (turned the other way: a part kept from before goes)
+        nav.wacc = (nav.wacc or 0) - nav.wheel
+        local whole = nav.wacc >= 0 and floor(nav.wacc) or -floor(-nav.wacc)
+        nav.wacc = nav.wacc - whole
+        local top = max(1, min(menu.top + whole, n - vis + 1))
+        menu.top = top
+        if menu.sel < top then menu.sel = top; if ls[top].head then step(1) end
+        elseif menu.sel > top + vis - 1 then menu.sel = top + vis - 1; if ls[menu.sel].head then step(-1) end end
+        kind = nil
+      end
+      if not nav.drag and kind == 'line' and ls[i] and not ls[i].head and (nav.moved or nav.click) then menu.sel = i end
+      if nav.click then
+        if kind == 'line' and ls[i] then
+          local t = ls[i].row and ls[i].row.spec.type
+          if t == 'choice' or t == 'slider' then nav.act.right = true else nav.act.enter = true end
+        elseif (kind == 'dec' or kind == 'inc') and ls[i] then
+          menu.sel = i; nav.act[kind == 'dec' and 'left' or 'right'] = true
+        elseif kind == 'group' then
+          local g = sorted_groups()[i]
+          if g then open_group(i, g); return end
+        end
+      end
+      if not nav.drag and kind == 'bar' and nav.lmb and ls[i] and ls[i].row and bw > 0 then
+        nav.drag = { r = ls[i].row, i = i, bx = bx, bw = bw }
+        menu.sel = i
+      end
+      if nav.drag then
+        d = nav.drag
+        set_row(d.r, d.r.spec.min + max(0, min(1, (nav.mx - d.bx) / d.bw)) * (d.r.spec.max - d.r.spec.min))
+        return
+      end
+    end
+    if act('down') then step(1) elseif act('up') then step(-1)
+    elseif act('page down') then for _ = 1, 8 do step(1) end
+    elseif act('page up') then for _ = 1, 8 do step(-1) end end
     local l = ls[menu.sel]
     -- a mod in the list: Enter (or Right) opens its options, the cursor on its first option (Back is just above it)
     if l and l.pick then
-      if pressed('enter') or pressed('right') then menu.back, menu.group, menu.sel, menu.top = menu.sel, l.pick, 2, 1 end
+      if act('enter') or act('right') then open_group(menu.sel, l.pick) end
       return
     end
     if l and l.back then
-      if pressed('enter') or pressed('left') then go_back() end
+      if act('enter') or act('left') then go_back() end
       return
     end
     local r = l and l.row
     if not r then return end
     local s = r.spec
-    local dir = pressed('right') and 1 or (pressed('left') and -1 or 0)
-    if pressed('delete') then set_row(r, r.default); return end
-    if s.type == 'toggle' and (dir ~= 0 or pressed('enter')) then set_row(r, not r.value)
+    local dir = act('right') and 1 or (act('left') and -1 or 0)
+    if act('delete') then set_row(r, r.default); return end
+    if s.type == 'toggle' and (dir ~= 0 or act('enter')) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 then
       local v = r.value + dir
       if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
       set_row(r, v)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * ((s.step or 0) > 0 and s.step or (s.max - s.min) / 20))
-    elseif s.type == 'key' and pressed('enter') then menu.capture = r end
+    elseif s.type == 'key' and act('enter') then menu.capture = r end
   end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
   -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
@@ -1225,9 +1703,16 @@ function M.install(ctx)
     local top = ctx.TOP + 950
     local rh, cols = 12 * px, 40
     local pw = (cols * 6 + 10) * px
-    local x0 = floor(w * 0.05)
+    local place = menu_place and tonumber(menu_place.value) or 1
+    local x0 = max(0, (place == 2 and floor((w - pw) / 2)) or (place == 3 and w - pw - floor(w * 0.05)) or floor(w * 0.05))
     local visible = max(4, floor((h * 0.7) / rh) - 4)
+    nav.visible = visible                      -- (the wheel keeps the picked line among the lines in view)
     if menu.sel < menu.top then menu.top = menu.sel elseif menu.sel >= menu.top + visible then menu.top = menu.sel - visible + 1 end
+    -- (a section's heading kept in view with its first row, when keys or the pad got there: under the mouse the
+    -- list never moves)
+    if menu.dev ~= 'mouse' and menu.top == menu.sel and menu.sel > 1 and ls[menu.sel - 1] and ls[menu.sel - 1].head then
+      menu.top = menu.sel - 1
+    end
     local shown = min(visible, #ls - menu.top + 1)
     local hb = rh + 2 * px                     -- the title bar
     local ph = hb + shown * rh + 3 * px + rh + 2 * px
@@ -1263,6 +1748,7 @@ function M.install(ctx)
         ctx.rect(x0 + b, y, 2 * px, rh, yellow, top + 2)
       end
       local ty = midy(y, rh)
+      if not l.head then nav.hit(x0 + b, y, pw - 2 * b, rh, 'line', i) end
       if l.head then
         ctx.text(x0 + tx, ty, fit(P(l.text), px, inner), px, yellow, top + 2)
       elseif l.back then
@@ -1290,27 +1776,265 @@ function M.install(ctx)
     end
     -- the hints under a thin line
     ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
+    local clash = clash_hint(ls[menu.sel], users)
     local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
       or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
+      or (clash and clash_drawn(clash, P))
       or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
       or ('ARROWS  ENTER OPEN  / SEARCH  ' .. (svc.util and svc.util.key_label(menu_key.value) or menu_key.value) .. ' CLOSE')
     ctx.text(x0 + tx, midy(y0 - ph + px, rh), fit(P(hint), px, inner), px, gray, top + 2)
+    nav.draw_cursor(top, h)
+  end
+  -- The full screen look: an opaque terminal, the mods on the left, the open mod's options on the right (at the list
+  -- of mods, a preview of the picked one's), the hints at the bottom. The same lines, keys and rows as the compact
+  -- panel; only the drawing differs (and the mouse's boxes).
+  local function menu_draw_full(ls)
+    local w, h = ctx.screen()
+    local s = h / 1080
+    local px = max(2, floor(h / 360 + 0.5))
+    local tpx = max(px + 1, floor(px * 1.6 + 0.5))
+    local top = ctx.TOP + 950
+    local col = ctx.color
+    local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
+    local white, green, gray, dim = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255), col(80, 88, 82, 255)
+    local panel, line, glow = col(17, 21, 19, 255), col(255, 231, 16, 70), col(255, 231, 16, 42)
+    local P = ctx.text_native and ctx.text_native() and caps or plain
+    local fit, tw = ctx.text_fit or fit_cells, ctx.text_width
+    local function midy(y, hgt, p) return y + floor((hgt - 7 * (p or px)) / 2) end
+    local m = floor(48 * s)                    -- the outer margin
+    -- The game's own bands still draw over mine (the ship's name and the menus' keys along the top, and the
+    -- player card and the dispatches along the bottom), so the title and the hints sit just inside those bands:
+    -- the header and the hints' strip are taller than what's written in them.
+    local hh, fh = floor(150 * s), floor(190 * s)  -- the header's and the hints' height
+    local band = floor(66 * s)                 -- the header's written band (under the game's top row)
+    local hy = floor(128 * s)                  -- the hints' line (above the player card)
+    local rh = 13 * px
+    local b = max(1, floor(s * 1.5))
+    ctx.rect(0, 0, w, h, col(9, 11, 10, 255), top)
+    -- the header: the title, the search (or the loader's name) on the right, a yellow rule under it
+    ctx.rect(0, h - hh, w, hh, panel, top + 1)
+    ctx.rect(0, h - hh - 2 * b, w, 2 * b, yellow, top + 1)
+    local searching = menu.typing or menu.search ~= ''
+    local rtext = searching and P('SEARCH /' .. menu.search .. (menu.typing and '_' or '')) or P(ctx.LOADER .. ' ' .. tostring(ctx.VERSION))
+    rtext = fit(rtext, px, floor(w * 0.4))
+    local rw = tw(rtext, px)
+    ctx.text(w - m - rw, midy(h - hh, band), rtext, px, searching and yellow or gray, top + 2)
+    -- the title picture (a texture in my patch), centered on the written band (the title in the game's font if the
+    -- screen is too narrow for it or the texture isn't there)
+    local hc = max(1, floor(band / BANNER_AH + 0.25))
+    if not (BANNER_W * hc <= w - 3 * m - rw and nav.banner(m, h - hh + floor((band - BANNER_AH * hc) / 2), hc, top + 2)) then
+      ctx.text(m, midy(h - hh, band, tpx), fit(P('MOD OPTIONS'), tpx, w - 3 * m - rw), tpx, yellow, top + 2)
+    end
+    -- the two panes, side by side
+    local py0, py1 = fh + floor(8 * s), h - hh - floor(24 * s)
+    local lw = floor(w * 0.27)
+    local lx, rx = m, m + lw + floor(24 * s)
+    local rwid = w - m - rx
+    local function pane(x, wd, title, note)
+      ctx.rect(x, py0, wd, py1 - py0, panel, top + 1)
+      ctx.rect(x, py1 - b, wd, b, line, top + 2); ctx.rect(x, py0, wd, b, line, top + 2)
+      ctx.rect(x, py0, b, py1 - py0, line, top + 2); ctx.rect(x + wd - b, py0, b, py1 - py0, line, top + 2)
+      local nw = note and tw(note, px) or 0
+      ctx.text(x + 4 * px, midy(py1 - rh - 2 * px, rh), fit(P(title), px, wd - 12 * px - nw), px, gray, top + 3)
+      if note then ctx.text(x + wd - 4 * px - nw, midy(py1 - rh - 2 * px, rh), note, px, gray, top + 3) end
+      ctx.rect(x + 3 * px, py1 - rh - 3 * px, wd - 6 * px, b, line, top + 2)
+    end
+    local function lit(x, wd, y)
+      ctx.rect(x + b, y, wd - 2 * b, rh, glow, top + 3)
+      ctx.rect(x + b, y, 2 * px, rh, yellow, top + 4)
+    end
+    local visible = max(3, floor((py1 - py0 - rh - 6 * px) / rh))
+    nav.visible = visible                      -- (the wheel keeps the picked line among the lines in view)
+    -- (ls: the lines, when a section's heading should stay in view with its first row; not under the mouse)
+    local function scroll(sel, first, n, ls)
+      if sel < first then first = sel elseif sel >= first + visible then first = sel - visible + 1 end
+      if ls and menu.dev ~= 'mouse' and first == sel and sel > 1 and ls[sel - 1] and ls[sel - 1].head then first = sel - 1 end
+      return max(1, min(first, n - visible + 1))
+    end
+    local users, gs = key_users(), sorted_groups()
+    local listing = not menu.group and menu.search == ''       -- at the list of mods the lines are the mods
+    -- the left pane: the mods (at the list, the lines themselves; else every mod, the open one lit, a click opens another)
+    pane(lx, lw, 'MODS', tostring(#gs))
+    local y = py1 - rh - 4 * px - rh
+    if listing then
+      menu.top = scroll(menu.sel, menu.top, #ls)
+      for i = menu.top, min(#ls, menu.top + visible - 1) do
+        local l = ls[i]
+        if i == menu.sel then lit(lx, lw, y) end
+        local n = tostring(#l.pick.rows)
+        local nw = tw(n, px)
+        ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(l.text)), px, lw - 16 * px - nw), px, i == menu.sel and yellow or white, top + 4)
+        ctx.text(lx + lw - 5 * px - nw, midy(y, rh), n, px, gray, top + 4)
+        nav.hit(lx, y, lw, rh, 'line', i)
+        y = y - rh
+      end
+    else
+      local open = 1
+      for i, g in ipairs(gs) do if g == menu.group then open = i end end
+      nav.ltop = scroll(open, nav.ltop, #gs)
+      for i = nav.ltop, min(#gs, nav.ltop + visible - 1) do
+        local g = gs[i]
+        local on = g == menu.group
+        if on then lit(lx, lw, y) end
+        ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(g.title)), px, lw - 12 * px), px, on and yellow or gray, top + 4)
+        nav.hit(lx, y, lw, rh, 'group', i)
+        y = y - rh
+      end
+    end
+    -- the right pane: the open mod's rows (or the search's), or at the list a preview of the picked mod's, dimmed
+    local rows, title
+    if listing then
+      local l = ls[menu.sel]
+      rows = {}
+      if l and l.pick then
+        if nav.pv_g ~= l.pick or nav.pv_ver ~= ver.layout then
+          nav.pv_g, nav.pv_ver, nav.pv = l.pick, ver.layout, group_lines(l.pick, {})
+        end
+        rows = nav.pv
+      end
+      title = l and l.pick and text_of(l.pick.title) or ''
+    else
+      rows, title = ls, menu.group and text_of(menu.group.title) or 'SEARCH'
+      menu.top = scroll(menu.sel, menu.top, #ls, ls)
+    end
+    pane(rx, rwid, title, listing and #rows > 0 and P('ENTER OPENS') or nil)
+    local inner = rwid - 12 * px
+    local vmax = floor(inner * 0.42)
+    local first = listing and 1 or menu.top
+    y = py1 - rh - 4 * px - rh
+    for i = first, min(#rows, first + visible - 1) do
+      local l = rows[i]
+      local sel = not listing and i == menu.sel and not l.head
+      if sel then lit(rx, rwid, y) end
+      local ty, x = midy(y, rh), rx + 6 * px
+      if l.head then
+        ctx.text(rx + 4 * px, ty, fit(P(text_of(l.text)), px, inner), px, yellow, top + 4)
+      elseif l.back then
+        ctx.text(x, ty, fit(P(l.text), px, inner), px, yellow, top + 4)
+        nav.hit(rx, y, rwid, rh, 'line', i)
+      else
+        local r = l.row
+        local sp = r.spec
+        local x1 = rx + rwid - 6 * px                 -- the value's right edge
+        local v = fit(P(value_text(r, users)), px, vmax - 12 * px)
+        local vw = tw(v, px)
+        local live = not listing
+        local lcol = live and white or dim
+        local vcol = not live and dim or ((sp.type == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green))
+        if live then nav.hit(rx, y, rwid, rh, 'line', i) end
+        if sp.type == 'choice' or sp.type == 'slider' then
+          -- < value >, each arrow a box of its own for the mouse; a slider's bar under them takes a click or a drag
+          local aw = tw('>', px)
+          local ax = x1 - aw
+          local vx = ax - 4 * px - vw
+          local bx = vx - 4 * px - aw
+          ctx.text(bx, ty, '<', px, sel and yellow or gray, top + 4)
+          ctx.text(vx, ty, v, px, vcol, top + 4)
+          ctx.text(ax, ty, '>', px, sel and yellow or gray, top + 4)
+          if live then
+            nav.hit(bx - 2 * px, y, aw + 4 * px, rh, 'dec', i)
+            nav.hit(ax - 2 * px, y, aw + 4 * px, rh, 'inc', i)
+          end
+          if sp.type == 'slider' then
+            local sx, sw, th = x1 - vmax, vmax, max(1, floor(px / 2))
+            local f = max(0, min(1, (r.value - sp.min) / (sp.max - sp.min)))
+            ctx.rect(sx, y + px, sw, th, live and gray or dim, top + 4)
+            if f > 0 then ctx.rect(sx, y + px, max(1, floor(sw * f)), th, live and yellow or dim, top + 5) end
+            if live then nav.hit(sx, y, sw, 2 * px + th, 'bar', i) end
+          end
+          ctx.text(x, ty, fit(P(text_of(sp.label or r.id)), px, bx - 8 * px - x), px, lcol, top + 4)
+        else
+          local vx = x1 - vw
+          ctx.text(x, ty, fit(P(text_of(sp.label or r.id)), px, vx - 8 * px - x), px, lcol, top + 4)
+          if sp.type == 'key' and menu.capture ~= r then
+            -- a key: a light chip with the key's name in ink
+            ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, live and white or dim, top + 4)
+            ctx.text(vx, ty, v, px, ink, top + 5)
+          else
+            ctx.text(vx, ty, v, px, vcol, top + 4)
+          end
+        end
+      end
+      y = y - rh
+    end
+    -- the hints: for what was used last, the keyboard, the mouse or the controller (its buttons as pictures)
+    ctx.rect(0, fh, w, b, line, top + 1)
+    local dev = menu.dev
+    if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
+    if dev == 'mouse' and not nav.mouse then dev = 'keys' end
+    local close_key = svc.util and svc.util.key_label(menu_key.value) or menu_key.value
+    -- (a key bound more than once: the hint line says what else uses it, whatever was used last)
+    local clash = not menu.typing and clash_hint(ls[menu.sel], key_users())
+    if clash then
+      ctx.text(m, midy(hy, rh), fit(clash_drawn(clash, P), px, w - 2 * m), px, yellow, top + 2)
+    elseif dev == 'pad' then
+      local x, c = m, px
+      local gy = hy + floor((rh - 9 * c) / 2)
+      local parts = { 'dpad', 'MOVE', 'enter', 'PICK', 'back', 'BACK', 'delete', 'DEFAULT', nil, nav.ps and 'L1/R1 PAGE' or 'LB/RB PAGE' }
+      for k = 1, 10 do
+        local it = parts[k]
+        if it and GLYPH_OF[it] then x = x + nav.glyph(it, x, gy, c, top + 3) + 2 * px
+        elseif it then x = x + (ctx.text(x, midy(hy, rh), P(it), px, gray, top + 2) or 0) + 6 * px end
+      end
+    else
+      local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
+        or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
+        or (dev == 'mouse' and ('CLICK PICK  < > CHANGE  RIGHT CLICK BACK  WHEEL SCROLL  ' .. close_key .. ' CLOSE'))
+        or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK  ESC CLOSE')
+        or ('ARROWS  ENTER OPEN  / SEARCH  ' .. close_key .. ' CLOSE')
+      ctx.text(m, midy(hy, rh), fit(P(hint), px, w - 2 * m), px, gray, top + 2)
+    end
+    nav.draw_cursor(top, h)
+  end
+  -- the layer my full screen menu covers from, while it's open (nil while it isn't)
+  function svc.covering()
+    if menu.open and look_row.value == 1 and nav.on_ship() then return ctx.TOP + 950 end
   end
   local function menu_frame()
     local mk = menu_key.value
+    -- the controller: read only while the menu is open, or while closed when the touchpad / View held two seconds opens it
+    for k in pairs(nav.act) do nav.act[k] = nil end
+    local pv = pad_row.value
+    local in_mission = not nav.on_ship()
+    -- (a new world: nothing held from the last one carries over)
+    local wk = (ctx.world.instance or 0) * 65536 + (ctx.world.id or 0)
+    if wk ~= nav.wk then nav.wk = wk; if next(nav.held) then nav.held, nav.seed = {}, true end end
+    if pv ~= 3 and (menu.open or (pv == 1 and not in_mission)) then nav.pad_read(not menu.open)
+    elseif next(nav.held) then nav.held = {} end   -- (no reads: no hold kept from before, it would open the menu by itself)
+    local combo = pv == 1 and not in_mission and nav.held.touch
+    if not menu.open and combo and not nav.combo and ctx.now() - combo >= 2 then
+      nav.combo = true
+      menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
+      nav.drag = nil
+      nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed = true, true, 'pad', 0, true
+      log('options menu opened (controller)')
+    end
+    if not combo then nav.combo = false end
+    -- the mouse (only while open): the cursor, the wheel and the clicks of this frame
+    nav.mouse = menu.open and nav.mouse_on()
+    if nav.mouse then local w, h = ctx.screen(); nav.mouse_read(w, h) else nav.click, nav.rclick, nav.wheel = false, false, 0 end
+    -- the controller's back (circle/B) or a right click: one level back, at the list of mods it closes (Start isn't
+    -- used: the game would open its own pause menu with it too)
+    if menu.open and menu.capture == nil and not menu.typing and (nav.act.back or nav.rclick) then
+      if menu.group or menu.search ~= '' then go_back() else menu.open = false end
+      return
+    end
     if menu.open and menu.capture == nil and not menu.typing and pressed('backspace') and (menu.group or menu.search ~= '') then
       -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
       go_back()
       return
     end
     if menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing) or (mk ~= 'off' and pressed(mk))) then
-      menu.open, menu.typing = false, false
+      menu.open, menu.typing, nav.drag = false, false, nil
       return
     end
     if not menu.open then
       if mk ~= 'off' and pressed(mk) then
         -- it always opens on the list of mods
         menu.open, menu.group, menu.search, menu.sel, menu.top = true, nil, '', 1, 1
+        nav.drag = nil
+        -- (a mouse button or pad button already down when it opens is no press; no old boxes)
+        nav.lmb, nav.rmb, nav.nhits, nav.seed = true, true, 0, true
         if not menu.said then menu.said = true; log('options menu opened') end
       else
         return
@@ -1322,28 +2046,180 @@ function M.install(ctx)
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
     if not typing then menu_input(ls) end
-    menu_draw(ls)
+    nav.nhits = 0
+    -- (the lines again: what was picked this frame may have opened a mod or gone back)
+    -- (the full screen look covers the game: on the ship only; in a mission the compact panel)
+    if look_row.value == 1 and nav.on_ship() then
+      -- (texts of the top world under it aren't drawn while it's open: the game's font would show through it)
+      if ctx.cover then ctx.cover(ctx.TOP + 950) end
+      menu_draw_full(lines())
+    else menu_draw(ls) end
   end
 
-  -- ---------------------------------------------- the CowboyBingusModLoader / ModOptionsMenu look-alikes
-  -- Only when nothing of that name exists. A Lua-only mod that calls these globals gets:
-  -- CowboyBingusModLoader.after_startup / capabilities / log_directory / open_log, and ModOptionsMenu's
-  -- register_option(id, spec) / get / set / on_change / ready, with its rows in this menu under spec.mod.
-  -- I give every locked-down mod its own pair (bind_lookalikes, as the loader makes the mod's environment): fresh
-  -- functions that know which mod calls them, over the one set of rows, so no mod can change another's, and a mod
-  -- that stops has its callbacks end with it. The pair in the game's globals is for full-access boot scripts.
-  local shim = { count = { rows = 0, mods = 0 } }       -- .bingus / .mom: false when something else had the name
-  local MOM_OPTIONS, MOM_MODS = 128, 64
-  local BINGUS_CAPS = { api = 1, discovery = true, logs = true, health = false, jit_budget = false, after_startup = true }
+  -- ---------------------------------------------- the look-alikes of the other loaders' APIs
+  -- Lua-only mods written for the other loaders find the API they call: CowboyBingusModLoader (and its alias
+  -- HD2ModLoader), ModOptionsMenu, ModBindingsMenu and BingusRuntime, with the same names, call shapes and answers.
+  -- I give every locked-down mod its own set (bind_lookalikes, as the loader makes the mod's environment), always,
+  -- even when another loader's tables sit in the game's globals (the sandbox hides those): fresh functions that know
+  -- which mod calls them, over the one set of rows and hooks, so no mod can change another's, and a mod that stops has
+  -- its callbacks end with it. The set in the game's globals is for full-access boot scripts.
+  -- Each callback a mod registers here runs as that mod: timed as its own (the performance monitor and its budget) and
+  -- crash-guarded under "<mod>|<what>:<id>" like its hooks, so one that ends the game is skipped from the next launch.
+  -- shim.bingus / .mom / .keys_ok: false when something else had the name in the game's globals (then I leave that
+  -- global alone; the mods still get mine).
+  -- upd / down: the on_update / on_shutdown(id, fn) hooks ({ order, hooks, pos }): one id namespace across the mods,
+  -- where an id belongs to the mod that set it first, and only that mod can replace or clear it (refused: what);
+  -- last: the on_shutdown(fn) list; logs: the open_log names opened this launch; guards: the running BingusRuntime
+  -- guards (ended: the stopped ones, which only take part in shutdown); keys: the ModBindingsMenu bindings by id
+  -- (rel: those that trigger on release); rt: the one runtime table every mod's BingusRuntime reads through; seeded:
+  -- the other loaders' settings files, read once each; home: a mod's first options heading (its bindings join it);
+  -- titles: the heading each title went to first; per: options per mod and heading; frame: my frame count (for the
+  -- release sampling and the once-a-frame guards); ml: the mod list by name, built at most once a frame.
+  local shim = { count = { rows = 0, mods = 0, keys = 0 }, upd = { order = {}, hooks = {}, pos = {} },
+                 down = { order = {}, hooks = {}, pos = {} }, last = {}, logs = {}, guards = {}, ended = {}, keys = {},
+                 rel = {}, kidx = {}, kat = {}, rev = 0, seeded = {}, said = {}, pending = {}, home = {}, titles = {}, per = {},
+                 refused = {}, frame = 0, ml = { at = -1 },
+                 rt = { hashes = {}, statuses = {}, versions = { [1] = true }, hash_reads = 0 } }
+  local MOM_PER_MOD, MOM_MODS = 32, 112
+  local REVISION = 'chef-shared-loader-' .. tostring(ctx.VERSION)
+  local BINGUS_CAPS = { api = 1, logs = true, discovery = true, after_startup = true, on_update = true, on_shutdown = true,
+                        open_log = true, mod_options = true, mod_bindings = true,
+                        health = false, jit_budget = false, build_gate = false, ffi = false, jit = false }
   local function read_only(t, what)
     return setmetatable({}, { __index = t, __metatable = 'locked', __newindex = function() error(what .. ' is read-only', 2) end })
   end
+  -- (a callback's crash key: no '|' or control characters, so it reads back from the trace as one owner|key)
+  local function key_for(what, id) return what .. ':' .. tostring(id):gsub('[%c|]', '_'):sub(1, 64) end
+  -- a look-alike callback run as the mod that registered it -> ok, err (pcall's answer; false, 'skipped' when it
+  -- crashed an earlier launch). The box carries the inner pcall's answer out of the timed call.
+  local box = {}
+  local function boxed(owner, key, fn, ...) box[1], box[2] = guarded(owner, key, pcall, fn, ...) end
+  local function run_as(owner, key, fn, ...)
+    box[1], box[2] = nil, nil
+    local a, u = recs[owner], svc.util
+    if a and u then u.timed(a, boxed, owner, key, fn, ...) else boxed(owner, key, fn, ...) end
+    local ok, err = box[1], box[2]
+    if ok == nil then return false, err or 'skipped' end
+    return ok, err
+  end
+
+  -- on_update(id, fn) / on_shutdown(id, fn): fn nil removes the id. Each id is in the order once (set, cleared and set
+  -- again keeps its one place); a cleared one leaves the order at once, or at the end of a walk that's running.
+  local function compact_hooks(L)
+    local j = 0
+    for i = 1, #L.order do
+      local id = L.order[i]
+      L.order[i] = nil
+      if L.hooks[id] then j = j + 1; L.order[j] = id else L.pos[id] = nil end
+    end
+    L.stale = false
+  end
+  local function hook_set(L, what, owner, id, fn)
+    if type(id) ~= 'string' or id == '' then return false, what .. ' needs a string id' end
+    if fn ~= nil and type(fn) ~= 'function' then return false, what .. ' needs a function or nil' end
+    local h = L.hooks[id]
+    if h and h.owner ~= owner then
+      local said = owner .. '|' .. what .. '|' .. id
+      if not shim.refused[said] then
+        shim.refused[said] = true
+        log(fmt('[%s] %s "%s": refused, the id is %s\'s', owner, what, id, h.owner))
+      end
+      return false, "id '" .. id .. "' is another mod's"
+    end
+    if fn == nil then
+      if h then
+        L.hooks[id], L.stale = nil, true
+        if not L.walking then compact_hooks(L) end
+      end
+      return true
+    end
+    if not L.pos[id] then
+      if #L.order >= 1024 then return false, what .. ': 1024 ids already registered' end
+      L.order[#L.order + 1], L.pos[id] = id, true
+    end
+    L.hooks[id] = { owner = owner, fn = fn, key = key_for(what, id) }
+    return true
+  end
+  -- every hook of a list once, in the order registered; an on_update hook that raises is dropped (logged)
+  local function run_hooks(L, what, ...)
+    L.walking = true
+    for i = 1, #L.order do
+      local id = L.order[i]
+      local h = L.hooks[id]
+      if h then
+        local ok, err = run_as(h.owner, h.key, h.fn, ...)
+        if not ok and what == 'on_update' then
+          if L.hooks[id] == h then L.hooks[id], L.stale = nil, true end
+          log(err == 'skipped' and fmt('[%s] on_update "%s" skipped (it crashed the game)', h.owner, id)
+            or fmt('[%s] on_update "%s" dropped after an error: %s', h.owner, id, err_text(err)))
+        elseif not ok then
+          log(fmt('[%s] %s "%s": %s', h.owner, what, id, err_text(err)))
+        end
+      end
+    end
+    L.walking = false
+    if L.stale then compact_hooks(L) end
+  end
+  -- the loader's mod list by name, built at most once a frame once start-up is over (while mods start, every read
+  -- builds it: their states change within the one start-up frame)
+  local function mod_list()
+    local ml = shim.ml
+    if ml.at == shim.frame and started then return ml end
+    ml = { at = shim.frame, n = 0, by = {} }
+    if svc.util and svc.util.mod_list then
+      for _, m in ipairs(svc.util.mod_list()) do ml.n = ml.n + 1; ml.by[m.name] = m end
+    end
+    shim.ml = ml
+    return ml
+  end
+  -- what a mod's modules entry says, in the API's words: loaded, loading, or load failed and why; nil for a name I
+  -- never found. A mod another loader started before handing off to me counts as loaded.
+  local function module_state(name)
+    if type(name) ~= 'string' then return nil end
+    local a, st, why, on = ctx.addon(name), nil, nil, nil
+    if a then
+      st, why, on = a.state, a.why, a.on
+    else
+      if name:sub(1, 5) ~= 'mods/' then return nil end
+      local m = mod_list().by[name]
+      if not m then return nil end
+      st, why, on = m.state, m.why, m.on
+    end
+    if st == 'started elsewhere' then return 'loaded' end
+    if on and st == 'running' then return 'loaded' end
+    if on and st == nil then return 'loading' end
+    return 'load failed: ' .. tostring(why or st or 'off')
+  end
+  -- the game's build, asked once (the look-alike's game table): checked is always true, as I carry no copy of the
+  -- game's own boot that a game update could leave stale
+  local function game_info()
+    if not shim.game then
+      local v = guarded('loader', 'Application.build_identifier', fn_of('Application.build_identifier'))
+      shim.game = { build_identifier = (type(v) == 'string' or type(v) == 'number') and v or nil, checked = true }
+    end
+    return shim.game
+  end
   local function make_bingus(owner)
     local dir = ctx.DIR:gsub('\\$', '')
-    return {
-      api = 1, version = ctx.LOADER .. ' ' .. ctx.VERSION .. ' (look-alike)', log_directory = dir,
+    local b = {
+      api = 1, version = 17, revision = REVISION, loader = ctx.LOADER .. ' ' .. ctx.VERSION, log_directory = dir,
       capabilities = read_only(BINGUS_CAPS, 'CowboyBingusModLoader.capabilities'),
+      game = read_only(game_info(), 'CowboyBingusModLoader.game'),
+      -- (a view: each read asks the loader's mod list as it is then; it can't be walked with pairs)
+      modules = setmetatable({}, { __index = function(_, name) return module_state(name) end, __metatable = 'locked',
+        __newindex = function() error('CowboyBingusModLoader.modules is read-only', 2) end }),
+      jit = read_only({ managed = false, reason = 'Lua 5.1 standard interpreter (no JIT)' }, 'CowboyBingusModLoader.jit'),
+      build = read_only({ supported = true }, 'CowboyBingusModLoader.build'),
       after_startup = function(fn) return after_startup(owner, fn) end,
+      on_update = function(id, fn) return hook_set(shim.upd, 'on_update', owner, id, fn) end,
+      -- both forms: (id, fn) runs with the mods' shutdown hooks, (fn) after everything else, before the logs close
+      on_shutdown = function(a1, a2)
+        if type(a1) == 'string' then return hook_set(shim.down, 'on_shutdown', owner, a1, a2) end
+        if type(a1) ~= 'function' then return false, 'on_shutdown needs (id, fn) or (fn)' end
+        if #shim.last >= 1024 then return false, 'on_shutdown: 1024 functions already registered' end
+        shim.last[#shim.last + 1] = { owner = owner, fn = a1, key = 'on_shutdown#' .. (#shim.last + 1) }
+        return true
+      end,
       open_log = function(name)
         if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') or #name > 52 then
           return nil, 'log names are letters, digits, _ - and end in .log'
@@ -1354,70 +2230,531 @@ function M.install(ctx)
         if DEVICES[base] then return nil, 'device names are off limits' end
         local o = own_logs[name:sub(1, -5)]
         if o and o.owner ~= owner then return nil, name .. ' is ' .. o.owner .. "'s" end
-        return ctx.open(ctx.DIR .. name, 'a')
+        -- a fresh file on a name's first open each launch, added to after that (and always a mod's own_log)
+        local f = ctx.open(ctx.DIR .. name, (shim.logs[base] or o) and 'a' or 'w')
+        if f then shim.logs[base] = true end
+        return f
       end,
     }
+    -- discovery: how many mods I found, counted when it's read (the list is complete once start-up is over)
+    return setmetatable(b, { __metatable = 'locked', __index = function(_, k)
+      if k == 'discovery' then return mod_list().n .. ' declared entries' end
+    end })
+  end
+
+  -- ModOptionsMenu's rules: an id up to 96 characters, a label, toggle / choice (2 to 16) / slider; the same id again
+  -- is fine only with the same kind, default and range. o: { kind, s (the row's spec), default, n, min, max, step }.
+  -- (gap, profile and profiles are the other loader's window layout: taken and left unused.) A slider step is
+  -- optional here: without one the row moves in twentieths, as it always did in my menu.
+  local function mom_option(id, spec)
+    if type(id) ~= 'string' or id == '' or #id > 96 or id:find('%c') or type(spec) ~= 'table' then return nil, 'invalid option registration' end
+    local ty, label = spec.type, spec.label
+    if not ((type(label) == 'string' and label:find('%S')) or type(label) == 'function') then return nil, 'invalid option registration' end
+    if ty ~= 'toggle' and ty ~= 'choice' and ty ~= 'slider' then return nil, 'type must be toggle, choice or slider' end
+    if ty == 'choice' and (type(spec.choices) ~= 'table' or #spec.choices < 2 or #spec.choices > 16) then return nil, 'choices must list 2 to 16 names' end
+    local st = ty == 'slider' and spec.step or nil
+    if ty == 'slider' and not (finite(spec.min) and finite(spec.max) and spec.min < spec.max
+        and (st == nil or st == 0 or (finite(st) and st > 0 and st <= spec.max - spec.min))) then
+      return nil, 'slider needs min < max and 0 < step <= max - min'
+    end
+    local s = { type = ty, label = label, default = spec.default, choices = spec.choices, min = spec.min, max = spec.max,
+                step = st, description = spec.description }
+    local d = spec.default
+    if ty == 'toggle' then d = d == true elseif ty == 'choice' then d = d or 1 else d = d or spec.min end
+    return { kind = ty, s = s, default = clean(s, d), n = ty == 'choice' and #spec.choices or nil, min = s.min, max = s.max, step = st }
+  end
+  local function mom_same(a, b)
+    if a.kind ~= b.kind or a.default ~= b.default then return false end
+    if a.kind == 'choice' then return a.n == b.n end
+    if a.kind == 'slider' then return a.min == b.min and a.max == b.max and a.step == b.step end
+    return true
+  end
+  -- a number as an option's value, or nil when it isn't one (a slider's is snapped into its range)
+  local function mom_number(o, v)
+    if type(v) ~= 'number' or v ~= v then return nil end
+    if o.kind == 'choice' then return (v % 1 == 0 and v >= 1 and v <= o.n) and v or nil end
+    if o.kind == 'slider' and finite(v) then return clean(o.s, v) end
+    return nil
+  end
+  local function mom_decode(o, text)
+    if type(text) ~= 'string' then return nil end
+    text = text:match('^%s*(.-)%s*$')
+    if o.kind == 'toggle' then
+      if text == 'true' then return true elseif text == 'false' then return false end
+      return nil
+    end
+    return mom_number(o, tonumber(text))
+  end
+  -- key=value or id<TAB>value lines of another loader's settings file (1 MB at most), read once; {} when it's not there
+  local function old_values(path, tab)
+    local t = shim.seeded[path]
+    if t then return t end
+    t = {}
+    local f = ctx.open(path, 'rb')
+    if f then
+      local ok, text = pcall(f.read, f, 1048576)
+      pcall(f.close, f)
+      if ok and type(text) == 'string' then
+        for k, v in text:gmatch(tab and '([^\t\r\n]+)\t([^\r\n]*)' or '([^=\r\n]+)=([^\r\n]*)') do t[k] = v end
+      end
+    end
+    shim.seeded[path] = t
+    return t
+  end
+  -- An option I have no value saved for yet takes the one a player set with the other loaders: the settings
+  -- window's mom_<mod>_settings.txt next to my log, else the old menu's ModOptionsMenu.values in %LOCALAPPDATA%.
+  -- Once carried over it's mine (marked, so going back to the default later never brings the old value back).
+  local function seed(r, o, id, base)
+    if get('ModOptionsMenu', r.key) ~= nil or get('ModOptionsMenu.seeded', r.key) ~= nil then return end
+    local v, from = nil, nil
+    local gdir, ldir = M.GAME_DIR or ctx.DIR, M.OLD_DIR or ctx.OLD_DIR
+    if gdir and base then
+      from = 'mom_' .. base .. '_settings.txt'
+      v = mom_decode(o, old_values(gdir .. from)[(id:gsub('[^%w_]', '_'))])
+    end
+    if v == nil and ldir then
+      local p = ldir .. 'CowboyBingus\\Helldivers2\\Logs\\ModOptionsMenu.values'
+      local t = old_values(p, true)
+      if next(t) == nil then t = old_values(p .. '.bak', true) end
+      from = 'ModOptionsMenu.values'
+      v = mom_decode(o, t[id])
+    end
+    if v == nil then return end
+    put('ModOptionsMenu.seeded', r.key, true)
+    if v ~= r.value then
+      r.value = v
+      if v ~= r.default then put('ModOptionsMenu', r.key, v) end
+    end
+    if not shim.said[from] then shim.said[from] = true; log('ModOptionsMenu: carried over the values set in ' .. from) end
+  end
+  -- a row moved out of its look-alike's home group into the mod's own
+  -- (once: a binding registered again after its mod was started again keeps the place its row has)
+  local function place(r, home, key, title)
+    if r.placed then return group_of[r.placed] end
+    local g = group(key, title)
+    local h = group_of[home]
+    if h and h ~= g then
+      for i = #h.rows, 1, -1 do if h.rows[i] == r then table.remove(h.rows, i) end end
+      g.rows[#g.rows + 1] = r
+      ver.layout = ver.layout + 1
+    end
+    r.placed = key
+    return g
   end
   local function mom_row(id) return rows_by_id['ModOptionsMenu|' .. tostring(id)] end
   local function make_mom(owner)
-    local mom = { api = 1, version = 2, max_mods = MOM_MODS, max_options = MOM_OPTIONS }
+    local mom = { api = 1, version = 3, max_mods = MOM_MODS, max_options = MOM_PER_MOD, revision = REVISION,
+                  window = ctx.LOADER .. ' options menu' }
+    -- (the mod's own short name for its heading: mods/<author>/<name> -> "name")
+    local tail = owner:match('^mods/') and owner:match('([%w_]+)$') or nil
     function mom.register_option(id, spec)
-      if type(id) ~= 'string' or type(spec) ~= 'table' then return false, 'register_option(id, spec)' end
-      local s = { type = spec.type, label = spec.label, default = spec.default, choices = spec.choices, min = spec.min,
-                  max = spec.max, step = spec.step, description = spec.description }
-      if mom_row(id) then return true end
-      local title = text_of(spec.mod or 'MODS')
-      local key = 'mom:' .. title
-      local count = shim.count
-      if count.rows >= MOM_OPTIONS then return false, 'register_option: ' .. MOM_OPTIONS .. ' options already' end
-      if not group_of[key] and count.mods >= MOM_MODS then return false, 'register_option: ' .. MOM_MODS .. ' mods already' end
-      local r, err = add_row(owner, 'ModOptionsMenu', 'MODS', id, s)
+      local o, why = mom_option(id, spec)
+      if not o then return false, why end
+      local r = mom_row(id)
+      if r then
+        if not r.mom or mom_same(r.mom, o) then return true end
+        return false, 'option already registered differently'
+      end
+      local mod_id = spec.mod_id
+      if mod_id ~= nil and (type(mod_id) ~= 'string' or #mod_id > 64 or not mod_id:find('^[%w_%.%-/:]+$')) then return false, 'invalid mod_id' end
+      local title = spec.mod ~= nil and text_of(spec.mod) or (tail and (tail:gsub('_', ' '))) or 'MODS'
+      -- (without a mod_id, an option joins the heading of that title, the one a mod_id made too)
+      local key = mod_id and ('mom#' .. mod_id) or shim.titles[title] or ('mom:' .. title)
+      local count, g, per = shim.count, group_of[key], owner .. '|' .. key
+      if count.rows >= MOM_PER_MOD * MOM_MODS then return false, 'register_option: ' .. MOM_PER_MOD * MOM_MODS .. ' options already' end
+      if (shim.per[per] or 0) >= MOM_PER_MOD then return false, 'mod already has ' .. MOM_PER_MOD .. ' options' end
+      if not g and count.mods >= MOM_MODS then return false, 'all ' .. MOM_MODS .. ' mod categories are in use' end
+      local err
+      r, err = add_row(owner, 'ModOptionsMenu', 'MODS', id, o.s)
       if not r then return false, err end
+      r.mom = o
       count.rows = count.rows + 1
-      -- each spec.mod gets its own heading: move the row there
-      if not group_of[key] then count.mods = count.mods + 1 end
-      local g = group(key, title)
-      local home = group_of['ModOptionsMenu']
-      if home and home ~= g then
-        for i = #home.rows, 1, -1 do if home.rows[i] == r then table.remove(home.rows, i) end end
-        g.rows[#g.rows + 1] = r
-        ver.layout = ver.layout + 1
+      if not g then count.mods = count.mods + 1 end
+      -- each mod (mod_id, else spec.mod, else the mod itself) gets its own heading: the row moves there
+      place(r, 'ModOptionsMenu', key, title)
+      shim.per[per] = (shim.per[per] or 0) + 1
+      shim.home[owner] = shim.home[owner] or key
+      shim.titles[title] = shim.titles[title] or key
+      local base = (mod_id or tail or title):lower():gsub('[^%w]+', '_'):match('^_*(.-)_*$')
+      seed(r, o, id, base ~= '' and base or 'mod')
+      -- on_change callbacks asked for before the option existed
+      local p = shim.pending[id]
+      if p then
+        shim.pending[id] = nil
+        for _, c in ipairs(p) do on_change(r, c.owner, function(v) return c.fn(v, id) end) end
       end
       return true
     end
     function mom.get(id) local r = mom_row(id); if r then return r.value end end
     function mom.set(id, v)
       local r = mom_row(id)
-      if not r then return false end
+      if not r then return false, 'unknown option' end
+      local o = r.mom
+      if o then
+        if o.kind ~= 'toggle' then v = mom_number(o, v) end
+        if (o.kind == 'toggle' and type(v) ~= 'boolean') or v == nil then return false, 'invalid value' end
+      end
       local a = recs[owner]
       if a then as_caller(a, set_row, r, v) else set_row(r, v) end
       return true
     end
     function mom.on_change(id, fn)
+      if type(id) ~= 'string' or type(fn) ~= 'function' then return false, 'invalid callback' end
       local r = mom_row(id)
-      if r and type(fn) == 'function' then return on_change(r, owner, function(v) return fn(v, id) end) end
-      return false
+      if r then return on_change(r, owner, function(v) return fn(v, id) end) end
+      local p = shim.pending[id] or {}
+      if #p >= 64 then return false end
+      p[#p + 1] = { owner = owner, fn = fn }
+      shim.pending[id] = p
+      return true
     end
     function mom.ready() return true end
     return mom
   end
+
+  -- ModBindingsMenu: each binding is a key row in my menu (the rows chef.bind makes), under the mod's heading.
+  -- A default is a key name or a { button, device, trigger, modifiers } spec, or a list of them: the first keyboard or
+  -- mouse one without modifiers counts (mouse middle / extra_1 / extra_2 are "mouse 3/4/5"); press by default.
+  local MOUSE_NAMES = { middle = 'mouse 3', extra_1 = 'mouse 4', extra_2 = 'mouse 5' }
+  local MOUSE_BUTTONS = { ['mouse 3'] = { 'middle', 'middle button' }, ['mouse 4'] = { 'extra_1', 'x button 1' },
+                          ['mouse 5'] = { 'extra_2', 'x button 2' } }
+  local function mbm_default(spec)
+    if spec == nil then return '', 'press' end
+    local list = (type(spec) == 'table' and spec.button == nil) and spec or { spec }
+    for _, x in ipairs(list) do
+      local button, device, trigger = x, 'keyboard', 'press'
+      if type(x) == 'table' then
+        if type(x.modifiers) == 'table' and x.modifiers[1] ~= nil then button = nil end
+        button, device, trigger = button and x.button, x.device or 'keyboard', x.trigger or 'press'
+      end
+      if type(button) == 'string' and (trigger == 'press' or trigger == 'release' or trigger == 'hold') then
+        button = button:lower()
+        if device == 'mouse' then button = MOUSE_NAMES[button] elseif device ~= 'keyboard' then button = nil end
+        if button then return button, trigger end
+      end
+    end
+    return '', 'press'
+  end
+  -- a key's engine index ({ index, the pressed call, the held call }), asked once per name. No index (the keyboard
+  -- isn't ready in the first frames on some setups) is false for 2 s, then asked again; a call that failed or was
+  -- skipped (it crashed a launch for the mod asking) isn't an answer: nothing is kept, and the next mod asks again.
+  local function key_ref(owner, name)
+    local k = shim.kidx[name]
+    if k or (k == false and ctx.now() < (shim.kat[name] or 0)) then return k end
+    local answered = true
+    k = false
+    if MOUSE_BUTTONS[name] then
+      for _, n in ipairs(MOUSE_BUTTONS[name]) do
+        local i, e = guarded(owner, 'Mouse.button_index', fn_of('Mouse.button_index'), n)
+        if type(i) == 'number' then k = { i, 'Mouse.pressed', 'Mouse.button' }; break end
+        if e ~= nil then answered = false end
+      end
+    else
+      local i, e = guarded(owner, 'Keyboard.button_index', fn_of('Keyboard.button_index'), name)
+      if i ~= nil then k = { i, 'Keyboard.pressed', 'Keyboard.button' } elseif e ~= nil then answered = false end
+    end
+    if k then shim.kidx[name] = k elseif answered then shim.kidx[name], shim.kat[name] = false, ctx.now() + 2 end
+    return k
+  end
+  -- went down this frame (how 2) or held (how 3); the engine call is the asking mod's
+  local function key_state(owner, b, how)
+    local name = b.row.value
+    if name == 'off' then return false end
+    local k = key_ref(owner, name)
+    if not k then return false end
+    local v = guarded(owner, k[how], fn_of(k[how]), k[1])
+    return v == true or (type(v) == 'number' and v > 0.5)
+  end
+  local function mbm_is_down(owner, id)
+    local b = shim.keys[id]
+    if b == nil then return nil end
+    if b.row.value == 'off' then return false end
+    if menu.open then return false end                       -- my menu has the keys while it's open
+    if b.trigger == 'press' then return key_state(owner, b, 2) end
+    if b.trigger == 'hold' then return key_state(owner, b, 3) end
+    -- release: down last frame, up this one (sampled in svc.frame while some mod keeps asking)
+    b.asked = shim.frame
+    return b.prev == true and not b.now
+  end
+  local function make_mbm(owner)
+    local tail = owner:match('^mods/') and owner:match('([%w_]+)$') or nil
+    local k = { api = 1, version = 4, capacity = 36, loader = REVISION, window = ctx.LOADER .. ' options menu',
+                extended = setmetatable({ devices = { 'keyboard', 'mouse' }, triggers = { 'press', 'release', 'hold' } },
+                  { __index = function(_, f) if f == 'count' then return shim.count.keys end end }) }
+    function k.register_binding(id, label, slot, options)
+      if type(id) ~= 'string' or id == '' or #id > 96 or id:find('%c') or (slot ~= nil and type(slot) ~= 'number')
+         or (options ~= nil and type(options) ~= 'table') then
+        return false, 'invalid binding registration'
+      end
+      options = options or {}
+      local text = type(label) == 'number' and id or ((type(label) == 'string' or type(label) == 'function') and text_of(label)) or nil
+      if not text or not text:find('%S') or #text > 127 then return false, 'invalid binding registration' end
+      local category = nil
+      if options.category ~= nil then
+        category = type(options.category) == 'string' and options.category:find('%S') and options.category or nil
+        if not category or #category > 64 then return false, 'invalid binding category' end
+      end
+      local b = shim.keys[id]
+      if b then
+        if b.label == text and b.slot == slot then return true end
+        return false, 'binding already registered differently'
+      end
+      if shim.count.keys >= 36 * MOM_MODS then return false, 'all ' .. 36 * MOM_MODS .. ' bindings are in use' end
+      local name, trigger = mbm_default(options.default)
+      local r, err = add_row(owner, 'ModBindingsMenu', 'KEYS', id, { type = 'key', default = name ~= '' and name or 'off', label = text })
+      if not r then return false, err end
+      local title = category or (tail and (tail:gsub('_', ' '))) or 'MODS'
+      local key = category and (shim.titles[category] or 'mom:' .. category) or shim.home[owner] or shim.titles[title] or ('mom:' .. title)
+      place(r, 'ModBindingsMenu', key, title)
+      shim.titles[title] = shim.titles[title] or key
+      b = { id = id, label = text, slot = slot, trigger = trigger, row = r, owner = owner }
+      shim.keys[id] = b
+      if trigger == 'release' then shim.rel[#shim.rel + 1] = b end
+      shim.count.keys, shim.rev = shim.count.keys + 1, shim.rev + 1
+      note_conflicts()
+      return true
+    end
+    function k.is_down(id) return mbm_is_down(owner, id) end
+    function k.ready() return true end
+    -- poll(ids, out): is_down of each, with pressed / released since this out table's last poll
+    function k.poll(ids, out)
+      if type(ids) ~= 'table' or type(out) ~= 'table' then return false, 'invalid poll arguments' end
+      for _, f in ipairs({ 'down', 'pressed', 'released', 'last' }) do
+        if out[f] == nil then out[f] = {} elseif type(out[f]) ~= 'table' then return false, 'invalid poll arguments' end
+      end
+      for i = 1, #ids do
+        local down = mbm_is_down(owner, ids[i])
+        local was = out.last[i] == true
+        out.down[i], out.pressed[i], out.released[i], out.last[i] = down, down == true and not was, was and down ~= true, down == true
+      end
+      return true
+    end
+    -- set_binding(id, spec): {} clears it, nil gives the default back
+    function k.set_binding(id, spec)
+      local b = shim.keys[id]
+      if b == nil then return false, 'not an extended binding' end
+      local name
+      if spec == nil then name = b.row.default
+      elseif type(spec) == 'table' and spec.button == nil and spec[1] == nil then name = 'off'
+      else
+        name = mbm_default(spec)
+        if name == '' then return false, 'invalid binding' end
+      end
+      local a = recs[owner]
+      if a then as_caller(a, set_row, b.row, name) else set_row(b.row, name) end
+      return true
+    end
+    function k.binding(id)
+      local b = shim.keys[id]
+      if b == nil then return nil end
+      local name = b.row.value
+      if name == 'off' then return {} end
+      local button = name
+      for m, n in pairs(MOUSE_NAMES) do if n == name then button = m end end
+      return { { MOUSE_BUTTONS[name] and 'mouse' or 'keyboard', button, modifiers = {}, trigger = b.trigger } }
+    end
+    function k.binding_info(id)
+      local b = shim.keys[id]
+      if b == nil then return nil end
+      local v, d = b.row.value, b.row.default
+      return { backend = 'extended', state = (v == 'off' and d ~= 'off') and 'cleared' or (v == d and 'default' or 'set') }
+    end
+    -- revision: one more for every binding registered (any mod's)
+    return setmetatable(k, { __index = function(_, f) if f == 'revision' then return shim.rev end end })
+  end
+
+  -- BingusRuntime: one runtime table for every mod (hashes, statuses, versions, hash_reads), read through each mod's
+  -- own BingusRuntime, which has its own shared() and guard(). A guard's install() puts its step / after on my frame
+  -- (never on the mod's update, which only runs as a hook for some mods), at most once a frame, and its stop on my
+  -- shutdown, with the API's error and clean-frame counting. (A failed update below the mod can't happen here, so a
+  -- guard never pauses.) Mods read the statuses (and each guard's status) as read-only views, each mod its own (a
+  -- rawset into a view changes only that mod's view, never what another mod reads); hashes and versions are each
+  -- mod's own writable tables over the shared ones; the shared table takes no new names, only a number for
+  -- hash_reads. (5.1 has no __pairs: a view can't be listed with pairs.)
+  local function list_without(list, drop)
+    local out = {}
+    for _, x in ipairs(list) do if not drop(x) then out[#out + 1] = x end end
+    return out
+  end
+  local function make_rt(owner, env)
+    local core = shim.rt
+    local own = {}
+    -- this mod's views: of the statuses, of each guard's status (by the status table), of the other shared tables
+    local views, status_views = {}, {}
+    views.statuses = setmetatable({}, { __metatable = 'locked',
+      __index = function(_, n)
+        local st = core.statuses[n]
+        if type(st) ~= 'table' then return st end
+        local v = status_views[st]
+        if not v then v = read_only(st, 'a guard\'s status'); status_views[st] = v end
+        return v
+      end,
+      __newindex = function() error('BingusRuntime.statuses is read-only', 2) end })
+    -- (only into the mod's own environment: another table could be one that other mods read)
+    function own.shared(e)
+      core.versions[1] = true
+      rawset(env, 'BingusRuntime', own)
+      return own
+    end
+    function own.guard(spec)
+      local name = type(spec) == 'table' and spec.name
+      if type(name) ~= 'string' or name == '' then error('guard name required', 0) end
+      own.shared(spec.env)
+      local had = core.statuses[name]
+      if had ~= nil and had.installed then error('guard ' .. name .. ' already installed', 0) end
+      -- (status is mine to write; the mods read it through their own views)
+      local status = { errors = 0, installed = false, lower_errors = 0, pauses = 0, state = 'new', name = name, version = 1 }
+      core.statuses[name] = status
+      local step, after, stop_fn, log_fn = spec.step, spec.after, spec.stop, spec.log
+      local most, clean_at = tonumber(spec.errors) or 8, tonumber(spec.clean) or 3600
+      -- (the counts are the guard's own; status shows them)
+      local g = { owner = owner, key = key_for('guard', name), stopped = false, errors = 0, clean = 0, bad = false, at = -1 }
+      local function say(msg) if type(log_fn) == 'function' then pcall(log_fn, msg) end end
+      local function stop(reason)
+        if g.stopped then return end
+        g.stopped = true
+        status.first_failure = status.first_failure or reason
+        status.state = 'stopped: ' .. reason
+        say(name .. ' stopped: ' .. reason)
+        if type(stop_fn) == 'function' then
+          local ok, e = pcall(stop_fn, reason)
+          if not ok then status.stop_error = err_text(e) end
+        end
+      end
+      local function failed(e)
+        g.bad, g.clean = true, 0
+        g.errors = g.errors + 1
+        status.errors = g.errors
+        local msg = err_text(e)
+        status.first_error = status.first_error or msg
+        if g.errors == 1 then status.burst_error = msg; say(name .. ' error: ' .. msg) end
+        if g.errors >= most then stop('stopped after ' .. most .. ' errors: ' .. tostring(status.burst_error)) end
+      end
+      function g.tick(dt)
+        if g.stopped or g.at == shim.frame then return end
+        g.at, g.bad = shim.frame, false
+        if type(step) == 'function' then local ok, e = pcall(step, dt); if not ok then failed(e) end end
+        if g.stopped then return end
+        if type(after) == 'function' then local ok, e = pcall(after); if not ok then failed(e) end end
+        if not g.bad then
+          g.clean = g.clean + 1
+          if g.clean == clean_at then g.errors, status.errors = 0, 0 end
+        end
+      end
+      function g.down()
+        if not g.stopped then
+          g.stopped = true
+          if type(stop_fn) == 'function' then
+            local ok, e = pcall(stop_fn, 'shutdown')
+            if not ok then status.stop_error = err_text(e) end
+          end
+        end
+        status.state = status.first_failure and ('stopped after: ' .. status.first_failure) or 'stopped'
+      end
+      local handle = { status = views.statuses[name] }
+      function handle.install()
+        if g.installed then error('guard ' .. name .. ' already installed', 0) end
+        if #shim.guards >= 256 then error('256 guards already installed', 0) end
+        g.installed, status.installed, status.state = true, true, 'running'
+        shim.guards[#shim.guards + 1] = g
+        return handle
+      end
+      function handle.stop(reason) stop(tostring(reason)) end
+      function handle.running() return g.installed == true and not g.stopped end
+      return handle
+    end
+    -- reads: the shared table (its statuses as a read-only view); writes: hash_reads only (a number), anything else
+    -- is refused and logged once per mod and name
+    local mine = {}
+    return setmetatable(own, { __metatable = 'locked',
+      __index = function(_, k)
+        -- (hashes and versions: the mod's own writable table over the shared one, so what it writes stays its own)
+        if k == 'hashes' or k == 'versions' then
+          local t = mine[k]
+          if not t then t = setmetatable({}, { __index = core[k], __metatable = false }); mine[k] = t end
+          return t
+        end
+        local v = views[k]
+        if v then return v end
+        v = core[k]
+        if type(v) == 'table' then v = read_only(v, 'BingusRuntime.' .. tostring(k)); views[k] = v end
+        return v
+      end,
+      __newindex = function(_, k, v)
+        if k == 'hash_reads' and type(v) == 'number' then rawset(core, k, v); return end
+        local said = owner .. '|rt|' .. tostring(k)
+        if not shim.refused[said] then
+          shim.refused[said] = true
+          log(fmt('[%s] BingusRuntime.%s = ...: refused (the shared table keeps hashes, statuses, versions and hash_reads)',
+            owner, tostring(k)))
+        end
+      end })
+  end
+  -- a stopped mod's look-alike hooks, guards, bindings (their release sampling with them; the key rows and their
+  -- saved values stay in my menu) and waiting on_change callbacks go. Lists a loop may be walking are replaced, not
+  -- changed in place.
+  function shim.forget(owner)
+    local mine = function(x) return x.owner == owner end
+    for _, L in ipairs({ shim.upd, shim.down }) do
+      for id, h in pairs(L.hooks) do if h.owner == owner then L.hooks[id], L.stale = nil, true end end
+      if L.stale and not L.walking then compact_hooks(L) end
+    end
+    shim.last, shim.rel = list_without(shim.last, mine), list_without(shim.rel, mine)
+    for _, g in ipairs(shim.guards) do if g.owner == owner then g.gone = true end end
+    shim.guards, shim.ended = list_without(shim.guards, mine), list_without(shim.ended, mine)
+    for id, b in pairs(shim.keys) do
+      if b.owner == owner then shim.keys[id], shim.count.keys = nil, shim.count.keys - 1 end
+    end
+    for id, p in pairs(shim.pending) do
+      for i = #p, 1, -1 do if p[i].owner == owner then table.remove(p, i) end end
+      if #p == 0 then shim.pending[id] = nil end
+    end
+  end
+  -- package.loaded's fallback in every mod's environment: another addon's module (true while it starts, or when it
+  -- returned nothing), nil when it isn't running
+  function svc.module_of(name)
+    if type(name) ~= 'string' or name:sub(1, 5) ~= 'mods/' then return nil end
+    local a = ctx.addon(name)
+    if not a or not a.on then return nil end
+    local m = a.module
+    -- (a trusted mod's module stays its own: only that it's running)
+    local sbx = svc.sandbox
+    if sbx and sbx.trusted and sbx.trusted(name) then return true end
+    if a.state == 'running' and type(m) == 'table' and (next(m) ~= nil or getmetatable(m) ~= nil) then return m end
+    return true
+  end
   function svc.install_shims(G)
     shim.bingus = rawget(G, 'CowboyBingusModLoader') == nil
     if shim.bingus then
-      rawset(G, 'CowboyBingusModLoader', make_bingus('bingus look-alike'))
-      log('look-alike: CowboyBingusModLoader (after_startup, capabilities, log_directory, open_log)')
+      local b = make_bingus('bingus look-alike')
+      rawset(G, 'CowboyBingusModLoader', b)
+      if rawget(G, 'HD2ModLoader') == nil then rawset(G, 'HD2ModLoader', b) end
+      log('look-alike: CowboyBingusModLoader and HD2ModLoader (the Bingus Shared Loader v21 / Boot Mod Loader API: '
+        .. 'on_update, on_shutdown, after_startup, open_log, game, modules, capabilities)')
     end
     shim.mom = rawget(G, 'ModOptionsMenu') == nil
     if shim.mom then
       rawset(G, 'ModOptionsMenu', make_mom('ModOptionsMenu'))
       log('look-alike: ModOptionsMenu (register_option, get, set, on_change, ready; rows in the ' .. ctx.LOADER .. ' options menu)')
     end
+    shim.keys_ok = rawget(G, 'ModBindingsMenu') == nil
+    if shim.keys_ok then
+      rawset(G, 'ModBindingsMenu', make_mbm('ModBindingsMenu'))
+      log('look-alike: ModBindingsMenu (register_binding, is_down, poll, set_binding, binding; keys in the ' .. ctx.LOADER .. ' options menu)')
+    end
   end
-  -- one mod's own pair, put straight into its environment (so the game's pair is never reached from it)
+  -- one mod's own set, put straight into its environment, whatever the game's globals hold (another loader's tables
+  -- there would hand a mod that loader's unchecked file access). A trusted mod gets no BingusRuntime: its shared
+  -- table is a place other mods read.
   function svc.bind_lookalikes(env, owner)
     if type(env) ~= 'table' or type(owner) ~= 'string' then return false end
-    if shim.bingus ~= false then rawset(env, 'CowboyBingusModLoader', make_bingus(owner)) end
-    if shim.mom ~= false then rawset(env, 'ModOptionsMenu', make_mom(owner)) end
+    local b = make_bingus(owner)
+    rawset(env, 'CowboyBingusModLoader', b)
+    rawset(env, 'HD2ModLoader', b)
+    rawset(env, 'ModOptionsMenu', make_mom(owner))
+    rawset(env, 'ModBindingsMenu', make_mbm(owner))
+    local sb = svc.sandbox
+    if not (sb and sb.trusted and sb.trusted(owner)) then rawset(env, 'BingusRuntime', make_rt(owner, env)) end
     return true
   end
 
@@ -1445,7 +2782,7 @@ function M.install(ctx)
       if g then g:close() end
       if type(src) == 'string' then
         local kind, mod = src:match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
-        if mod and mod:match(ctx.ALLOW) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
+        if mod and mod:match(ctx.ALLOW) and not mod:find('//', 1, true) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
           out[#out + 1] = { kind = kind, name = mod, file = 'dev:' .. (path:match('[^\\/]+$') or path), src = src, dev = true, path = path }
         else
           log('dev mode: ' .. path .. ' has no "-- HD2-Addon/Boot/Options: mods/<author>/<name>" first line')
@@ -1461,7 +2798,8 @@ function M.install(ctx)
 
   -- A mod that stopped (switched off after errors, failed to start, or about to be started again in dev mode): its menu
   -- rows keep their values but drop its change callbacks, its event subscriptions and waiting after_startup callbacks
-  -- end, the utilities drop its timers, jobs and what it spawned, and the HD2Runtime look-alike undoes what it made.
+  -- end, the utilities drop its timers, jobs and what it spawned, the HD2Runtime look-alike undoes what it made, and its
+  -- look-alike hooks (on_update, on_shutdown, guards) end.
   function svc.forget(owner)
     -- (its change callbacks on any row, a look-alike's shared ones too)
     for _, row in pairs(rows_by_id) do
@@ -1479,6 +2817,7 @@ function M.install(ctx)
     for i = #after, 1, -1 do if after[i].owner == owner then after[i].off = true; table.remove(after, i) end end
     if svc.util then svc.util.forget(owner) end
     if svc.runtime then svc.runtime.forget(owner) end
+    shim.forget(owner)
   end
 
   -- ---------------------------------------------------------------- the loader's hooks
@@ -1498,7 +2837,37 @@ function M.install(ctx)
     emit('startup')
     note_conflicts()
   end
-  function svc.frame()
+  -- dt: the game's update argument, handed on to the look-alike on_update hooks and guards
+  function svc.frame(dt)
+    -- the look-alike hooks first: the bindings that trigger on release, sampled (only while a mod that's on has asked
+    -- about one in the last 30 frames, and never while my menu has the keys); on_update(id, fn); the guards
+    local fno = shim.frame + 1
+    shim.frame = fno
+    if shim.rel[1] and not menu.open then
+      for i = 1, #shim.rel do
+        local b = shim.rel[i]
+        local a = recs[b.owner]
+        if b.asked and fno - b.asked <= 30 and (not a or a.on ~= false) then
+          local d = key_state(b.owner, b, 3)
+          -- (sampling that starts again begins from what the key is now: no release out of a stale sample)
+          b.prev, b.now, b.at = (b.at == fno - 1) and b.now or d, d, fno
+        end
+      end
+    end
+    if shim.upd.order[1] then run_hooks(shim.upd, 'on_update', dt) end
+    if shim.guards[1] then
+      local list, stopped = shim.guards, false
+      for i = 1, #list do
+        local g = list[i]
+        if not (g.stopped or g.gone) then run_as(g.owner, g.key, g.tick, dt) end
+        if g.stopped then stopped = true end
+      end
+      -- a stopped guard costs nothing a frame from then on: it waits in ended for my shutdown
+      if stopped then
+        for _, g in ipairs(shim.guards) do if g.stopped and not g.gone then shim.ended[#shim.ended + 1] = g end end
+        shim.guards = list_without(shim.guards, function(g) return g.stopped end)
+      end
+    end
     local w = ctx.world
     if w.stable and w.id ~= last_world then last_world = w.id; emit('world', w.id, w.mission == true) end
     -- while the loader looks again at a mission that may have ended (w.checking), it's still the mission it was: no
@@ -1518,7 +2887,18 @@ function M.install(ctx)
     menu_frame()
   end
   function svc.shutdown()
+    -- the guards stop first, then the look-alike's on_shutdown(id, fn) hooks; its on_shutdown(fn) ones run last (after
+    -- every mod's and boot script's shutdown), before the settings are saved and the mods' logs close
+    for _, list in ipairs({ shim.guards, shim.ended }) do
+      for i = 1, #list do run_as(list[i].owner, list[i].key, list[i].down) end
+    end
+    if shim.down.order[1] then run_hooks(shim.down, 'on_shutdown') end
     emit('shutdown')
+    for i = 1, #shim.last do
+      local c = shim.last[i]
+      local ok, err = run_as(c.owner, c.key, c.fn)
+      if not ok then log(fmt('[%s] on_shutdown(fn) #%d: %s', c.owner, i, err_text(err))) end
+    end
     if dirty then save_now() end
     for _, o in pairs(own_logs) do pcall(o.f.close, o.f) end
   end
@@ -1631,13 +3011,13 @@ function M.index(ctx, P)
   local t0, busy = P.clock(), 0
   local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
               compared = 0, read = 0, excl = 0 }
-  -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index
-  -- * 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
+  -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index *
+  -- 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
   -- table by up to 200,000, and each doubling of it is one step of tens of ms no pause can split. The number is the
-  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits
-  -- go with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits are told apart. The rare
-  -- second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's low byte into 256, so no
-  -- single table grows to 200,000 keys (one rehash of that is tens of ms too).
+  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits go
+  -- with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits
+  -- are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's
+  -- low byte into 256, so no single table grows to 200,000 keys (one rehash of that is tens of ms too).
   local wins, shads, wins_s, shads_s, tix, ntypes = {}, {}, {}, {}, {}, 0
   for b = 0, 255 do wins[b], shads[b] = {}, {} end
   local list = P.patches()
@@ -2025,9 +3405,21 @@ function M.data_name(owner, name)
   if type(owner) ~= 'string' or owner:sub(1, 5) ~= 'mods/' or #owner < 6 then return nil end
   return 'chef_data_' .. data_enc(owner:sub(6)) .. '__' .. data_enc(name) .. '.lua'
 end
+-- An owner's name flattened the way file names before 1.0.1 had it: mods/a/b -> a_b. A nested name (more than two
+-- parts) gets "_" and 8 hex digits of a hash of the whole name on top, so mods/a/b/c and mods/a/b_c never share a
+-- file (two-part names keep their old files). The hash: two 16-bit halves of a 32-bit one, since string.format's %x
+-- only goes to 2^31 on Windows.
+function M.flat_owner(owner)
+  local flat = owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_')
+  local _, slashes = owner:gsub('/', '')
+  if slashes <= 2 then return flat end
+  local h = 2166136261
+  for i = 1, #owner do h = (h * 31 + owner:byte(i)) % 4294967296 end
+  return flat .. '_' .. fmt('%04x%04x', floor(h / 65536), h % 65536)
+end
 -- the file name before 1.0.1 (not one to one: two pairs could share one), read once to move a table over
 function M.old_data_name(owner, name)
-  return 'chef_data_' .. owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_' .. name .. '.lua'
+  return 'chef_data_' .. M.flat_owner(owner) .. '_' .. name .. '.lua'
 end
 
 -- ------------------------------------------------------------------ install
@@ -2937,7 +4329,7 @@ function M.install(ctx, L)
       local mid = M.old_data_name(owner, name):sub(11, -5)
       for _, o in ipairs(L.found and L.found() or {}) do
         if type(o) == 'string' and o ~= owner then
-          local p = o:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_'
+          local p = M.flat_owner(o) .. '_'
           if #mid > #p and mid:sub(1, #p) == p then return false end
         end
       end
@@ -3018,14 +4410,14 @@ function M.install(ctx, L)
   util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
 
   -- ---------------------------------------------------------------- the performance monitor
-  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
-  -- cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot
-  -- script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on
-  -- the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a second I turn
-  -- the last second into averages a frame: each mod's milliseconds and its share of the frame (from the game's own
-  -- frame time), the worst single call, and the total.
-  -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
-  -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
+  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel (where "Monitor position" puts it)
+  -- with each mod's cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs,
+  -- a boot script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a,
+  -- shown on the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a
+  -- second I turn the last second into averages a frame: each mod's milliseconds and its share of the frame (from the
+  -- game's own frame time), the worst single call, and the total. Off, it costs one check a frame; nothing is drawn or
+  -- added up. Its own drawing (the loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its
+  -- own line, so it never counts against the loader or a mod.
   local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
   util.pm = pm
   -- the mods' time so far (the loader asks before and after its update, to find its own share)
@@ -3045,7 +4437,7 @@ function M.install(ctx, L)
       if b.a and b.a ~= b then b.a.pm_base, b.a.pm_max = b.a.pm_ms or 0, 0 end
     end
   end
-  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
+  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? \128-\255]', ' ')) end
   -- a boot script's name: an HD2-Boot mod's name, else its first comment line up to a bracket, else its patch file
   local function boot_name(b)
     if b.a and type(b.a.short) == 'string' then return b.a.short end      -- an HD2-Boot mod: its own name
@@ -3104,11 +4496,15 @@ function M.install(ctx, L)
                       { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
   -- The layout is the panel's 5 rects and one text per column of a line ({ x, y, text, color index }); each frame I
   -- draw them through ctx.text, whose fast path takes a whole text through one pcall.
-  local function pm_layout(ls, w, h)
+  -- place: the "Monitor position" row (1 top right, 2 top left, 3 middle right, 4 middle left, 5 bottom right,
+  -- 6 bottom left); the game draws its HUD over anything of mine, so the player picks a spot it leaves free
+  local function pm_layout(ls, w, h, place)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
     local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
-    local x0, y1 = w - pw - floor(w * 0.02), floor(h * 0.96)        -- top right, clear of the options menu (top left)
+    local right = place % 2 == 1
+    local x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
+    local y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
     local b = max(1, floor(px * 0.75))
     local out = { px = px, rects = {
       { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
@@ -3156,8 +4552,9 @@ function M.install(ctx, L)
     local w, h = ctx.screen()
     -- (laid out again when the screen size or the font changes: the game's font measures differently)
     local native = ctx.text_native and ctx.text_native() or false
-    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native then
-      pm.rects, pm.w, pm.h, pm.native = pm_layout(pm.lines, w, h), w, h, native
+    local place = util.perf_place and tonumber(util.perf_place.value) or 1
+    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place then
+      pm.rects, pm.w, pm.h, pm.native, pm.place = pm_layout(pm.lines, w, h, place), w, h, native, place
     end
     local cs = pm.cs or {}
     pm.cs = cs
@@ -3250,13 +4647,13 @@ services.sandbox = (function()
 --     functions, _G is its own environment, no require of the game's modules (require('_G') would hand out everything),
 --     no module() (package.seeall), and the metatables of its environment are locked
 --   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
---     and writes only .log .txt .json .csv .dat files in the loader's folder, never the loader's own files or another
+--     and writes only .log .txt .json .csv .dat .ini files in the loader's folder, never the loader's own files or another
 --     mod's saved tables
 -- It still can use: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
 -- os.clock/time/date/getenv, reading and writing its own files.
--- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, so one mod changing a library
--- function changes it only for itself. The checks below use functions taken before any mod runs, so no mod can bend
--- them.
+-- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, and of every engine table
+-- (stingray, Unit, World ...), so one mod changing a library or engine function changes it only for itself. The checks
+-- below use functions taken before any mod runs, so no mod can bend them.
 -- Engine tables that aren't for mods are out of its view too (stingray and the globals alike): native code
 -- (PluginManager), other network routes (Http, WebSocket), the Localizer (it ends the game), the lobby (joining one and
 -- writing what other players read: every *Lobby* table and Network's lobby calls) and GameSession's writes.
@@ -3267,7 +4664,7 @@ services.sandbox = (function()
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.1.0' }
+local M = { version = '1.2.0' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -3280,9 +4677,12 @@ local t_concat = table.concat
 local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
-local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true }
+local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true }
 local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true, ['clock$'] = true }
-for n = 1, 9 do DEVICES['com' .. n] = true; DEVICES['lpt' .. n] = true end
+-- (0 to 9, and the superscripts 1 2 3 Windows also counts as their digits, in the ANSI code page)
+for _, n in ipairs({ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '\185', '\178', '\179' }) do
+  DEVICES['com' .. n] = true; DEVICES['lpt' .. n] = true
+end
 local LIBS = { 'string', 'table', 'math', 'coroutine', 'bit' }
 local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
 local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
@@ -3298,19 +4698,20 @@ M.CALLS_OFF = {
   -- that mentions the lobby or a connection: a new call in a game update is left out until it's known to be a read
   Network = function(f)
     f = s_lower(f)
-    local read = f == 'peer_id' or f == 'game_session' or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_')
-      or s_match(f, '^num_')
+    local read = f == 'peer_id' or f == 'game_session' or f == 'object_info' or s_match(f, '^is_') or s_match(f, '^has_')
+      or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
     return (s_find(f, 'lobby', 1, true) or s_find(f, 'server', 1, true) or s_find(f, 'join', 1, true)
       or s_find(f, 'connect', 1, true) or s_find(f, 'create', 1, true) or s_find(f, 'leave', 1, true)
       or s_find(f, 'send', 1, true) or s_find(f, 'dump', 1, true)) ~= nil
   end,
   -- GameSession the same way: its reads stay (in_session, peers, game_session_host, game_object_field / _exists /
-  -- _owner, is_ / has_ / get_ / num_), every write to what other players see is left out, and so is a call a game update adds
+  -- _owner / _is_type, objects_owned_by, is_ / has_ / get_ / num_), every write to what other players see is left out,
+  -- and so is a call a game update adds. (Network.object_info, a game object type's field list, is a read too.)
   GameSession = function(f)
     f = s_lower(f)
     local read = f == 'in_session' or f == 'peers' or f == 'game_session_host' or f == 'game_object_field'
-      or f == 'game_object_exists' or f == 'game_object_owner'
+      or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
     return (s_find(f, 'send', 1, true) or s_find(f, 'set', 1, true) or s_find(f, 'create', 1, true)
@@ -3335,7 +4736,8 @@ local function names_of(rest)
     if name ~= '.' then
       if s_find(name, '[<>"|%?%*~%c]') then return nil, 'that file name is off limits' end
       if s_find(name, '[%. ]$') then return nil, 'a name ending in a dot or a space is off limits' end
-      if DEVICES[s_match(name, '^([^%.]*)')] then return nil, 'device names are off limits' end
+      -- (the part before the first dot, spaces after it dropped: Windows still opens "nul .txt" as the device)
+      if DEVICES[s_lower((s_gsub(s_match(name, '^([^%.]*)'), ' +$', '')))] then return nil, 'device names are off limits' end
       names[#names + 1] = name
     end
   end
@@ -3351,7 +4753,7 @@ function M.install(ctx)
   local real_open = type(io_) == 'table' and io_.open or nil
   local io_type = type(io_) == 'table' and io_.type or function() return nil end
   local overrides = ctx.overrides or {}
-  local sb = { denied = 0 }
+  local sb = { denied = 0 }        -- (the loader sets sb.module_of and sb.on_global once I'm installed)
   local envs = setmetatable({}, { __mode = 'k' })        -- every mod environment I made -> its mod's name
   local full = setmetatable({}, { __mode = 'k' })        -- environments with the game's whole Lua (other boot scripts)
 
@@ -3428,12 +4830,12 @@ function M.install(ctx)
     local file = names[#names]
     local ext = s_match(file, '%.(%w+)$')
     if root == ODIR and not (#names == 1 and ext and MOD_EXT[ext]) then
-      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat files'
+      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini files'
     end
     if not writes then return true, root, names, ext end
     if root ~= WDIR then return nil, 'mods write only in the loader\'s folder' end
     if #names ~= 1 then return nil, 'mods write only straight into the loader\'s folder, not below it' end
-    if not (ext and MOD_EXT[ext]) then return nil, 'mods write only .log .txt .json .csv .dat files' end
+    if not (ext and MOD_EXT[ext]) then return nil, 'mods write only .log .txt .json .csv .dat .ini files' end
     if not s_match(file, '^[%w_%-%.]+$') then return nil, 'file names are letters, digits, _ - and .' end
     if s_sub(file, 1, #OWN) == OWN or s_sub(file, 1, 11) == 'chef_loader' or s_sub(file, 1, 10) == 'chef_data_' then
       return nil, 'the loader\'s own files and saved tables are off limits (chef.save_table saves a table)'
@@ -3452,6 +4854,14 @@ function M.install(ctx)
       if opt == nil or opt == 'collect' or opt == 'count' or opt == 'step' then return collectgarbage(opt, arg) end
       return 0
     end,
+    -- ffi and jit read as false, never as the game's: the game has neither since 7.2.0, so one in its globals is
+    -- another loader's stand-in, which makes memory reads look like they work while they return nothing
+    ffi = false, jit = false,
+    -- the loaders' own tables in the game's globals (another loader's, or mine) read as false: each mod gets my
+    -- look-alikes as its own (services.bind_lookalikes) and the chef table, and another loader's tables hand out
+    -- what this space takes away (its open_log writes any path)
+    __boot_mod_loader = false, CowboyBingusModLoader = false, HD2ModLoader = false, ModOptionsMenu = false,
+    ModBindingsMenu = false, BingusRuntime = false, ChefSharedLoaderHandoff = false,   -- (ChefSharedLoader: read-only, kept)
   }
   local string_mt = getmetatable('')
   -- the engine as mods see it: stingray and the globals without the tables (and calls) that aren't for them. A table
@@ -3503,6 +4913,50 @@ function M.install(ctx)
     if type(k) == 'string' and s_match(k, '^%u') then engine_names[k] = base[k] end
   end
   if base.stingray ~= nil then engine_names.stingray = base.stingray end
+  -- Every engine table (stingray's tables, a capitalized global holding the engine's own functions, and the trimmed
+  -- ones above): each mod gets its own copy of each (sb.env), with a copy of its metatable (Vector3 and the like are
+  -- called), so what a mod writes into one (a replaced engine function, a field of its own) stays in its copy, never
+  -- reaching the game, the loader or another mod. Other capitalized globals (a boot script's tables) aren't copied.
+  local is_engine = {}
+  local s_dump = string.dump
+  local function native_fns(t)                    -- (a table with a C function in it: string.dump refuses those)
+    for _, f in pairs(t) do if type(f) == 'function' and not pcall(s_dump, f) then return true end end
+    return false
+  end
+  if type(S) == 'table' then for _, v in pairs(S) do if type(v) == 'table' then is_engine[v] = true end end end
+  for _, v in pairs(engine_names) do if type(v) == 'table' and not is_engine[v] and native_fns(v) then is_engine[v] = true end end
+  -- (the real stingray reached from an engine table: the mod's own stingray)
+  if type(S) == 'table' and base.stingray then as_seen[S] = base.stingray end
+  for real, seen in pairs(as_seen) do is_engine[real] = true; if seen then is_engine[seen] = true end end
+  if engine_names.stingray then is_engine[engine_names.stingray] = true end
+  local raw_mt = type(dbg) == 'table' and type(dbg.getmetatable) == 'function' and dbg.getmetatable or getmetatable
+  -- (and every table inside them and their metatables, however deep: a mod's copy holds its own copies of those too.
+  -- The game's globals, its libraries and package are never copied (is_engine false): reached from an engine table,
+  -- a mod finds its own (its environment, its library copies), or nothing)
+  do
+    is_engine[G], is_engine[base], is_engine[string_mt or G] = false, false, false
+    for _, n in ipairs({ 'string', 'table', 'math', 'coroutine', 'bit', 'os', 'io', 'debug', 'package' }) do
+      local lib = rawget(G, n)
+      if type(lib) == 'table' then is_engine[lib] = false end
+      if n == 'package' and type(lib) == 'table' and type(rawget(lib, 'loaded')) == 'table' then is_engine[lib.loaded] = false end
+    end
+    local level = {}
+    for t, e in pairs(is_engine) do if e then level[#level + 1] = t end end
+    while level[1] do
+      local nextl = {}
+      for _, t in ipairs(level) do
+        for _, v in pairs(t) do
+          if type(v) == 'table' and is_engine[v] == nil then is_engine[v] = true; nextl[#nextl + 1] = v end
+        end
+        local mt = raw_mt(t)
+        if type(mt) == 'table' and is_engine[mt] == nil then is_engine[mt] = true; nextl[#nextl + 1] = mt end
+      end
+      level = nextl
+    end
+  end
+  -- (the engine's names in base read as false from now on: a mod that sets its stingray or Unit to nil finds nothing
+  -- behind it, not the shared tables; each environment holds its own copies as its own keys)
+  for k, v in pairs(engine_names) do if is_engine[v] then base[k] = false end end
   -- sb.on_global(env, key, value): told of each new global a mod sets (the runtime look-alike shares some between its
   -- mods); the assignment itself always happens first
   local env_mt = { __index = base, __metatable = 'locked', __newindex = function(t, k, v)
@@ -3517,6 +4971,8 @@ function M.install(ctx)
   -- player said yes, asked = fn(why) } }. Set before the mod's environment is made (its os gets remove and rename).
   local grants = {}
   function sb.grant(owner, g) if type(owner) == 'string' and type(g) == 'table' then grants[owner] = g end end
+  -- is this mod one the loader trusts (granted more)?
+  function sb.trusted(owner) return grants[owner] ~= nil end
   local function own_file(g, p)
     if not (LDIR and g.files) or s_sub(p, 1, #LDIR) ~= LDIR then return false end
     local names = names_of(s_sub(p, #LDIR + 1))
@@ -3548,10 +5004,13 @@ function M.install(ctx)
     return nil
   end
   -- What a patch main file holds: its table of contents read, and every Lua resource in it read too. A patch passes
-  -- when it doesn't replace the game's boot script and each Lua resource in it is only comment lines (so nothing in
-  -- it can run; a long comment, --[[ ]], can end mid-line before code, so those are refused). -> true, has_marker
+  -- when it replaces neither the game's boot script nor my core and each Lua resource in it is only comment lines (so
+  -- nothing in it can run; a long comment, --[[ ]], can end mid-line before code, so those are refused). -> true, has_marker
   -- (a Lua resource starting with marker) | nil, why
   local BOOT_ID, LUA_TYPE = '\250\149\024\105\147\223\118\244', '\226\023\209\044\250\141\078\161'
+  -- my core (mods/chef_shared_loader/core_1): the game's require loads the copy in the highest patch, so a patch
+  -- carrying one would take the loader's place
+  local CORE_ID = '\154\087\100\126\056\137\119\194'
   local function u32(s, i) local a, b, c, d = s_byte(s, i, i + 3); return a + b * 256 + c * 65536 + d * 16777216 end
   local function only_comments(text)
     for line in s_gmatch(text .. '\n', '([^\r\n]*)[\r\n]') do   -- (Lua ends a comment at \r as well as \n)
@@ -3588,6 +5047,7 @@ function M.install(ctx)
         local o = i * 80
         if not listed[s_sub(rows, o + 9, o + 16)] then return nil, 'a patch file layout I don\'t know' end
         if s_sub(rows, o + 1, o + 8) == BOOT_ID then return nil, 'it would replace the game\'s boot script' end
+        if s_sub(rows, o + 1, o + 8) == CORE_ID then return nil, 'it would replace the loader\'s core' end
         if s_sub(rows, o + 9, o + 16) == LUA_TYPE then
           local at = u32(rows, o + 17) + u32(rows, o + 21) * 4294967296
           -- (seek takes a 32-bit long on the game's platform: an offset past 2 GB would wrap)
@@ -3718,7 +5178,6 @@ function M.install(ctx)
     local env = setmetatable({}, env_mt)
     envs[env] = owner
     env._G = env
-    for k, v in pairs(engine_names) do rawset(env, k, v) end
     for _, n in ipairs(LIBS) do
       local lib = rawget(G, n)
       if type(lib) == 'table' then env[n] = copy(lib) end
@@ -3726,19 +5185,99 @@ function M.install(ctx)
     -- (string.dump only makes bytecode, which load and loadstring refuse anyway)
     if env.string then env.string.dump = nil end
     local string_view = { __index = env.string }     -- getmetatable('') gives this, not the game's
+    -- this mod's copies of the engine tables (one per table: its Unit and its stingray.Unit are the same copy), and
+    -- what the game's own globals and libraries are for it (its environment, its copies)
+    local mine, real_by_copy, fwd, later = { [G] = env }, setmetatable({}, { __mode = 'k' }), {}, {}
+    for _, n in ipairs(LIBS) do local lib = rawget(G, n); if type(lib) == 'table' then mine[lib] = env[n] end end
+    if string_mt then mine[string_mt] = string_view end
+    -- own(t): this mod's copy of an engine table; any = true: of any table (a metatable, its __index / __newindex,
+    -- an engine object's methods). Every table reached through a copy is copied too (one copy per table, cycles
+    -- included: mine is filled before the fields), so nothing reached through a copy is the real one; a real table
+    -- trimmed for mods gives its trimmed view (or nothing); the game's globals and libraries give the mod's own (or
+    -- nothing). d: how deep; past 200 tables down a chain, a copy is made empty and filled after the outermost call,
+    -- so a long chain never runs out of stack.
+    local own
+    -- (c gets a copy of t's metatable: called as the real one, the real table of the copy called gets its __call, or
+    -- the metatable's own __call when the real table's metatable has changed since; one forwarder per metatable, shared
+    -- by the tables that share it; a locked metatable gets one too)
+    local function own_mt(t, c, d)
+      local mt = raw_mt(t)
+      if mt == nil then return end
+      local m = type(mt) == 'table' and own(mt, true, d + 1) or {}
+      if type(mt) ~= 'table' then
+        -- (a locked metatable: read as the real one, what it reads copied)
+        m.__index = function(_, k) return own(t[k], true) end
+      end
+      if type(m) == 'table' and not fwd[m] and (type(mt) ~= 'table' or rawget(mt, '__call') ~= nil) then
+        local orig = type(mt) == 'table' and rawget(mt, '__call') or nil
+        fwd[m] = true
+        rawset(m, '__call', function(self, ...)
+          local r = real_by_copy[self]
+          if r and raw_mt(r) == mt then return r(...) end
+          if orig then return orig(self, ...) end
+          error('attempt to call a table value', 2)
+        end)
+      end
+      if type(m) == 'table' then setmetatable(c, m) end
+    end
+    function own(t, any, d)
+      if type(t) ~= 'table' then return t end
+      local c = mine[t]
+      if c ~= nil then return c end
+      if is_engine[t] == false then return nil end
+      if as_seen[t] ~= nil then
+        if not as_seen[t] then return nil end
+        return own(as_seen[t], true, d)
+      end
+      if not (any or is_engine[t]) then return t end
+      c = {}
+      mine[t], real_by_copy[c] = c, t
+      if d and d > 200 then later[#later + 1] = t; return c end
+      for k, v in pairs(t) do c[k] = own(v, true, (d or 0) + 1) end
+      own_mt(t, c, d or 0)
+      if not d then
+        -- (the copies left empty down a long chain, filled now, each from the top again)
+        while later[1] do
+          local q = table.remove(later)
+          local cq = mine[q]
+          for k, v in pairs(q) do if not (k == '__call' and fwd[cq]) then cq[k] = own(v, true, 1) end end
+          own_mt(q, cq, 0)
+        end
+      end
+      return c
+    end
+    for k, v in pairs(engine_names) do rawset(env, k, own(v)) end
+    -- the metatables of this mod's own newproxy(true) userdata: its own, handed back as they are
+    local made, np = setmetatable({}, { __mode = 'k' }), G.newproxy
+    if type(np) == 'function' then
+      env.newproxy = function(x)
+        local u = np(x)
+        if x == true then made[getmetatable(u)] = true end
+        return u
+      end
+    end
     local seen_mt = setmetatable({}, { __mode = 'k' }) -- an engine metatable -> this mod's copy of it
     local asked_native = false                       -- this mod's first require('ffi'/'jit') is logged
     env.getmetatable = function(o)
       local mt = getmetatable(o)
       if mt ~= nil and mt == string_mt then return string_view end
       if type(o) == 'userdata' and io_type(o) then return nil end   -- file handles: their methods are shared
-      if type(mt) == 'table' and as_seen[rawget(mt, '__index')] ~= nil then
+      -- an engine object's metatable (any userdata's, or one whose __index is an engine table): a copy, its __index
+      -- this mod's copy of the engine table (trimmed, or nothing), so the calls left out aren't a method call away and
+      -- nothing written there reaches the real one
+      local idx = type(mt) == 'table' and rawget(mt, '__index')
+      if type(mt) == 'table' and not made[mt] and (type(o) == 'userdata' or (idx and (as_seen[idx] ~= nil or is_engine[idx]))) then
         local c = seen_mt[mt]                        -- one copy per metatable (objects of a kind share it)
         if not c then
-          c = {}
-          for k, v in pairs(mt) do c[k] = v end
-          c.__index = as_seen[rawget(mt, '__index')] or nil
-          seen_mt[mt] = c
+          if idx and as_seen[idx] ~= nil then
+            c = {}
+            seen_mt[mt] = c
+            for k, v in pairs(mt) do if k ~= '__index' then c[k] = own(v, true) end end
+            c.__index = own(as_seen[idx]) or nil
+          else
+            c = own(mt, true)                        -- (its __index / __newindex, and mt.__index = mt, copied with it)
+            seen_mt[mt] = c
+          end
         end
         return c
       end
@@ -3747,7 +5286,16 @@ function M.install(ctx)
     local os_c = {}
     if type(os_) == 'table' then for _, k in ipairs(OS_KEEP) do os_c[k] = os_[k] end end
     env.os = os_c
-    env.package = { loaded = {}, preload = {}, path = '', cpath = '' }
+    -- package.loaded: the mod's own entries, and behind them (read only) the other addons' modules, from the loader
+    -- (sb.module_of: a module, true while it starts or when it returned nothing, nil when it isn't running), so an
+    -- "is that mod installed?" check and require('mods/<author>/<name>') find a running mod
+    local loaded = setmetatable({}, { __metatable = 'locked', __index = function(_, name)
+      local f = sb.module_of
+      if type(f) ~= 'function' or type(name) ~= 'string' then return nil end
+      local ok, v = pcall(f, name)
+      if ok then return v end
+    end })
+    env.package = { loaded = loaded, preload = {}, path = '', cpath = '' }
 
     -- files: through my check, and the first denials of each mod go to the log
     local said = 0
@@ -3763,9 +5311,35 @@ function M.install(ctx)
       end
       return nil, why
     end
+    -- A mod's own file straight in %LOCALAPPDATA% (where mods for other loaders keep their logs and settings): kept in
+    -- my folder instead, under the same name, said once per mod. A read finds it there, else in %LOCALAPPDATA% (the
+    -- fallback below), so settings saved before carry over. A trusted mod keeps its own files where they are.
+    local moved = false
+    -- (the path to open, and the file's name when it's one moved to my folder)
+    local function redirect(path)
+      if not (ODIR and ctx.DIR and type(path) == 'string') then return path end
+      local p = low(path)
+      if s_sub(p, 1, #ODIR) ~= ODIR then return path end
+      local g = grants[owner]
+      if g and own_file(g, p) then return path end
+      local name = s_sub(path, #ODIR + 1)
+      local ext = s_match(s_lower(name), '%.(%w+)$')
+      if name == '' or s_find(name, '[\\/]') or not (ext and MOD_EXT[ext]) then return path end
+      return ctx.DIR .. name, name
+    end
+    -- (said once per mod, when the first such file passes my check)
+    local function said_moved(name)
+      if name and not moved and ctx.log then
+        moved = true
+        ctx.log(s_format('[%s] its files in %%LOCALAPPDATA%% are kept in my folder instead (%s first)', owner, name))
+      end
+    end
     local io_c = {
       open = function(path, mode)
+        local asked, moved_name = path, nil
+        path, moved_name = redirect(path)
         local ok, root, names, ext = sb.check(path, mode)
+        if ok then said_moved(moved_name) end
         if not ok then
           local g = grants[owner]
           local mode_ok = mode == nil or (type(mode) == 'string' and (s_match(mode, '^[rwa]%+?b?$') or s_match(mode, '^[rwa]b%+$')))
@@ -3781,9 +5355,9 @@ function M.install(ctx)
               if f and in_data then return wrapped(f, p) end
               return f, err, code
             end
-            if yes == nil then return deny('open', path, mode, why) end
+            if yes == nil then return deny('open', asked, mode, why) end
           end
-          return deny('open', path, mode, root)
+          return deny('open', asked, mode, root)
         end
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
@@ -3800,6 +5374,13 @@ function M.install(ctx)
       end,
       lines = function(path)
         if path == nil then return io_.lines() end
+        local asked, moved_name = path, nil
+        path, moved_name = redirect(path)
+        if moved_name then
+          -- (not in my folder yet: read where it was; only a path my check passes is ever opened)
+          local f = sb.check(path, 'r') and real_open and real_open(path, 'r')
+          if f then f:close(); said_moved(moved_name) else path = asked end
+        end
         local ok, why = sb.check(path, 'r')
         if not ok then deny('read', path, 'r', why); error(why, 2) end
         return io_.lines(path)
@@ -3963,6 +5544,11 @@ function M.install(ctx)
       end
       error('require(\'' .. tostring(name) .. '\') is off limits to Chef Shared Loader mods (another mod\'s exports: chef.require)', 2)
     end
+    -- (the game's os, io, debug and package reached from an engine table: this mod's own)
+    for _, n in ipairs({ 'os', 'io', 'debug', 'package' }) do
+      local lib = rawget(G, n)
+      if type(lib) == 'table' and type(rawget(env, n)) == 'table' then mine[lib] = rawget(env, n) end
+    end
     return env
   end
 
@@ -3984,7 +5570,9 @@ services.runtime = (function()
 --   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off }; spec: id (letters, digits, _ . -), api
 --     (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
---     pcall
+--     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
+--     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
+--     it set on the game's materials: the engine can't tell what a material had before)
 --   * handle.engine: the API's engine calls, in its call shapes (Gui.rect takes numbers, Gui.text a font name,
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
@@ -3994,7 +5582,9 @@ services.runtime = (function()
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
--- _G; never a name the game already has.
+-- _G; never a name the game already has. A trusted mod's globals stay its own, but its TRUSTED entry may name one
+-- (view) the others get as a read-only view: only the calls listed, plain arguments in, copies of plain values out.
+-- Of the others' globals, a trusted mod takes only the ones its entry accepts, each from the one mod named.
 -- Plain Lua 5.1.
 
 local M = { version = '1.1.0', runtime_version = '0.1.0' }
@@ -4021,7 +5611,7 @@ local function extents(lo, hi, caret) return lo.x, lo.y, hi.x, hi.y, caret.x end
 local function int(v, lo, hi) return type(v) == 'number' and v == floor(v) and v >= lo and v <= hi end
 local function finite(v, limit) return type(v) == 'number' and v == v and abs(v) <= limit end
 local function hex16(s) return type(s) == 'string' and #s == 16 and s:match('^%x+$') ~= nil end
-local EVENTS = { update = true, render = true, shutdown = true }
+local EVENTS = { update = true, render = true, shutdown = true, stop = true }
 -- the fonts a GUI's text may use: the ones the game makes a material for itself (another name ends the game), each
 -- with that material; a locale's own UI font by its 16-hex id
 local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
@@ -4043,6 +5633,11 @@ function M.install(ctx)
   local orphan = {}                                   -- name -> { by, v }: a stopped mod's shared value, until set again
   local shared, shared_by = {}, {}                    -- capitalized globals runtime mods set, shared between them; who
   local G = ctx.G or {}
+  -- a trusted mod's read-only view: global name -> { by, real, spec, on }; view.made: the views handed out (weak)
+  local view = { by_name = {}, made = setmetatable({}, { __mode = 'k' }), LIMIT = 4000, DEPTH = 8,
+                  reserved = ctx.reserved or {} }   -- view name -> its trusted mod (no one else shares under it)
+  -- the engine values a view passes on as they are (others, file handles say, are left out)
+  view.PASS = { Unit = true, IdString64 = true, Vector3 = true, Quaternion = true }
 
   -- ---------------------------------------------------------------- calls
   -- a binding's first call for this mod goes through guarded (breadcrumbed, keyed by the mod); later ones straight to
@@ -4137,6 +5732,13 @@ function M.install(ctx)
     return setmetatable(w, {
       __index = function(_, k)
         local f = type(t) == 'table' and t[k] or nil
+        if type(f) == 'table' then
+          -- (a table in it: the mod's own shallow copy, so what it writes there stays its own)
+          local c = {}
+          for k2, v2 in pairs(f) do c[k2] = v2 end
+          rawset(w, k, c)
+          return c
+        end
         if type(f) ~= 'function' then return f end
         local b = name .. '.' .. tostring(k)
         local g = function(...)
@@ -4860,6 +6462,10 @@ function M.install(ctx)
     if rec.state ~= 'active' then return true end
     rec.state = 'off: ' .. why
     for ev in pairs(EVENTS) do rec.callbacks[ev] = {} end
+    -- (its view, if it has one, answers "not running" once none of its mods is active)
+    local any = false
+    for _, r in ipairs(owners[rec.owner] and owners[rec.owner].order or {}) do if r.state == 'active' then any = true end end
+    if not any then for _, vw in pairs(view.by_name) do if vw.by == rec.owner then vw.on = false end end end
     local ok, d, s = pcall(release, rec)
     log(fmt('[%s] %s switched off: %s (%s)', rec.owner, rec.id, why,
       ok and fmt('destroyed %d, shown %d', d or 0, s or 0) or ('undoing failed: ' .. tostring(d))))
@@ -4876,6 +6482,10 @@ function M.install(ctx)
     -- name its own, X = X or {})
     for k, by in pairs(shared_by) do
       if by == owner then orphan[k], shared[k], shared_by[k] = { by = owner, v = shared[k] }, nil, nil end
+    end
+    -- its read-only view answers "not running" from now on (the readers keep the table)
+    for k, vw in pairs(view.by_name) do
+      if vw.by == owner then vw.on, view.by_name[k] = false, nil end
     end
   end
   -- a new world: what belonged to a world that's gone is let go without being touched (any call on it ends the game)
@@ -4940,7 +6550,7 @@ function M.install(ctx)
     end
     if #o.order >= 8 then return nil, 'eight mods per file at most' end
     local rec = { owner = o.name, short = o.short, id = spec.id, name = type(spec.name) == 'string' and spec.name or spec.id,
-                  state = 'active', errors = 0, callbacks = { update = {}, render = {}, shutdown = {} }, owned = {},
+                  state = 'active', errors = 0, callbacks = { update = {}, render = {}, shutdown = {}, stop = {} }, owned = {},
                   hidden = {}, guis = {}, bones = bones, lobby_key = spec.lobby_key, seen = {}, said = {}, said_n = 0,
                   set_at = -1, sets = 0 }
     rec.engine = engine_for(rec)
@@ -4972,16 +6582,33 @@ function M.install(ctx)
         update = function(dt) return dispatch(o, 'update', dt) end,
         render = function() return dispatch(o, 'render') end,
         shutdown = function() return dispatch(o, 'shutdown') end,
+        stop = function() return dispatch(o, 'stop') end,
       })
     end
     -- its environment shares the runtime mods' globals from now on
     if o.env and not envs[o.env] then
       envs[o.env] = o
-      for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
+      -- (a trusted mod gets only the shared globals its TRUSTED entry accepts, each from the one mod it names: its
+      -- environment otherwise holds only what it set itself)
+      local trusted = ctx.trusted(o.name)
+      if not trusted then
+        for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
+        for k, vw in pairs(view.by_name) do
+          if vw.on and vw.by ~= o.name and rawget(o.env, k) == nil then rawset(o.env, k, view.make(k, vw, o.name)) end
+        end
+      else
+        for k, v in pairs(shared) do
+          if view.accepts(trusted, k, shared_by[k]) then
+            if rawget(o.env, k) == nil then rawset(o.env, k, view.take(k, v, shared_by[k])) end
+          else
+            view.refused(trusted, k, shared_by[k], o.name)
+          end
+        end
+      end
       -- and what it set before registering is shared now (a library mod defines its global, then calls mod())
       local own = {}
       for k, v in pairs(o.env) do own[k] = v end
-      for k, v in pairs(own) do if shared_by[k] == nil then rt.on_global(o.env, k, v) end end
+      for k, v in pairs(own) do if shared_by[k] == nil or trusted then rt.on_global(o.env, k, v) end end
     end
     log(fmt('[%s] HD2 Lua Runtime look-alike: mod %s%s', o.name, rec.id, rec.lobby_key and ' (lobby key ' .. rec.lobby_key .. ')' or ''))
     return handle
@@ -5013,13 +6640,149 @@ function M.install(ctx)
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
     return true
   end
+  -- a shared global a trusted mod takes: its TRUSTED entry's accepts names the global and the one mod it takes it from
+  -- (a library its own package carries, say)
+  function view.accepts(t, k, by)
+    return by ~= nil and type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k] == by
+  end
+  -- the trusted mod's copy of an accepted value: its top level copied when the named mod sets it (before any other
+  -- mod runs), so a change another mod makes to the shared table never reaches the trusted mod, nor the other way
+  -- round; one copy per name, mod and value set
+  view.taken, view.said = {}, {}
+  function view.take(k, v, by)
+    local key = k .. '|' .. tostring(by)
+    local t = view.taken[key]
+    if t and t.src == v then return t.v end
+    local c = v
+    if type(v) == 'table' then c = {}; for kk, x in next, v do c[kk] = x end end
+    view.taken[key] = { src = v, v = c }
+    return c
+  end
+  -- an accepted name another mod set first: the trusted mod goes without it (said once, so a missing feature of the
+  -- trusted mod has a line in the log)
+  function view.refused(t, k, by, name)
+    local want = type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k]
+    if not want or view.said[k] then return end
+    view.said[k] = true
+    log(fmt('[%s] %s is set by %s, not %s: not given to it', name, k, tostring(by), want))
+  end
   -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet
   -- A trusted mod's globals stay its own: what it sets could let another mod use what only it was given (its game
   -- patch files, say).
+  -- ---------------------------------------------------------------- a trusted mod's read-only view
+  -- spec (its TRUSTED entry's view): global = the name, fields = { plain values, read when asked }, calls = { name = true
+  -- (every answer copied) or { keys } (the first answer's top-level keys kept, the rest left out) }.
+  -- Copies: tables are new tables of plain keys, functions and threads left out, engine handles (units) as they are,
+  -- 8 deep and 4,000 values a call at most; cycles cut. Nothing a reader gets leads back into the trusted mod.
+  function view.copy(v, keep, depth, budget, seen)
+    local t = type(v)
+    if t == 'function' or t == 'thread' then return nil end
+    if t == 'userdata' then                            -- (a handle from a gone world is never asked its kind:
+      if util.gone(v) then return nil end              -- its tostring asks the engine)
+      return view.PASS[kind(v)] and v or nil
+    end
+    if t ~= 'table' then return v end
+    if depth > view.DEPTH or seen[v] then return nil end
+    seen[v] = true
+    local out = {}
+    for k, x in next, v do                             -- (raw: a metatable on the answer never runs)
+      if budget.n <= 0 then break end
+      local tk = type(k)
+      if (tk == 'string' or tk == 'number' or tk == 'boolean') and (keep == nil or keep[k]) then
+        budget.n = budget.n - 1
+        local c = view.copy(x, nil, depth + 1, budget, seen)
+        if c ~= nil then out[k] = c end
+      end
+    end
+    seen[v] = nil
+    return out
+  end
+  -- arguments a reader may hand in: nil, booleans, numbers, strings up to 256 characters (no tables or functions that
+  -- the trusted mod's code would run or keep)
+  function view.plain(...)
+    local n = select('#', ...)
+    if n > 4 then return false end
+    for i = 1, n do
+      local a = (select(i, ...))
+      local t = type(a)
+      if not (a == nil or t == 'boolean' or (t == 'number' and a == a) or (t == 'string' and #a <= 256)) then return false end
+    end
+    return true
+  end
+  -- one reader's view: each call guarded under the reader's own crash key (<global>.<call>), so a call that ends the
+  -- game is skipped for that reader from then on, not for the trusted mod
+  function view.make(k, vw, reader)
+    local pub, fields = {}, {}
+    for _, f in ipairs(type(vw.spec.fields) == 'table' and vw.spec.fields or {}) do fields[f] = true end
+    for name, keep in pairs(type(vw.spec.calls) == 'table' and vw.spec.calls or {}) do
+      local keys = nil
+      if type(keep) == 'table' then keys = {}; for _, f in ipairs(keep) do keys[f] = true end end
+      local key = k .. '.' .. name
+      -- (the trusted mod's current view looked up each call: a reader that kept this table in a local still reaches
+      -- the trusted mod after it set its global again)
+      pub[name] = function(...)
+        local cur = view.by_name[k]
+        if not cur or not cur.on then return nil, 'not running' end
+        if not view.plain(...) then return nil, 'arguments must be plain values' end
+        local fn = rawget(cur.real, name)
+        if type(fn) ~= 'function' then return nil, 'not there' end
+        local r, why = guarded(reader, key, packed, fn, ...)
+        if type(r) ~= 'table' then return nil, why end
+        local budget, out = { n = view.LIMIT }, { n = r.n }
+        for i = 1, r.n do out[i] = view.copy(r[i], i == 1 and keys or nil, 1, budget, {}) end
+        return unpack(out, 1, out.n)
+      end
+    end
+    -- (fields read when asked: the trusted mod may fill its table after making it; plain values only)
+    local t = setmetatable({}, { __metatable = 'locked',
+      __index = function(_, key)
+        local f = pub[key]
+        if f ~= nil then return f end
+        local cur = view.by_name[k]
+        if fields[key] and cur and cur.on then
+          local x = rawget(cur.real, key)
+          local tx = type(x)
+          if tx == 'string' or tx == 'number' or tx == 'boolean' then return x end
+        end
+      end,
+      __newindex = function() error(k .. ' is read-only', 2) end })
+    view.made[t] = true
+    return t
+  end
+  -- the trusted mod set its view's global: every other runtime mod gets its own view (in place of nothing, of a copy
+  -- another mod shared under that name, or of an older view)
+  function view.publish(o, env, k, real, spec)
+    local old = view.by_name[k]
+    if old and old.by ~= o.name then return end
+    if view.reserved[k] ~= o.name then return end                 -- (only the mod the list names)
+    if real == shared[k] or (orphan[k] and orphan[k].v == real) then return end   -- (never another mod's value)
+    local vw = { by = o.name, real = real, spec = spec, on = true }
+    if old then old.on = false end
+    view.by_name[k] = vw
+    local fake, faker = shared[k], shared_by[k]
+    for e, r in pairs(envs) do
+      if e ~= env and r.name ~= o.name and r.name ~= faker then
+        local cur = rawget(e, k)
+        if cur == nil or (fake ~= nil and cur == fake) or view.made[cur] then rawset(e, k, view.make(k, vw, r.name)) end
+      end
+    end
+    shared[k], shared_by[k] = nil, nil
+    local calls = {}
+    for name in pairs(type(spec.calls) == 'table' and spec.calls or {}) do calls[#calls + 1] = name end
+    table.sort(calls)
+    log(fmt('[%s] %s: a read-only view for the other runtime mods (%s)', o.name, k, concat(calls, ', ')))
+  end
   function rt.on_global(env, k, v)
     local o = envs[env]
     if not o or type(k) ~= 'string' or not k:match('^%u[%w_]*$') or rawget(G, k) ~= nil or k == 'HD2Runtime' then return end
-    if v == nil or ctx.trusted(o.name) then return end
+    if v == nil then return end
+    local trust = ctx.trusted(o.name)
+    if trust then
+      local spec = type(trust) == 'table' and trust.view
+      if type(spec) == 'table' and spec.global == k and type(v) == 'table' then view.publish(o, env, k, v, spec) end
+      return
+    end
+    if view.by_name[k] or view.reserved[k] then return end            -- a view's name: this copy is its own
     if shared_by[k] ~= nil and shared_by[k] ~= o.name then return end   -- another mod's name: this one's copy is its own
     local prev = shared[k]
     -- after its mod stopped: only that mod setting it again (a reload) replaces the old copies
@@ -5027,10 +6790,18 @@ function M.install(ctx)
     orphan[k] = nil
     shared[k], shared_by[k] = v, o.name
     -- the others get it where they have nothing, or still the value it had before (set to nil and back)
-    for e in pairs(envs) do
-      if e ~= env then
+    -- (a trusted mod only when its TRUSTED entry accepts this name from this mod, and then its own copy, made now)
+    local old = view.taken[k .. '|' .. o.name]           -- (this mod's own earlier copy: the one a trusted mod may still hold)
+    for e, r in pairs(envs) do
+      local t = e ~= env and ctx.trusted(r.name)
+      if e ~= env and not t then
         local cur = rawget(e, k)
         if cur == nil or (prev ~= nil and cur == prev) then rawset(e, k, v) end
+      elseif t and view.accepts(t, k, o.name) then
+        local cur = rawget(e, k)
+        if cur == nil or (old ~= nil and cur == old.v) then rawset(e, k, view.take(k, v, o.name)) end
+      elseif t then
+        view.refused(t, k, o.name, r.name)
       end
     end
   end
@@ -5044,6 +6815,599 @@ end
 return M
 end)()
 -- @@END runtime.lua@@
+-- @@BEGIN lang.lua@@ (copied from src/chef_loader/lang.lua by tools/splice.py; edit that file, not this)
+services.lang = (function()
+-- Chef Shared Loader: language files
+-- A language file is a Lua resource whose first line is "-- HD2-Lang: mods/<author>/<name>" and that returns only
+-- data:
+--   return {
+--     name = 'Deutsch',                 -- shown in my options menu (Chef Shared Loader > Language); 40 bytes at most
+--     code = 'de',                      -- optional, for mods (chef.lang())
+--     text = { ['ALL MODS'] = 'ALLE MODS', ... },        -- exact texts: English as drawn, any case -> the translation
+--     patterns = { { '^(%d+) MODS$', '%1 MODS' }, ... }, -- optional, tried in order when no exact text matches
+--   }
+-- Data only: before it runs I read its code (strings and comments taken out) and take only names, numbers, '{ } [ ] = ,
+-- ; .', spaces and the keywords local, return, nil, true and false: no loops, conditions, calls or operators, so it
+-- runs straight through (4 MB a file at most, the 64 highest files, about 2 s of reading in all; a file that takes over
+-- 5 s is skipped from the next launch on). It runs once at start-up with nothing to reach (an empty environment),
+-- breadcrumbed from reading through taking in: a file that ends the game is skipped from the next launch on. Files with
+-- the same name are one language: a later file (a higher patch) wins, for texts, patterns (its own tried first) and
+-- code. One vocabulary serves my own menu, the monitor, the notices and every mod, because every text drawn goes
+-- through my text functions: they ask tr() first. A pattern must start with '^', have at most 2 of '*', '+' and '-'
+-- (not 2 with a '?', and at most 24 classes after the first of 2) and 3 of '?', use only captures it has closed, and be
+-- quick on a few long texts, two made from its own letters (timed at start-up, about 100 ms of timing a file); it is
+-- tried on texts of up to 160 bytes, once each (kept), with about 1 ms of pattern work a frame (a text past that is
+-- drawn as it is and tried on in the next frame).
+-- While a language is on, texts with two letters in a row, no digits and no entry are noted (once each, 3000 at most)
+-- and written to chef_loader_lang_missing.txt in my folder, as lines ready to copy into the file's text table.
+-- The language picked is saved by its name, so adding or removing a language file never changes it.
+-- Plain Lua 5.1.
+
+local M = { version = '1.2.0' }
+
+local type, pairs, ipairs, tostring, tonumber, pcall, setfenv, loadstring = type, pairs, ipairs, tostring, tonumber,
+  pcall, setfenv, loadstring
+local s_upper, s_find, s_gsub, s_format, s_sub, s_match, s_byte = string.upper, string.find, string.gsub, string.format,
+  string.sub, string.match, string.byte
+local s_gmatch, s_rep, floor = string.gmatch, string.rep, math.floor
+local sort, concat = table.sort, table.concat
+
+local MAX_TEXTS, MAX_PATTERNS, MAX_LEN, MAX_NAME, MAX_SRC, MAX_LANGS = 20000, 200, 300, 40, 4 * 1024 * 1024, 31
+local MAX_FILES, LOAD_BUDGET, TIME_BUDGET, AFTER_WILD, FILE_SLOW = 64, 2, 0.1, 24, 5
+local CACHE, MISSING, DONE, PAT_KEY, WILD, OPT, BUDGET, PAT_COST = 4096, 3000, 4096, 160, 2, 3, 0.001, 0.00025
+
+-- a language file's code with its strings and comments taken out (each string as one '"', each comment as a space)
+-- -> code, or nil, why
+local function code_of(src)
+  local out, i, n = {}, 1, #src
+  while i <= n do
+    local j = s_find(src, '[%-%[\'"]', i) or n + 1
+    if j > i then out[#out + 1] = s_sub(src, i, j - 1); i = j end
+    if i > n then break end
+    local c = s_sub(src, i, i)
+    local lvl = c == '-' and s_sub(src, i + 1, i + 1) == '-' and s_match(src, '^%[(=*)%[', i + 2)
+    if c == '-' and s_sub(src, i + 1, i + 1) == '-' then
+      if lvl then
+        local close = ']' .. lvl .. ']'
+        local _, e = s_find(src, close, i + 4 + #lvl, true)
+        if not e then return nil, 'a long comment that never ends' end
+        i = e + 1
+      else
+        local e = s_find(src, '[\r\n]', i + 2)       -- (a short comment ends at a CR too)
+        i = e and e + 1 or n + 1
+      end
+      out[#out + 1] = ' '
+    elseif c == '[' and s_match(src, '^%[=*%[', i) then
+      local l2 = s_match(src, '^%[(=*)%[', i)
+      local close = ']' .. l2 .. ']'
+      local _, e = s_find(src, close, i + 2 + #l2, true)
+      if not e then return nil, 'a long string that never ends' end
+      out[#out + 1] = '"'
+      i = e + 1
+    elseif c == '"' or c == "'" then
+      local j2 = i + 1
+      while true do
+        local k = s_find(src, c == '"' and '[\\\r\n"]' or "[\\\r\n']", j2)
+        local ch = k and s_sub(src, k, k)
+        if not k or ch == '\n' or ch == '\r' then return nil, 'a string that never ends' end
+        if ch == '\\' then
+          j2 = k + 2
+          if s_sub(src, k + 1, k + 2) == '\r\n' or s_sub(src, k + 1, k + 2) == '\n\r' then j2 = k + 3 end   -- (an escaped line end)
+        else j2 = k; break end
+      end
+      out[#out + 1] = '"'
+      i = j2 + 1
+    else
+      out[#out + 1] = c                 -- (a lone '-' or '[')
+      i = i + 1
+    end
+  end
+  return concat(out)
+end
+-- Lua 5.1's keywords; a language file may use only local, return, nil, true and false (and/or/elseif chains are slow
+-- for Lua's own parser, and a data file needs none of the others)
+local KEYWORDS = { ['and'] = true, ['break'] = true, ['do'] = true, ['else'] = true, ['elseif'] = true, ['end'] = true,
+  ['for'] = true, ['function'] = true, ['goto'] = true, ['if'] = true, ['in'] = true, ['not'] = true, ['or'] = true,
+  ['repeat'] = true, ['then'] = true, ['until'] = true, ['while'] = true }
+-- -> true, or nil, why
+local function data_only(src)
+  local code, why = code_of(src)
+  if not code then return nil, why end
+  for w in s_gmatch(code, '[%a_][%w_]*') do
+    if KEYWORDS[w] then return nil, '"' .. w .. '" (a language file is data only: no loops, functions or conditions)' end
+  end
+  if s_find(code, '..', 1, true) then return nil, '".." (a language file is data only: write each text whole)' end
+  local bad = s_match(code, '[^%w_%s{}%[%]=,;%."]')
+  if bad then return nil, s_format('%q (a language file is data only: no calls or operators)', bad) end
+  -- (a call written without parentheses: a name, ] or } followed by a string or a table; return is the one word that
+  -- may be followed by them. Each name is read whole, from its first character: linear in the code's length)
+  for w in s_gmatch(code, '%f[%w_]([%w_]+)%s*["{]') do
+    if w ~= 'return' then return nil, 'a call (a language file is data only)' end
+  end
+  if s_find(code, '[%]}]%s*["{]') then return nil, 'a call (a language file is data only)' end
+  return true
+end
+
+-- the end of the set that starts at p[i] ('['), as Lua reads it -> its ']' index, or nil
+local function set_end(p, i)
+  local n = #p
+  local j = i + 1
+  if s_sub(p, j, j) == '^' then j = j + 1 end
+  repeat
+    if j > n then return nil end
+    local ch = s_sub(p, j, j)
+    j = j + 1
+    if ch == '%' then
+      if j > n then return nil end
+      j = j + 1
+    end
+  until s_sub(p, j, j) == ']'
+  return j
+end
+-- a pattern as I take it -> its number of captures, or nil, why
+local function pattern_ok(p)
+  if s_sub(p, 1, 1) ~= '^' then return nil, 'it must start with ^' end
+  if s_find(p, '%z') then return nil, 'a zero byte' end
+  local i, n, caps, wild, opt, after = 2, #p, 0, 0, 0, 0
+  local stack, closed, lits = {}, {}, {}  -- (the captures open now, innermost last; the ones closed)
+  while i <= n do
+    local c = s_sub(p, i, i)
+    local item, lit = true, nil          -- (a single character class: a quantifier may follow)
+    if c == '(' then
+      caps, item, i = caps + 1, false, i + 1
+      if s_sub(p, i, i) == ')' then closed[caps], i = true, i + 1      -- (a position capture)
+      else stack[#stack + 1] = caps end
+    elseif c == ')' then
+      if #stack == 0 then return nil, 'a ) with no (' end
+      closed[stack[#stack]] = true
+      stack[#stack] = nil
+      item, i = false, i + 1
+    elseif c == '$' and i == n then
+      item, i = false, i + 1
+    elseif c == '%' then
+      local d = s_sub(p, i + 1, i + 1)
+      if d == '' then return nil, 'it ends with %' end
+      if d == 'b' then
+        if i + 3 > n then return nil, '%b needs two characters' end
+        item, i = false, i + 4
+      elseif d == 'f' then
+        if s_sub(p, i + 2, i + 2) ~= '[' then return nil, '%f needs a set' end
+        local e = set_end(p, i + 2)
+        if not e then return nil, 'a [ with no ]' end
+        item, i = false, e + 1
+      elseif d == 'z' then
+        return nil, '%z (a zero byte)'
+      elseif s_find(d, '%d') then
+        local k = tonumber(d)
+        if not closed[k] then return nil, 'a back reference to a capture not closed yet' end
+        item, i = false, i + 2
+      else
+        if not s_find(d, '%w') then lit = d end
+        i = i + 2
+      end
+    elseif c == '[' then
+      local e = set_end(p, i)
+      if not e then return nil, 'a [ with no ]' end
+      i = e + 1
+    else
+      if c ~= '.' then lit = c end
+      i = i + 1
+    end
+    if item then
+      if wild > 0 then
+        if lit then lits[#lits + 1] = lit else after = after + 1 end
+      end
+      local q = s_sub(p, i, i)
+      if q == '*' or q == '+' or q == '-' then wild, i = wild + 1, i + 1
+      elseif q == '?' then opt, i = opt + 1, i + 1 end
+    end
+  end
+  if #stack ~= 0 then return nil, 'a ( with no )' end
+  if wild > WILD then return nil, 'more than ' .. WILD .. ' of * + - (it could take too long)' end
+  if opt > OPT then return nil, 'more than ' .. OPT .. ' of ? (it could take too long)' end
+  if wild >= WILD and opt > 0 then return nil, WILD .. ' of * + - with a ? (it could take too long)' end
+  if wild >= WILD and after > AFTER_WILD then return nil, 'more than ' .. AFTER_WILD .. ' items after the first of 2 * + - (it could take too long)' end
+  if caps > 32 then return nil, 'more than 32 captures' end
+  return caps, concat(lits)
+end
+-- a replacement as I take it: % followed by %, or by a capture the pattern has (%0 the whole match; %1 too when it
+-- has none) -> true, or nil, why
+local function replacement_ok(to, caps)
+  local most = caps > 0 and caps or 1
+  local i = 1
+  while true do
+    local k = s_find(to, '%', i, true)
+    if not k then return true end
+    local d = s_sub(to, k + 1, k + 1)
+    if d ~= '%' then
+      local v = tonumber(d)
+      if not v or s_find(d, '%D') then return nil, 'a % not followed by % or a capture\'s number' end
+      if v > most then return nil, 'a capture the pattern doesn\'t have (%' .. d .. ')' end
+    end
+    i = k + 2
+  end
+end
+-- s cut to at most n bytes, between UTF-8 characters
+local function utf8_cut(s, n)
+  if #s <= n then return s end
+  local e = n
+  while e > 0 do
+    local b = s_byte(s, e + 1)
+    if not b or b < 0x80 or b >= 0xC0 then break end       -- (the next byte starts a character: cut before it)
+    e = e - 1
+  end
+  return s_sub(s, 1, e)
+end
+
+function M.install(ctx)
+  local log = ctx.log
+  local L = { langs = {}, by = {}, names = {}, on = nil, cur = {}, old = {}, n = 0, done = {}, ndone = 0, missing = {}, nmissing = 0,
+              olddone = {}, piece = {}, oldpiece = {}, npiece = 0, dirty = false, at = 0, v = nil, frame = -1, spent = 0,
+              resume = {}, nresume = 0,
+              skipped = false }
+
+  -- a language file's table: data only (above), run with nothing to reach
+  local function run(rec)
+    local ok, why = data_only(rec.src)
+    if not ok then return nil, why end
+    local chunk, err = loadstring(rec.src, '@' .. rec.name .. ' (language in ' .. rec.file .. ')')
+    if not chunk then return nil, tostring(err) end
+    setfenv(chunk, {})
+    local t
+    ok, t = pcall(chunk)
+    if not ok then return nil, tostring(t) end
+    if type(t) ~= 'table' then return nil, 'it must return a table' end
+    return t
+  end
+
+  -- a pattern timed on texts that are hard for it (as long as it's ever tried on): over PAT_COST on one is too slow
+  local PROBES = { ('A'):rep(PAT_KEY), ('A '):rep(PAT_KEY / 2), ('AB'):rep(PAT_KEY / 2), ('A1 '):rep(PAT_KEY / 3) }
+  -- (timed in batches, at least 2 ms or 16 calls, as one call can be far under the clock's step; a first call far over
+  -- the limit isn't tried again. timing.left: what's left of the file's budget for this, spent as it's used)
+  local timing = { left = TIME_BUDGET }
+  local function slow(from, to, lits)
+    local clock = ctx.clock
+    if not clock then return false end
+    local probes = PROBES
+    if lits and #lits > 1 then lits = s_sub(lits, 1, -2) end
+    if lits and lits ~= '' then
+      local most, best, cnt = nil, 0, {}
+      for ch in s_gmatch(lits, '.') do cnt[ch] = (cnt[ch] or 0) + 1; if cnt[ch] > best then most, best = ch, cnt[ch] end end
+      -- (and two made from the pattern's own literal characters after its first wildcard: hard texts for it)
+      probes = { PROBES[1], PROBES[2], PROBES[3], PROBES[4], s_sub(s_rep(lits, floor(PAT_KEY / #lits) + 1), 1, PAT_KEY),
+                 s_rep(most, PAT_KEY) }
+    end
+    for _, t in ipairs(probes) do
+      local t0 = clock()
+      pcall(s_gsub, t, from, to, 1)
+      local one = clock() - t0
+      timing.left = timing.left - one
+      if one >= 0.0015 then return true end
+      local n, t1 = 1, clock()
+      while n < 16 and clock() - t1 < 0.002 do pcall(s_gsub, t, from, to, 1); n = n + 1 end
+      local spent = clock() - t1
+      timing.left = timing.left - spent
+      if n > 1 and spent / (n - 1) > PAT_COST then
+        -- (once more before refusing: on a clock with 1 ms steps one batch can read up to twice what it took)
+        n, t1 = 1, clock()
+        while n < 16 and clock() - t1 < 0.002 do pcall(s_gsub, t, from, to, 1); n = n + 1 end
+        spent = clock() - t1
+        timing.left = timing.left - spent
+        if n > 1 and spent / (n - 1) > PAT_COST then return true end
+      end
+    end
+    return false
+  end
+  -- a language's entries checked and taken in: only strings of a sane size; a pattern only if I take it (above)
+  local function take(lang, t, rec)
+    local said = 0
+    local function bad(why)
+      said = said + 1
+      if said <= 5 then log(s_format('language %s (%s): %s', lang.name, rec.file, why))
+      elseif said == 6 then log(s_format('language %s (%s): more left out (only the first 5 are named)', lang.name, rec.file)) end
+    end
+    if type(t.code) == 'string' and #t.code <= 16 then lang.code = (s_gsub(t.code, '%c', '')) end   -- (the later file's)
+    if type(t.text) == 'table' then
+      for k, v in pairs(t.text) do
+        if type(k) ~= 'string' or type(v) ~= 'string' or #k == 0 or #k > MAX_LEN or #v > MAX_LEN then
+          bad('an entry that is not a text of 1 to ' .. MAX_LEN .. ' bytes was left out')
+        elseif lang.ntext >= MAX_TEXTS and not lang.text[s_upper(k)] then
+          bad('more than ' .. MAX_TEXTS .. ' texts: the rest were left out'); break
+        else
+          local key = s_upper(k)
+          if not lang.text[key] then lang.ntext = lang.ntext + 1 end
+          lang.text[key] = v
+        end
+      end
+    end
+    if type(t.patterns) == 'table' then
+      -- this file's patterns first (a later file wins), then the ones before it, 200 at most
+      local mine = {}
+      for _, p in ipairs(t.patterns) do
+        local from, to = type(p) == 'table' and p[1], type(p) == 'table' and p[2]
+        if #mine >= MAX_PATTERNS then bad('more than ' .. MAX_PATTERNS .. ' patterns: the rest were left out'); break end
+        local caps, why = nil, 'a pattern and its replacement must be texts of 1 to ' .. MAX_LEN .. ' bytes'
+        if type(from) == 'string' and type(to) == 'string' and #from > 0 and #from <= MAX_LEN and #to <= MAX_LEN then
+          local lits
+          caps, why = pattern_ok(from)
+          if caps then lits = why; why = nil end
+          if caps then
+            local rok, rwhy = replacement_ok(to, caps)
+            if not rok then caps, why = nil, rwhy
+            elseif timing.left <= 0 then caps, why = nil, 'past the time for checking this file\'s patterns'
+            elseif not pcall(s_find, '', from) or not pcall(s_gsub, 'X', from, to, 1) then caps, why = nil, 'Lua doesn\'t take it'
+            elseif slow(from, to, lits) then caps, why = nil, 'too slow on a long text (over 0.25 ms)' end
+          end
+        end
+        if caps then mine[#mine + 1] = { from, to }
+        else bad(s_format('pattern %s left out: %s', type(from) == 'string' and s_format('%q', s_sub(from, 1, 60)) or '?', why)) end
+      end
+      for _, p in ipairs(lang.patterns) do
+        if #mine >= MAX_PATTERNS then break end
+        mine[#mine + 1] = p
+      end
+      lang.patterns = mine
+    end
+  end
+
+  -- a file's table taken into its language (by name)
+  function L.taken(t, rec)
+    local name = type(t.name) == 'string' and utf8_cut((s_gsub(t.name, '%c', ' ')), MAX_NAME) or ''
+    if name == '' or name == 'English' then name = rec.name end
+    local lang = L.by[name]
+    if not lang then
+      lang = { name = name, text = {}, ntext = 0, patterns = {}, files = {} }
+      L.by[name] = lang
+      L.langs[#L.langs + 1] = lang
+    end
+    lang.files[#lang.files + 1] = rec.name
+    take(lang, t, rec)
+  end
+  -- the language files found, in patch order (the higher patch last, so its entries win)
+  function L.load(found)
+    sort(found, function(a, b) if a.patch ~= b.patch then return a.patch < b.patch end return a.seq < b.seq end)
+    local clock = ctx.clock
+    local t_start = clock and clock() or 0
+    local first = #found - MAX_FILES                 -- (past 64 files, the lowest patches are the ones left out)
+    for i, rec in ipairs(found) do
+      -- (breadcrumbed, reading through taking in, under its name and its source's fingerprint: a file that ends the
+      -- game is skipped from the next launch on; a changed file is tried again. 64 files and 2 s at most in all)
+      local t, err = nil, nil
+      if #rec.src > MAX_SRC then err = 'more than ' .. MAX_SRC .. ' bytes'
+      elseif i <= first then err = 'more than ' .. MAX_FILES .. ' language files (the higher patches are read)'
+      elseif clock and clock() - t_start > LOAD_BUDGET then err = 'language files took more than ' .. LOAD_BUDGET .. ' s to read'
+      else
+        local key = rec.name .. '|lang:' .. (ctx.fp and ctx.fp(rec.src) or #rec.src)
+        if ctx.skipped and ctx.skipped(key) then err = 'it ended the game before (this file stays off; a changed one is tried)'
+        else
+          if ctx.crumb then ctx.crumb('> ' .. key) end
+          timing.left = TIME_BUDGET
+          local t0 = clock and clock() or 0
+          local ok
+          ok, t, err = pcall(run, rec)
+          if not ok then t, err = nil, tostring(t) end
+          if t then
+            local tok, terr = pcall(L.taken, t, rec)
+            if not tok then t, err = nil, tostring(terr) end
+          end
+          if ctx.crumb then ctx.crumb('< ' .. key) end
+          -- (a file that took this long once (Lua's own reading of it can be slow for some files) is skipped from the
+          -- next launch on, as one that ended the game; a changed file is tried again)
+          local took = clock and clock() - t0 or 0
+          if took > FILE_SLOW and ctx.skip_now then
+            ctx.skip_now(key)
+            log(s_format('language file %s (%s) took %.1f s to read: skipped from the next launch on', rec.name, rec.file, took))
+          end
+        end
+      end
+      if not t then
+        log(s_format('language file %s (%s) not used: %s', rec.name, rec.file, err))
+      end
+    end
+    sort(L.langs, function(a, b) return a.name < b.name end)
+    -- (the languages' own names, shown in my menu as they are: never noted missing)
+    L.names = { ENGLISH = true }
+
+    -- (my menu's choice row takes 32 at most: English and 31 languages)
+    for i = #L.langs, MAX_LANGS + 1, -1 do
+      log(s_format('language %s left out: more than %d languages', L.langs[i].name, MAX_LANGS))
+      L.by[L.langs[i].name] = nil
+      L.langs[i] = nil
+    end
+    for _, lang in ipairs(L.langs) do
+      L.names[s_upper(lang.name)] = true
+      log(s_format('language: %s (%d texts, %d patterns; %s)', lang.name, lang.ntext, #lang.patterns, concat(lang.files, ', ')))
+    end
+  end
+
+  -- a text as a Lua string on one line (escapes for line ends and control characters)
+  local function quoted(k)
+    return '"' .. s_gsub(k, '[%c"\\]', function(ch)
+      if ch == '\n' then return '\\n' elseif ch == '\r' then return '\\r' elseif ch == '"' then return '\\"'
+      elseif ch == '\\' then return '\\\\' end
+      return s_format('\\%03d', s_byte(ch))
+    end) .. '"'
+  end
+  -- the texts with no entry, as lines for the text table; written when there are new ones, at most every 2 minutes,
+  -- at shutdown, and before another language is picked
+  function L.flush(now, final)
+    if not L.dirty or not L.on then return end
+    if not final and now < L.at then return end
+    L.at = now + 120
+    local keys = {}
+    for k in pairs(L.missing) do keys[#keys + 1] = k end
+    sort(keys)
+    local f = ctx.open(ctx.DIR .. ctx.FILES .. '_lang_missing.txt', 'w')
+    if not f then return end
+    L.dirty = false
+    f:write(s_format('-- texts drawn with no entry in %s (%d), ready for its text table:\n', L.on.name, #keys))
+    for _, k in ipairs(keys) do local q = quoted(k); f:write('  [', q, '] = ', q, ',\n') end
+    f:close()
+  end
+
+  -- the language picked in my menu (by its row's number), saved by name when save is true
+  local function pick(v, save)
+    if L.dirty and L.on then pcall(L.flush, 0, true) end
+    L.v = v
+    L.on = (type(v) == 'number' and v > 1) and L.langs[v - 1] or nil
+    L.cur, L.old, L.n, L.done, L.olddone, L.ndone, L.resume, L.nresume = {}, {}, 0, {}, {}, 0, {}, 0
+    L.piece, L.oldpiece, L.npiece = {}, {}, 0
+    L.missing, L.nmissing, L.dirty = {}, 0, false
+    if save and L.put then L.put('lang_name', L.on and L.on.name or 'English') end
+    log('language: ' .. (L.on and L.on.name or 'English'))
+  end
+  local function sync()
+    local r = L.rowref
+    if r and r.value ~= L.v then pick(r.value, true) end     -- (the row changed in my menu)
+  end
+
+  -- the row in my menu (only when there is a language to pick): English, then the languages by name. With one
+  -- language installed and none picked before, it's on (installing it is the player's choice; saved then, so a second
+  -- language added later doesn't turn it off); with more, English until one is picked. A saved language that isn't
+  -- installed this launch gives English without forgetting it. get / put / set: the loader's own saved values, and
+  -- setting the row.
+  function L.row(loader_option, get, put, set)
+    if #L.langs == 0 then return end
+    local choices = { 'English' }
+    for _, lang in ipairs(L.langs) do choices[#choices + 1] = lang.name end
+    local row = loader_option('lang', { type = 'choice', label = 'Language', choices = choices,
+                                        default = #L.langs == 1 and 2 or 1, section = 'menu' })
+    if not row then return end
+    L.rowref, L.put = row, put
+    local saved = get and get('lang_name')
+    if type(saved) == 'string' then
+      local at = nil
+      for i, c in ipairs(choices) do if c == saved then at = i; break end end
+      if not at then log('language ' .. saved .. ' (picked before) is not installed: English'); at = 1 end
+      if at ~= row.value and set then set(row, at) end
+    end
+    pick(row.value, type(saved) ~= 'string')
+    return row
+  end
+
+  -- a text drawn as it is from now on (a translation, or a text made from one: fitted with '...', a wrapped line),
+  -- unless it is itself a text the language has an entry for
+  -- (two generations, as the cache: a text drawn again stays)
+  local function done(s)
+    if L.done[s] or L.on.text[s_upper(s)] then return end
+    if L.ndone >= DONE then L.olddone, L.done, L.ndone = L.done, {}, 0 end
+    L.done[s], L.ndone = true, L.ndone + 1
+  end
+  local function was_done(s)
+    if L.done[s] then return true end
+    if L.olddone[s] then done(s); return true end
+    return false
+  end
+
+  -- the text to draw: the language's text for it, else its first pattern that matches, else the text itself. Kept per
+  -- text drawn (two generations: a text drawn again stays), so a menu drawn every frame asks the tables once per text.
+  function L.tr(s)
+    sync()
+    local lang = L.on
+    if not lang or type(s) ~= 'string' or s == '' or not s_find(s, '%a') or was_done(s) then return s end
+    local c = L.cur[s]
+    if c == nil then
+      c = L.old[s]
+      if c ~= nil then
+        if L.n >= CACHE then L.old, L.cur, L.n = L.cur, {}, 0 end
+        L.cur[s], L.n = c, L.n + 1
+      end
+    end
+    if c ~= nil then return c end
+    local key = s_upper(s)
+    local out = lang.text[key]
+    if not out and #key <= PAT_KEY and lang.patterns[1] then
+      -- (pattern work has a budget a frame, looked at after each pattern: a text past it is drawn as it is, not kept,
+      -- and tried on from the next pattern in a later frame; L.skipped tells a caller that keeps what it made)
+      local f = ctx.frame and ctx.frame() or 0
+      if f ~= L.frame then L.frame, L.spent = f, 0 end
+      if L.spent >= BUDGET then L.skipped = true; return s end
+      local clock = ctx.clock
+      local t0 = clock and clock() or 0
+      local ps = lang.patterns
+      local i = L.resume[s] or 1
+      while ps[i] do
+        local p = ps[i]
+        local ok, r, m = pcall(s_gsub, key, p[1], p[2], 1)
+        if not ok then
+          log(s_format('language %s: pattern %q dropped: %s', lang.name, p[1], tostring(r)))
+          table.remove(ps, i)
+          L.resume, L.nresume = {}, 0            -- (the patterns after it moved up one)
+        else
+          if m > 0 then
+            if #r <= 2 * MAX_LEN then out = r end
+            break
+          end
+          i = i + 1
+        end
+        if clock and L.spent + (clock() - t0) >= BUDGET and ps[i] then
+          L.spent = BUDGET
+          if not L.resume[s] then
+            if L.nresume >= 1000 then L.resume, L.nresume = {}, 0 end
+            L.nresume = L.nresume + 1
+          end
+          L.resume[s], L.skipped = i, true
+          return s
+        end
+      end
+      if clock then L.spent = L.spent + (clock() - t0) end
+      if L.resume[s] then L.resume[s], L.nresume = nil, L.nresume - 1 end
+    end
+    if not out then
+      out = s
+      if L.nmissing < MISSING and not L.missing[key] and #key <= MAX_LEN and not L.names[key] and s_find(key, '%a%a')
+         and not s_find(key, '%d')
+         and not L.piece[s] and not L.oldpiece[s] and s_sub(s, -3) ~= '...' then
+        L.missing[key] = true
+        L.nmissing = L.nmissing + 1
+        L.dirty = true
+      end
+    else
+      done(out)
+    end
+    if L.n >= CACHE then L.old, L.cur, L.n = L.cur, {}, 0 end
+    L.cur[s], L.n = out, L.n + 1
+    return out
+  end
+
+  -- (the pieces of untranslated texts: lines, cut texts; two generations, as the cache. Never noted missing: the whole
+  -- text is the one to translate)
+  local function piece(s)
+    if L.piece[s] then return end
+    if L.npiece >= DONE then L.oldpiece, L.piece, L.npiece = L.piece, {}, 0 end
+    L.piece[s], L.npiece = true, L.npiece + 1
+  end
+  -- src: the text it was made from. Only a translated source (or a translation) makes its pieces kept, drawn as they
+  -- are from then on; an untranslated source's pieces are looked up again (they may be texts of their own), never
+  -- noted missing; a source whose patterns are still being tried makes nothing kept
+  function L.keep(s, src)
+    if not L.on or type(s) ~= 'string' or s == '' then return s end
+    if src ~= nil then
+      local c = L.cur[src]
+      if c == nil then c = L.old[src] end
+      -- (only the lines of a text that was translated, or is a translation: an untranslated one's lines may be texts
+      -- of their own)
+      if c == nil then
+        if not was_done(src) then return s end
+      elseif c == src then piece(s); return s end
+    end
+    done(s)
+    return s
+  end
+
+  function L.active() sync(); return L.on and L.on.name or nil, L.on and L.on.code or nil end
+  -- this frame's pattern budget already spent (a caller with texts that can wait tries again next frame)
+  function L.budget_spent()
+    local f = ctx.frame and ctx.frame() or 0
+    return f == L.frame and L.spent >= BUDGET
+  end
+  return L
+end
+
+M.code_of, M.data_only, M.pattern_ok, M.replacement_ok, M.utf8_cut = code_of, data_only, pattern_ok, replacement_ok, utf8_cut
+return M
+end)()
+-- @@END lang.lua@@
 local overrides = {}                     -- what each addon's environment gets on top of G (filled at start-up)
 
 -- ------------------------------------------------------------------ files
@@ -5248,6 +7612,9 @@ do
     f:close()
     if not clean then
       blamed = firsts[#firsts]
+      -- (the text GUI removal first: holds opened after it in the same frame are only drawing that followed it)
+      local rk = 'loader|text:reclaim'
+      if not blamed and opened[rk] and last_t - opened[rk] <= RECENT then blamed, blamed_job = rk, true end
       if not blamed then
         for i = #order, 1, -1 do
           local k = order[i]
@@ -5321,7 +7688,8 @@ end
 -- ------------------------------------------------------------------ guarded engine calls
 -- "Table.function" split once per name (the engine's tables are looked up each time, so a replaced one is seen)
 local split = {}
-local starter_no_global = { CowboyBingusModLoader = true, ModOptionsMenu = true }
+local starter_no_global = { CowboyBingusModLoader = true, HD2ModLoader = true, ModOptionsMenu = true, ModBindingsMenu = true,
+  BingusRuntime = true, __boot_mod_loader = true }
 local function fn_of(name)
   local sp = split[name]
   if sp == nil then
@@ -5393,11 +7761,27 @@ end
 -- 2 unused: u64; then size: u32 ...). A Lua resource: u32 length, u32 envelope (1 or 2: source text), then the text.
 -- scan.big: Lua resources over MAX_LUA I didn't read; scan.said: the skipped headers already in the log
 local found_addons, found_options, found_boots, scan = {}, {}, {}, { files = 0, ms = 0, bad = 0, seq = 0, big = 0, said = {},
-  list = {} }                          -- list: every patch file read, {file, n}, lowest number first (the index)
+  langs = {},                          -- langs: "-- HD2-Lang:" language files (services.lang)
+  list = {},                           -- list: every patch file read, {file, n}, lowest number first (the index)
+  mine = {}, cores = {} }              -- mine: boot scripts carrying my marker; cores: rows of my core, {file, n, version}
 local found_named = {}                 -- "-- HD2-Boot: mods/<author>/<name>" scripts (boot-style, run alongside)
 local discover
+-- My start-up stub's fingerprint (fingerprint() below, of src/stub.lua; tools/build.py checks it) and my core's name.
+-- scan.via: started by require as my core (the name require passed, or require's own placeholder in package.loaded
+-- while it loads me); scan.prev: the game's callbacks as the boot that loaded me left them.
+scan.STUB, scan.CORE, scan.prev = '17775935', 'mods/chef_shared_loader/core_1', chef_before.cb
+do
+  local P = rawget(G, 'package')
+  local held = type(P) == 'table' and type(P.loaded) == 'table' and rawget(P.loaded, scan.CORE)
+  -- (also when callbacks were already set before me, or a hand-off note is there: the game sets none before its boot,
+  -- so another boot ran first and loaded me, whatever its require passed)
+  scan.via = chef_before.via == scan.CORE or type(held) == 'userdata' or next(chef_before.cb) ~= nil
+    or rawget(G, 'ChefSharedLoaderHandoff') ~= nil
+end
 do   -- (the reading parts in a block: the loader is near Lua 5.1's 200 locals)
 local LUA_TYPE = { 0xe2, 0x17, 0xd1, 0x2c, 0xfa, 0x8d, 0x4e, 0xa1 }
+-- my core's resource id (murmur64 of mods/chef_shared_loader/core_1), as its 8 bytes in a table of contents
+local CORE_ID = '\154\087\100\126\056\137\119\194'
 local function u32(s, i) local a, b, c, d = byte(s, i, i + 3); return a + b * 256 + c * 65536 + d * 16777216 end
 local function u64(s, i) return u32(s, i) + u32(s, i + 4) * 4294967296 end
 local function is_lua(s, i) for k = 1, 8 do if byte(s, i + k - 1) ~= LUA_TYPE[k] then return false end end return true end
@@ -5422,12 +7806,18 @@ local function read_patch(f, name)
       if size > MAX_LUA then scan.big = scan.big + 1 end
       if size >= 8 and size <= MAX_LUA and sub(toc, at, at + 7) == BOOT_ID and f:seek('set', off) then
         -- another mod's boot script (the game runs only the last one deployed): kept to run alongside mine, unless
-        -- it's a copy of this loader (another mod with it built in)
+        -- it's one of mine (my start-up stub, or a copy of this loader built into another mod): those are only noted
         local src = f:read(size) or ''
         local v = #src == size and u32(src, 5)
-        if (v == 1 or v == 2) and not src:find('--@@LOADER@@', 1, true) then
-          found_boots[#found_boots + 1] = { file = name:match('[^/]+$'), src = sub(src, 9) }
+        if v == 1 or v == 2 then
+          local list = src:find('--@@LOADER@@', 1, true) and scan.mine or found_boots
+          list[#list + 1] = { file = name:match('[^/]+$'), src = sub(src, 9), n = tonumber(name:match('(%d+)$')) or 0 }
         end
+      elseif size >= 8 and size <= MAX_LUA and sub(toc, at, at + 7) == CORE_ID and f:seek('set', off) then
+        -- a copy of my core (the game's require loads the one in the highest patch): noted with its version, never a mod
+        local head = f:read(min(size, 8192)) or ''
+        scan.cores[#scan.cores + 1] = { file = name:match('[^/]+$'), n = tonumber(name:match('(%d+)$')) or 0,
+                                        version = (head:match("\nlocal VERSION = '([^'\n]+)'") or 'of an unknown version'):sub(1, 40):gsub('%c', ' ') }
       elseif size >= 8 and size <= MAX_LUA and f:seek('set', off) then
         local first = f:read(min(size, 120)) or ''
         local v = #first >= 8 and u32(first, 5)
@@ -5435,17 +7825,20 @@ local function read_patch(f, name)
           -- a text editor's UTF-8 mark in front of the header is dropped (Lua 5.1 can't read past it either)
           local bom = sub(first, 9, 11) == '\239\187\191' and 3 or 0
           local kind, mod = first:sub(9 + bom):match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
-          local known = kind == 'Addon' or kind == 'Options' or kind == 'Boot'
+          local known = kind == 'Addon' or kind == 'Options' or kind == 'Boot' or kind == 'Lang'
+          if known and mod and mod:find('//', 1, true) then known = nil end   -- (no empty part in a name)
           if mod and not (known and mod:match(ALLOW)) and not scan.said[kind .. ' ' .. mod] then
             scan.said[kind .. ' ' .. mod] = true
             log(fmt('skipped "-- HD2-%s: %s" in %s: %s', kind, mod, name:match('[^/]+$'), known
-              and 'the name must be mods/<author>/<name> (letters, digits, _ and -)' or 'HD2-Addon, HD2-Boot or HD2-Options was expected'))
+              and 'the name must be mods/<author>/<name>, more parts allowed (letters, digits, _ and -)' or known == false
+              and 'HD2-Addon, HD2-Boot, HD2-Options or HD2-Lang was expected' or 'the name must be mods/<author>/<name> (no empty part)'))
           end
           if mod and known and mod:match(ALLOW) and f:seek('set', off + 8 + bom) then
             local src = f:read(size - 8 - bom) or ''
             if #src ~= size - 8 - bom then scan.bad = scan.bad + 1
             else
-              local list = kind == 'Addon' and found_addons or (kind == 'Boot' and found_named or found_options)
+              local list = kind == 'Addon' and found_addons or (kind == 'Boot' and found_named or (kind == 'Lang' and scan.langs
+                or found_options))
               -- the patch number (when two patches carry the same mod, the higher one wins, below) and the order
               -- found (a tie-break, so two copies always resolve the same way)
               scan.seq = scan.seq + 1
@@ -5466,7 +7859,7 @@ discover = function()
     local f = open(name, 'rb')
     if not f then
       misses = misses + 1
-      if misses > 40 then break end
+      if misses > 64 then break end
     else
       misses = 0
       scan.files = scan.files + 1
@@ -5753,10 +8146,20 @@ local function camera()
   return nil
 end
 
+-- A key's index, asked of the engine once. No answer (the keyboard isn't ready yet in the first frames on some
+-- setups, or a key name it doesn't know) is asked again every 2 s, never kept for good: a key asked about at start-up
+-- (the options menu's) would otherwise stay dead for the whole session. keys[name .. '|at']: when to ask again.
 local keys = {}
 local function key_index(name)
   local k = keys[name]
-  if k == nil then k = api('Keyboard.button_index', name) or false; keys[name] = k end
+  if k == nil or (k == false and elapsed >= keys[name .. '|at']) then
+    k = api('Keyboard.button_index', name) or false
+    keys[name] = k
+    if not k then
+      keys[name .. '|at'] = elapsed + 2
+      if not keys[name .. '|said'] then keys[name .. '|said'] = true; log(fmt('key "%s": the game has no index for it yet; asking again every 2 s', name)) end
+    elseif keys[name .. '|said'] then log(fmt('key "%s": found now', name)) end
+  end
   return k
 end
 
@@ -6263,8 +8666,10 @@ local function gui()
   return draw.gui or nil
 end
 
--- The top: the first world that isn't the main one, drawn on top
--- of the game's map. Anything drawn at layer 2000 or up goes there (at its layer - 1000). I check every frame that
+-- The top: the first world that isn't the main one. The game draws its own HUD, map and menus in that world too,
+-- sorted in with my layers there: its layers 0 to 1000 show over all of them but the menus' top bar and button
+-- prompts (0 only partly: some menu panels are at it), higher ones only over the HUD and the map, below 0 only over
+-- the HUD. Anything drawn at layer 2000 or up goes there, at its layer - 2000 (so 2000-2999: over the menus too). I check every frame that
 -- something is drawn there that it's still the same world (and the world count hasn't changed); if not, I drop my
 -- GUIs without touching them, because a GUI used after its world went away crashes the game.
 local TOP_FROM = 2000
@@ -6316,8 +8721,8 @@ local function rect(x, y, w, h, c, layer)
   layer = layer or 900
   if draw.frame ~= frame_no then draw_world_reset() end
   local g
-  if layer >= TOP_FROM then g = top_gui(); layer = layer - 1000
-  elseif draw.ui then g = top_gui(); layer = draw.ui_base + layer - 900; if not draw.raw then c = ui_color(c) end
+  if layer >= TOP_FROM then g = top_gui(); layer = layer - TOP_FROM
+  elseif draw.ui then g = top_gui(); layer = min(draw.ui_base + layer - 900, -1); if not draw.raw then c = ui_color(c) end
   else
     -- PERF: the game world's GUI straight from draw once it's made (gui() again only while there's none)
     g = draw.gui
@@ -6354,8 +8759,8 @@ function draw.tri(x1, y1, x2, y2, x3, y3, c, layer)
   layer = layer or 900
   draw_world_reset()
   local g
-  if layer >= TOP_FROM then g = top_gui(); layer = layer - 1000
-  elseif draw.ui then g = top_gui(); layer = draw.ui_base + layer - 900; c = ui_color(c)
+  if layer >= TOP_FROM then g = top_gui(); layer = layer - TOP_FROM
+  elseif draw.ui then g = top_gui(); layer = min(draw.ui_base + layer - 900, -1); c = ui_color(c)
   else g = gui() end
   if not g then return false end
   if draw.tri_ok then
@@ -6498,8 +8903,40 @@ end
 -- loaded, text calls fail, a text call ended the game (skipped from the next launch on), or the player turns it off
 -- (F9 > Chef Shared Loader > Game font).
 do
+  -- UTF-8: one character (ASCII, or a lead byte and its continuation bytes) and a multibyte one; utf8_clean keeps the
+  -- well-formed characters and makes every other byte a '?'; utf8_floor: the last character boundary at or before a
+  -- byte count; utf8_len: characters
+  draw.UTF8_CHAR, draw.UTF8_MB = '[%z\1-\127\194-\244][\128-\191]*', '[\194-\244][\128-\191]+'
+  function draw.utf8_clean(str)
+    local out, i, n = {}, 1, #str
+    while i <= n do
+      local b = byte(str, i)
+      local len = b < 128 and 1 or (b >= 194 and b <= 223 and 2) or (b >= 224 and b <= 239 and 3) or (b >= 240 and b <= 244 and 4) or 0
+      local ok = len > 0 and i + len - 1 <= n
+      for k = i + 1, ok and i + len - 1 or i do
+        local c = byte(str, k)
+        if c < 128 or c > 191 then ok = false; break end
+      end
+      -- (and no overlong form, UTF-16 surrogate or code point past U+10FFFF: the second byte's narrower range)
+      if ok and len > 2 then
+        local c = byte(str, i + 1)
+        if (b == 224 and c < 160) or (b == 237 and c > 159) or (b == 240 and c < 144) or (b == 244 and c > 143) then ok = false end
+      end
+      if ok then out[#out + 1] = sub(str, i, i + len - 1); i = i + len else out[#out + 1] = '?'; i = i + 1 end
+    end
+    return concat(out)
+  end
+  function draw.utf8_floor(str, n)
+    while n > 0 and n < #str do
+      local c = byte(str, n + 1)
+      if c < 128 or c > 191 then break end
+      n = n - 1
+    end
+    return n
+  end
+  function draw.utf8_len(str) local _, n = str:gsub('[^\128-\191]', ''); return n end
   local nt = { fonts = { 'content/fonts/fs_sinclair_medium_runtime', 'content/fonts/fallback', '9ad413a8fea59728' },
-               MAT = 'content/fonts/runtime_font', font = nil, check_at = -100, fails = 0, adv = {}, cap = nil, base = 0,
+               MAT = 'content/fonts/runtime_font', font = nil, gen = 0, check_at = -100, fails = 0, adv = {}, cap = nil, base = 0,
                frame = -1, on = false, main = nil, top = nil, dead = false, row = nil, refused = {},
                WHICH = { 'main', 'top' } }
   draw.nt = nt
@@ -6626,10 +9063,24 @@ do
     if nt.font and elapsed >= nt.check_at + 2 then
       nt.check_at = elapsed
       if not draw.nt_loaded() then return false end
+      -- a later font in the list, picked while the first wasn't loaded yet (an early title screen): the first one as
+      -- soon as it is, measured again, with every text up changed to it
+      local f1 = nt.fonts[1]
+      if nt.font ~= f1 then
+        local a = font_arg(f1)
+        if a ~= nil and api('Application.can_get', 'runtime_font', a) == true then
+          nt.font, nt.cap, nt.adv, nt.refused, nt.loaded_frame, nt.gen = f1, nil, {}, {}, nil, nt.gen + 1
+          for i = 1, 2 do
+            local t = nt[nt.WHICH[i]]
+            if t then t.proven, t.drew = nil, nil; for _, s in pairs(t.slots) do s.str, s.refont = nil, true end end
+          end
+        end
+      end
     end
     if not nt.font then
       nt.font = pick_font()
       if not nt.font then return false end
+      nt.gen = nt.gen + 1
       for i = 1, 2 do local t = nt[nt.WHICH[i]]; if t then t.proven, t.drew = nil, nil end end   -- (a new font: held again)
     end
     if not nt.cap then
@@ -6639,7 +9090,18 @@ do
       local _, y0, _, y1 = extents(t.g, 'H')
       if not y0 or y1 - y0 < 10 or y1 - y0 > 200 then fail('the font measured wrong'); return false end
       nt.cap, nt.base = y1 - y0, y0
-      log(fmt('text: the game font %s (cap height %.1f at size 100)', nt.font, nt.cap))
+      -- (and whether it has CJK glyphs: one measure of a common one, for translators; 0 wide means none). Its own
+      -- hold: after two launches that end in it, it's skipped. Measured once per font, kept as its advance.
+      local cjk, CH = nil, '\228\184\173'
+      if not skip['loader|font:cjk'] and nt.adv[CH] == nil then
+        hold('loader|font:cjk', true)
+        cjk = select(5, extents(t.g, CH))
+        hold('loader|font:cjk', false)
+        if cjk and cjk >= 0 and cjk < 400 then nt.adv[CH] = cjk end
+      end
+      cjk = cjk or nt.adv[CH]
+      log(fmt('text: the game font %s (cap height %.1f at size 100; CJK glyphs: %s)', nt.font, nt.cap,
+        cjk == nil and 'not measured' or (cjk > 0 and fmt('yes (%.1f wide)', cjk) or 'no')))
     end
     nt.on = true
     return true
@@ -6677,37 +9139,60 @@ do
     if r.n >= 3 then nt.adv[ch] = 60 else nt.guessed = true end
     return 60
   end
-  -- the text as drawn: capitals, no control characters, ASCII only (a byte above 127 is a '?', as in the pixel font:
-  -- a cut never splits a character the engine gets), at most 1024 bytes (the engine's limit for one text)
+  -- the text as drawn: capitals (A-Z only), no control characters, UTF-8 kept whole (any byte that isn't part of a
+  -- well-formed character is a '?', and so is a character the font has no glyph for: it measures 0 wide), at most 1024
+  -- bytes (the engine's limit for one text), cut between characters. Plain ASCII skips all of that.
   local function shown(str)
-    str = str:upper():gsub('%c', ' '):gsub('[\128-\255]', '?')
-    if #str > 1024 then str = sub(str, 1, 1024) end
+    str = str:upper():gsub('%c', ' ')
+    if str:find('[\128-\255]') then
+      str = draw.utf8_clean(str):gsub(draw.UTF8_MB, function(ch) if advance(ch) <= 0 then return '?' end end)
+    end
+    if #str > 1024 then str = sub(str, 1, draw.utf8_floor(str, 1024)) end
     return str
   end
   local function width_of(str, px)                         -- (str already as shown)
     local total = 0
-    for i = 1, #str do total = total + advance(sub(str, i, i)) end
+    for ch in str:gmatch(draw.UTF8_CHAR) do total = total + advance(ch) end
     return floor(total * size_of(px) / 100 + 0.5)
+  end
+  -- a shown text's width, and whether a glyph in it was a guess (nt.guessed kept as it was for my other callers)
+  function draw.nt_measured(str, px)
+    local was = nt.guessed
+    nt.guessed = false
+    local w = width_of(str, px)
+    local g = nt.guessed
+    nt.guessed = was or g
+    return w, g
   end
   function draw.nt_width(str, px)
     str = shown(str)
     local total = 0
-    for i = 1, #str do total = total + advance(sub(str, i, i)) end
-    if not nt.cap then return #str * 6 * px - px end         -- (the font went while measuring: the pixel font's width)
+    for ch in str:gmatch(draw.UTF8_CHAR) do total = total + advance(ch) end
+    if not nt.cap then return draw.utf8_len(str) * 6 * px - px end   -- (the font went while measuring: the pixel font's width)
     return floor(total * size_of(px) / 100 + 0.5)
   end
   function draw.nt_text(x, y, str, px, c, layer)
     if not draw.finite(x, y, px) or px <= 0 then return nil end
     local l, cc, which = layer or 900, c, 'main'
-    if l >= TOP_FROM then which = 'top'; l = l - 1000
-    elseif draw.ui then which = 'top'; l = draw.ui_base + l - 900; if not draw.raw then cc = ui_color(cc) end end
+    if l >= TOP_FROM then which = 'top'; l = l - TOP_FROM
+    elseif draw.ui then which = 'top'; l = min(draw.ui_base + l - 900, -1); if not draw.raw then cc = ui_color(cc) end end
     if not cc then return nil end
     local size = size_of(px)
     if type(l) ~= 'number' or not draw.finite(l, size, nt.base * size / 100) then return nil end   -- (the pixel font)
     local t = text_gui(which)
     if not t then return nil end
     if t.frame ~= frame_no then t.frame, t.n = frame_no, 0 end
-    str = shown(str)
+    -- (the same text as this slot's last one, in the same font: as shown then, without working it out again)
+    local raw, s0 = str, t.slots[t.n + 1]
+    if s0 and s0.raw == raw and s0.gen == nt.gen then str = s0.str
+    else
+      -- (a glyph not measured yet was guessed: worked out again next time, not kept)
+      local was = nt.guessed
+      nt.guessed = false
+      str = shown(str)
+      if nt.guessed then raw = nil end
+      nt.guessed = was or nt.guessed
+    end
     -- the change key: the color's numbers (and whether it was converted); a color I didn't make has none, so a slot
     -- with it is always changed (an engine value from an earlier frame is never compared or kept)
     local key = draw.key_of(c)
@@ -6717,13 +9202,21 @@ do
     if k > t.max then t.max = k end
     local s = t.slots[k]
     if s and ck and s.str == str and s.x == x and s.y == y and s.l == l and s.size == size and s.ck == ck then
+      -- (kept while a glyph was guessed: measured again, and kept as shown once nothing is a guess)
+      if s.raw == nil then
+        local w2, g = draw.nt_measured(str, px)
+        s.w, s.gen = w2, nt.gen
+        if not g then s.raw = raw end
+      end
       return s.w
     end
     if not draw.nt_loaded() then t.n = t.n - 1; return nil end
     local p = api('Vector3', x, y - nt.base * size / 100, l)
     if not p then t.n = t.n - 1; return nil end
-    local w = width_of(str, px)
+    local w, g = draw.nt_measured(str, px)
+    if g then raw = nil end                              -- (a guessed width: measured again next time)
     if s then
+      if s.refont then s.refont = nil; calls(t); t.drew = true end   -- (its first frame in a new font: held as a new one)
       local _, err = api('Gui.update_text', t.g, s.id, str, font_arg(nt.font), size, nt.MAT, p, cc)
       if err then
         api('Gui.destroy_text', t.g, s.id)
@@ -6732,37 +9225,72 @@ do
         fail('a text could not be changed (' .. err .. ')', not key)
         return nil
       end
-      s.str, s.x, s.y, s.l, s.size, s.ck, s.w = str, x, y, l, size, ck, w
+      s.str, s.x, s.y, s.l, s.size, s.ck, s.w, s.raw, s.gen = str, x, y, l, size, ck, w, raw, nt.gen
     else
       calls(t)
       local id = api('Gui.text', t.g, str, font_arg(nt.font), size, nt.MAT, p, cc)
       if type(id) ~= 'number' then t.n = t.n - 1; fail('a text could not be made', not key); return nil end
-      t.slots[k] = { id = id, str = str, x = x, y = y, l = l, size = size, ck = ck, w = w }
+      t.slots[k] = { id = id, str = str, x = x, y = y, l = l, size = size, ck = ck, w = w, raw = raw, gen = nt.gen }
       t.drew = true
     end
     return w
   end
   -- A new engine world instance for the main one: its text GUI is let go untouched, as every GUI of mine is then (one
   -- used after its world went away ends the game, and nothing tells a world that's gone from a new one in its place).
-  -- If the old world was in fact still there, its texts stay up: the log says so once, when it happens with the same
-  -- world handle.
+  -- Unless the old world stays in the game's world list in every frame from the change until the new main world has
+  -- settled: then it's still drawn with the old GUI's texts on it (the title screen's world kept beside the ship's, or
+  -- restarted in place), and that GUI is removed. A world that leaves the list even for a frame (or a frame the list
+  -- can't be read) may be gone, with another in its place later: that GUI is let go untouched. The call has its own
+  -- key, and its hold has the first claim on a launch that ends while it's open: a launch that ends in it (or, twice,
+  -- in the frames after) leaves such texts untouched from then on.
   function draw.nt_drop(t)
     if nt.main == t then nt.main = nil end
-    if t.max > 0 then nt.dropped = t.world end
+    if t.max > 0 then nt.dropped, nt.dropped_g = t.world, t.g end
   end
-  -- (said once: a main text GUI with texts was let go and its world handle came back, so they may still be up)
+  -- (called every frame while a dropped GUI is pending: forgotten the first frame its world isn't listed, removed in
+  -- the first frame the main world is settled)
   function draw.nt_said_dropped(w)
-    if nt.dropped and nt.dropped == w and not nt.said_restart then
-      nt.said_restart = true
-      log('text: the main world came back after a change (the same handle); the texts of its old GUI were left untouched')
+    local d, g = nt.dropped, nt.dropped_g
+    if d == nil then return end
+    if listed_now(d) ~= true then
+      nt.dropped, nt.dropped_g = nil, nil
+      if not nt.said_left then
+        nt.said_left = true
+        log('text: the last main world left the world list; the texts of its old GUI were let go untouched')
+      end
+      return
     end
-    nt.dropped = nil
+    if not world.stable then return end
+    nt.dropped, nt.dropped_g = nil, nil
+    local how = d == w and 'the main world restarted in place' or 'the last main world is still in the world list'
+    local err = 'skipped'
+    if not skip['loader|text:reclaim'] then
+      nt.reclaim_frame = frame_no
+      hold('loader|text:reclaim', true)
+      proven['loader|text:reclaim'] = nil            -- (breadcrumbed every time: each one may be the one that ends it)
+      err = select(2, guarded('loader', 'text:reclaim', fn_of('World.destroy_gui'), d, g))
+    end
+    if err == nil then
+      if not nt.said_reclaim then
+        nt.said_reclaim = true
+        log('text: ' .. how .. '; the texts of its old GUI were removed')
+      end
+    elseif not nt.said_restart then
+      nt.said_restart = true
+      log('text: ' .. how .. '; the texts of its old GUI were left untouched (' .. tostring(err) .. ')')
+    end
   end
   -- The slots a frame didn't use go (all of them while the font is off), in a text GUI whose world is still there.
   -- At the end of render (when=0: this frame's) and, in case render didn't run, at the start of the next frame (1).
   function draw.nt_sweep(when)
-    -- (released once a frame with none made has passed, and a render since the last one made: the game draws in render)
+    -- (the text and reclaim holds: released once a frame with none made has passed, and a render since the last one
+    -- made, or none seen this launch: the game draws in render)
     if when == 0 then nt.rendered = frame_no end
+    if when == 1 and nt.reclaim_frame and nt.reclaim_frame < frame_no - 1
+       and (not nt.rendered or nt.rendered > nt.reclaim_frame) then
+      nt.reclaim_frame = nil; hold('loader|text:reclaim', false)
+    end
+    if when == 1 and nt.dropped ~= nil then draw.nt_said_dropped(world.main) end
     if when == 1 and nt.holding and (nt.made_frame or -1) < frame_no - 1
        and (not nt.rendered or nt.rendered > nt.made_frame) then
       nt.holding = false; hold('loader|draw:text', false)
@@ -6794,10 +9322,20 @@ do
     end
   end
 end
-local function text_width(str, px)
-  if type(str) == 'string' and type(px) == 'number' and draw.nt_on() then return draw.nt_width(str, px) end
-  return #str * 6 * px - px
+-- (the pixel font: every UTF-8 character, or stray byte above 127, is one '?')
+function draw.pixel_text(str)
+  if not str:find('[\128-\255]') then return str end
+  return (str:gsub('[\192-\255][\128-\191]*', '?'):gsub('[\128-\191]', '?'))
 end
+-- (a text as the language picked in my menu has it: services.lang, once language files are found; else itself)
+function draw.tr(s) return s end
+function draw.tr_keep(s) return s end      -- (a text made from a translated one: kept as it is)
+-- a text's width as drawn, as it is (draw.measure) or translated first (text_width)
+function draw.measure(str, px)
+  if type(str) == 'string' and type(px) == 'number' and draw.nt_on() then return draw.nt_width(str, px) end
+  return #draw.pixel_text(str) * 6 * px - px
+end
+local function text_width(str, px) return draw.measure(draw.tr(str), px) end
 -- PERF: once rect's fast path is proven, a whole text goes through one pcall, its GUI, layer and color worked out once
 -- (rect does that per rect: twice draw_world_reset, the GUI and the layer for every one of a letter's 5-6 rects)
 function draw.text_fast(g, x, y, str, px, c, layer)
@@ -6818,19 +9356,29 @@ function draw.text_fast(g, x, y, str, px, c, layer)
 end
 local function text(x, y, str, px, c, layer)
   if not c then return 0 end
+  -- Under my full screen menu (draw.cover: its lowest layer in the top world, while it's open) a text of the top world
+  -- isn't drawn: the game's font draws over every rect of its world, so it would show through the menu. Measured all
+  -- the same, for the caller's layout.
+  local lv = layer or 900
+  if draw.cover and type(px) == 'number' and type(lv) == 'number'
+     and ((lv >= TOP_FROM and lv - TOP_FROM < draw.cover) or (lv < TOP_FROM and draw.ui)) then
+    return text_width(type(str) == 'string' and str or tostring(str), px)
+  end
+  str = draw.tr(str)
   if type(str) == 'string' and type(x) == 'number' and type(y) == 'number' and type(px) == 'number'
      and (layer == nil or type(layer) == 'number') and draw.nt_on() then
     local w = draw.nt_text(x, y, str, px, c, layer)
     if w then return w end
     -- (a text the game font couldn't take draws in the pixel font, this call only)
   end
+  if type(str) == 'string' then str = draw.pixel_text(str) end
   if fast_rect and world.stable and type(str) == 'string' and type(x) == 'number' and type(y) == 'number'
      and type(px) == 'number' and (layer == nil or type(layer) == 'number') then
     local l, cc = layer or 900, c
     draw_world_reset()
     local g
-    if l >= TOP_FROM then g = top_gui(); l = l - 1000
-    elseif draw.ui then g = top_gui(); l = draw.ui_base + l - 900; if not draw.raw then cc = ui_color(cc) end
+    if l >= TOP_FROM then g = top_gui(); l = l - TOP_FROM
+    elseif draw.ui then g = top_gui(); l = min(draw.ui_base + l - 900, -1); if not draw.raw then cc = ui_color(cc) end
     else g = gui() end
     if not g or pcall(draw.text_fast, g, x, y, str, px, cc, l) then return #str * 6 * px - px end
     -- a call that fails (a mod's odd color, say) takes the guarded path below, for this call only
@@ -6851,17 +9399,18 @@ function draw.text_cut(str, px, maxw, dots)
   local lo, hi = 0, #str
   while lo < hi do
     local mid = floor((lo + hi + 1) / 2)
-    if text_width(sub(str, 1, mid) .. dots, px) <= maxw then lo = mid else hi = mid - 1 end
+    if draw.measure(sub(str, 1, mid) .. dots, px) <= maxw then lo = mid else hi = mid - 1 end
   end
-  return lo
+  return draw.utf8_floor(str, lo)          -- (never inside a UTF-8 character)
 end
 -- a text cut to a width, ending in '...' when it was cut
 function draw.text_fit(str, px, maxw)
-  str = tostring(str or '')
-  if type(px) ~= 'number' or type(maxw) ~= 'number' or text_width(str, px) <= maxw then return str end
+  local src = tostring(str or '')
+  str = draw.tr(src)
+  if type(px) ~= 'number' or type(maxw) ~= 'number' or draw.measure(str, px) <= maxw then return str end
   local n = draw.text_cut(str, px, maxw, '...')
-  if n > 0 then return (sub(str, 1, n):gsub('%s+$', '')) .. '...' end
-  return text_width('...', px) <= maxw and '...' or ''
+  if n > 0 then return draw.tr_keep((sub(str, 1, n):gsub('%s+$', '')) .. '...', src) end
+  return draw.measure('...', px) <= maxw and '...' or ''
 end
 -- a text broken into lines that fit a width, at spaces (a word longer than a line is broken where it has to be); at
 -- most `most` lines (64 if not given), the rest left out
@@ -6869,15 +9418,17 @@ function draw.text_wrap(str, px, maxw, most)
   local lines, cur = {}, ''
   most = type(most) == 'number' and most >= 1 and floor(most) or 64
   if type(px) ~= 'number' or type(maxw) ~= 'number' or maxw <= 0 then return { tostring(str or '') } end
-  for word in tostring(str or ''):gmatch('%S+') do
+  local src = tostring(str or '')
+  for word in draw.tr(src):gmatch('%S+') do
     local try = cur == '' and word or (cur .. ' ' .. word)
-    if text_width(try, px) <= maxw then
+    if draw.measure(try, px) <= maxw then
       cur = try
     else
       if cur ~= '' then lines[#lines + 1] = cur end
       cur = word
-      while #cur > 1 and #lines < most and text_width(cur, px) > maxw do
-        local n = max(1, draw.text_cut(cur, px, maxw, ''))
+      while #cur > 1 and #lines < most and draw.measure(cur, px) > maxw do
+        local n = draw.text_cut(cur, px, maxw, '')
+        if n < 1 then n = #(cur:match('^' .. draw.UTF8_CHAR) or sub(cur, 1, 1)) end   -- (at least one whole character)
         lines[#lines + 1] = sub(cur, 1, n)
         cur = sub(cur, n + 1)
       end
@@ -6885,6 +9436,7 @@ function draw.text_wrap(str, px, maxw, most)
     if #lines >= most then break end
   end
   if cur ~= '' and #lines < most then lines[#lines + 1] = cur end
+  for i = 1, #lines do draw.tr_keep(lines[i], src) end
   return lines
 end
 
@@ -6947,7 +9499,7 @@ local function bitmap(tex, x, y, w, h, c, layer, u0, v0, u1, v1)
     target = top_world()
     if not target then return false end
     icons = top.icons
-    if layer >= TOP_FROM then layer = layer - 1000 else layer = draw.ui_base + layer - 900 end
+    if layer >= TOP_FROM then layer = layer - TOP_FROM else layer = min(draw.ui_base + layer - 900, -1) end
   end
   local e = icons[tex]
   if e == nil then
@@ -7035,7 +9587,16 @@ local addons, notices = {}, {}
 local svc = services.install({ log = log, guarded = guarded, fn_of = fn_of, open = open, DIR = DIR, FILES = FILES, LOADER = LOADER,
   OLD_DIR = services.OLD_DIR ~= DIR and services.OLD_DIR or nil,
   VERSION = VERSION, ALLOW = ALLOW, TOP = TOP_FROM, world = world, color = color, rect = rect, text = text, text_width = text_width,
+  bitmap = bitmap, cover = function(l) draw.cover, draw.cover_set = type(l) == 'number' and l - TOP_FROM or nil, true end,
   text_fit = draw.text_fit, text_wrap = draw.text_wrap, text_native = function() return draw.nt_on() end,
+  tr = function(s) return draw.tr(s) end, tr_keep = function(s) return draw.tr_keep(s) end,
+  lang_v = function() return draw.lang and draw.lang.v end,
+  tr_cut = function(reset)                       -- (a text the frame's pattern budget cut: drawn as it is this frame)
+    local L = draw.lang
+    if not L then return false end
+    if reset then L.skipped = false end
+    return L.skipped == true
+  end,
   screen = function() draw_world_reset(); return draw.w, draw.h end,
   key_pressed = function(name)
     local k = key_index(name)
@@ -7071,19 +9632,50 @@ svc.util = services.utilities.install(svc.ctx, { api = api, xyz = xyz, rect = re
   end })
 -- my own row in the options menu: the frame budget behind chef.budget
 svc.util.budget_row = svc.loader_option('budget', { type = 'slider', label = 'Budget warning (ms)', min = 0.5, max = 10,
-  step = 0.5, default = 2 })
+  step = 0.5, default = 2, section = 'monitor' })
 -- and the performance monitor (utilities: each mod's cost, drawn once a second's numbers are in)
-svc.util.perf_row = svc.loader_option('perf', { type = 'toggle', label = 'Performance monitor', default = false })
+svc.util.perf_row = svc.loader_option('perf', { type = 'toggle', label = 'Performance monitor', default = false,
+  section = 'monitor' })
+-- (where the monitor sits: the player keeps it clear of what they want to see)
+svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label = 'Monitor position', default = 1,
+  choices = { 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left' }, section = 'monitor' })
 -- and the font (on: the game's own, off: the pixel font)
-draw.nt.row = svc.loader_option('font', { type = 'toggle', label = 'Game font', default = true })
+draw.nt.row = svc.loader_option('font', { type = 'toggle', label = 'Game font', default = true, section = 'menu' })
 -- the HD2Runtime look-alike (src/chef_loader/runtime.lua): its callbacks run through the mod's own hooks (a.rt)
 svc.runtime = services.runtime.install({ log = log, guarded = guarded, fn_of = fn_of, G = G, DIR = DIR,
   VERSION = VERSION, util = svc.util, frame = function() return frame_no end, now = function() return elapsed end,
   instance = function() return world.instance end,
   trusted = function(owner) return TRUSTED[owner] end,
+  -- the view names: only their trusted mod's value is ever shared under them
+  reserved = (function()
+    local r = {}
+    for owner, t in pairs(TRUSTED) do
+      if type(t.view) == 'table' and type(t.view.global) == 'string' then r[t.view.global] = owner end
+    end
+    return r
+  end)(),
   mod_log = function(owner, text) log('[' .. owner .. '] ' .. text) end,
   attach = function(owner, hooks) local a = svc.ctx.addon(owner); if a then a.rt = hooks end end })
 new_world_hooks[#new_world_hooks + 1] = function() svc.runtime.new_world() end
+-- language files (src/chef_loader/lang.lua): read once discovery has found them, at start-up
+svc.lang = services.lang.install({ log = log, open = open, DIR = DIR, FILES = FILES, clock = clock,
+  frame = function() return frame_no end, crumb = crumb, skipped = function(k) return skip[k] == true end, fp = function(s) return fingerprint(s) end,
+  skip_now = function(k) skip[k] = true; save_state() end })
+-- the options menu's texts through the language, from where the last frame's pattern budget stopped (the list made
+-- once per rows-and-language version; draw.tr_list false once every text was looked up)
+function draw.tr_pass()
+  local list = draw.tr_list or svc.option_texts()
+  draw.tr_list = list
+  local i = draw.tr_at
+  while list[i] do
+    svc.lang.skipped = false
+    draw.tr(list[i])
+    if svc.lang.skipped then break end
+    i = i + 1
+  end
+  draw.tr_at = i
+  if not list[i] then draw.tr_list = false end
+end
 local function options_for(name)
   local o = {}
   for _, r in ipairs(found_options) do
@@ -7243,6 +9835,9 @@ local function make_api(a)
   end
   chef.TOP = TOP_FROM
   chef.color, chef.text_width = color, text_width
+  -- the language picked in my menu (its name and code, nil for English), and a text as it has it
+  function chef.lang() return svc.lang.active() end
+  function chef.tr(s) return draw.tr(s) end
   function chef.rect(x, y, w, h, c, layer) rect(x, y, w, h, c, layer) end
   function chef.text(x, y, s, px, c, layer) return text(x, y, s, px, c, layer) end
   function chef.text_fit(s, px, maxw) return draw.text_fit(s, px, maxw) end
@@ -7262,6 +9857,7 @@ svc.starter = starter
 -- and loot kinds go, and the services forget it (no more events or change callbacks to it; its timers, jobs and what it
 -- spawned go too).
 function starter.off(a)
+  if not a.forgotten then starter.undo(a) end
   a.on = false
   a.game_env = nil                                   -- (its environment isn't kept for the session)
   if a.forgotten then return end
@@ -7270,6 +9866,35 @@ function starter.off(a)
   for i = #kinds_from, 1, -1 do if kinds_from[i] == a then table.remove(kinds_from, i) end end
   local ok, err = pcall(svc.forget, a.name)
   if not ok then log('forgetting ' .. a.name .. ' failed: ' .. tr.why(err)) end
+end
+
+-- A mod I stop gets one call first to put back what only it knows: its module's on_stop() and, for an HD2Runtime mod,
+-- its handle.on('stop') callbacks (both when it has both). The engine can't tell me what texture a material had
+-- before a mod's set_texture, so I can't undo those myself. Each is breadcrumbed ("<mod>|on_stop", "<mod>|stop"; one
+-- that ended the game is skipped from then on); the mod's engine calls still work here, since nothing of it is
+-- forgotten yet.
+function starter.undo(a)
+  local list = {}
+  if type(a.module) == 'table' then
+    local fn = rawget(a.module, 'on_stop')
+    if fn == nil and a.hooks_mt then
+      local ok, v = pcall(starter.get, a.module, 'on_stop')
+      if ok then fn = v end
+    end
+    if type(fn) == 'function' then list[#list + 1] = { 'on_stop', fn } end
+  end
+  if type(a.rt) == 'table' and type(a.rt.stop) == 'function' then list[#list + 1] = { 'stop', a.rt.stop } end
+  for _, e in ipairs(list) do
+    local k = a.name .. '|' .. e[1]
+    if skip[k] then log('skipped ' .. k .. ' (it crashed the game)')
+    else
+      crumb('> ' .. k)
+      local ok, err = pcall(e[2])
+      crumb('< ' .. k)
+      if ok then log(e[1] .. ': ' .. a.name .. ' put back what it changed')
+      else log('[' .. a.short .. '] ' .. e[1] .. ' error: ' .. tr.why(err)) end
+    end
+  end
 end
 
 -- A mod's time is summed here (its hooks; its timers and spread jobs in the utilities) and divided by the loader's own
@@ -7351,15 +9976,16 @@ end
 -- What a mod is doing and why, for chef.mods() and chef_loader_health.txt (written at most every 5 s after a change).
 function starter.state(a, state, why)
   a.state, a.why = state, why
+  if state == 'running' then starter.publish(a.name) end
   svc.ctx.health_dirty = true
 end
 -- A boot-style mod or another mod's boot script that never started (it never reaches the boots list): listed too
 starter.unstarted = {}
-function starter.never(name, file, state, why)
+function starter.never(name, file, state, why, kind)
   for i = #starter.unstarted, 1, -1 do                       -- (the same one again, after a reload: the latest why)
     if starter.unstarted[i].name == name then table.remove(starter.unstarted, i) end
   end
-  starter.unstarted[#starter.unstarted + 1] = { name = name, kind = 'boot', file = file, state = state, why = why, errors = 0 }
+  starter.unstarted[#starter.unstarted + 1] = { name = name, kind = kind or 'boot', file = file, state = state, why = why, errors = 0 }
   svc.ctx.health_dirty = true
 end
 -- The four game callbacks as stand-ins, put in a boot script's or an HD2-Boot mod's environment before its code runs.
@@ -7433,7 +10059,11 @@ function starter.requires_ok(r)
       end
     else
       local d = svc.ctx.addon(q.name)
-      if not (d and d.on and type(d.module) == 'table') then return false, 'needs ' .. q.name .. ' (not installed or not running)' end
+      if not (d and d.on and type(d.module) == 'table') then
+        local by = starter.elsewhere_safe({ name = q.name })
+        if by then return false, 'needs ' .. q.name .. ', which ' .. by .. ' started (its module is that loader\'s, not mine)' end
+        return false, 'needs ' .. q.name .. ' (not installed or not running)'
+      end
       if q.version and not services.version_at_least(d.version, q.version) then
         return false, fmt('needs %s %s or newer (%s is installed)', q.name, q.version, tostring(d.version))
       end
@@ -7502,9 +10132,10 @@ function starter.addon(r)
         if next(a.hooks) == nil and not a.hooks_mt and starter.data_only(m) then a.game_env = env end
         starter.state(a, 'running')
         log(fmt('started %s %s (%s)', a.name, a.version or '', a.file))
-      elseif ok and (m == nil or m == true) then
-        -- a file that does its work when it runs and returns nothing (or true, as HD2Runtime mods do) ran fine:
-        -- its hooks are its runtime callbacks, if any, else it has none
+      elseif ok and (m == nil or type(m) == 'boolean' or type(m) == 'number' or type(m) == 'string') then
+        -- a file that does its work when it runs and returns nothing (or true, as HD2Runtime mods do; or a plain
+        -- value, as other loaders allow) ran fine: its hooks are its runtime callbacks, if any, else it has none
+        if m ~= nil and m ~= true then a.value = m end
         starter.read_module(a, {})
         if not a.rt then a.game_env = env end
         starter.state(a, 'running')
@@ -7528,8 +10159,14 @@ local function start_addons()
       log(fmt('two copies of %s: running the one deployed last (%s), skipped %s', r.name, seen[r.name], r.file))
     else
       seen[r.name] = r.file
+      local by, how = starter.elsewhere_safe(r)
+      if by then
+        starter.never(r.name, r.file, 'started elsewhere', by .. ' (' .. how .. ')', 'addon')
+        log(fmt('%s: already started by %s (%s), not started again', r.name, by, how))
+      end
       -- one pcall each: a mod that breaks my start-up steps (an error object that can't be shown, say) stops only itself
-      local ok, err = pcall(starter.addon, r)
+      local ok, err = true, nil
+      if not by then ok, err = pcall(starter.addon, r) end
       if not ok then
         local a = addons[#addons]
         if a and a.name == r.name then pcall(starter.off, a); pcall(starter.state, a, 'not started', tr.why(err)) end
@@ -7558,23 +10195,29 @@ local function draw_notices()
   local px = max(2, floor(h / 540 + 0.5))
   local y = h - 60 * px / 2
   local red, dark = color(255, 90, 70, 255), color(10, 10, 10, 180)
+  -- (in the top world, under the monitor and the menu, so they show over the game's HUD and menus too; in the main
+  -- world when there's no top world to draw in, or drawing there was switched off after a crash)
+  local base = top_gui() and TOP_FROM + 930 or 950
+  local seen = not (draw.cover and base >= TOP_FROM)
   for _, n in ipairs(notices) do
-    n.until_t = n.until_t or (elapsed + n.dur)     -- the clock starts when the notice can first be seen
-    if elapsed < n.until_t then
+    if n.until_t == nil and seen then n.until_t = elapsed + n.dur end  -- (the clock starts once it can be seen)
+    if elapsed < (n.until_t or math.huge) then
       keep[#keep + 1] = n
       -- wrapped to 60% of the screen (measured; worked out again only when the screen, font or text changes)
       local native = draw.nt_on()
-      if n.wrap_w ~= w or n.wrap_native ~= native or n.wrap_px ~= px then
-        draw.nt.guessed = false
+      if n.wrap_w ~= w or n.wrap_native ~= native or n.wrap_px ~= px or n.wrap_gen ~= draw.nt.gen or n.wrap_lang ~= svc.lang.v then
+        draw.nt.guessed, svc.lang.skipped = false, false
         n.lines, n.wrap_w, n.wrap_native, n.wrap_px = draw.text_wrap(n.text, px, floor(w * 0.6), 4), w, native, px
-        if draw.nt.guessed then n.wrap_w = nil end         -- (a letter not measured yet: worked out again next frame)
+        n.wrap_gen, n.wrap_lang = draw.nt.gen, svc.lang.v
+        -- (a letter not measured yet, or a text not translated yet: worked out again next frame)
+        if draw.nt.guessed or svc.lang.skipped then n.wrap_w = nil end
       end
       local c = n.rgb and color(n.rgb[1], n.rgb[2], n.rgb[3], 255) or red
       for _, l in ipairs(n.lines) do
         local tw = text_width(l, px)
         local x = floor((w - tw) / 2)
-        rect(x - 3 * px, y - 2 * px, tw + 6 * px, 11 * px, dark, 950)
-        text(x, y, l, px, c, 960)
+        rect(x - 3 * px, y - 2 * px, tw + 6 * px, 11 * px, dark, base)
+        text(x, y, l, px, c, base + 5)
         y = y - 11 * px
       end
       y = y - 3 * px
@@ -7587,7 +10230,7 @@ local function frame(dt)
   frame_no = frame_no + 1
   if next(held) then tick() end
   update_world()
-  if draw.nt.main or draw.nt.top or draw.nt.holding then
+  if draw.nt.main or draw.nt.top or draw.nt.holding or draw.nt.dropped ~= nil or draw.nt.reclaim_frame then
     local ok, err = pcall(draw.nt_sweep, 1)
     if not ok then frame_error(err) end
   end
@@ -7598,16 +10241,36 @@ local function frame(dt)
   elseif world.stable and #watchers > 0 then
     scan_start()
   end
+  -- (my full screen menu open this frame: decided before any mod draws, confirmed by the menu as it draws)
+  local cv = svc.covering and svc.covering()
+  draw.cover = cv and cv - TOP_FROM or nil
   for _, a in ipairs(addons) do run_hook(a, 'update', dt) end
   -- one pcall each: an error in one (the menu, say) doesn't hold up the timers or the drawing
-  local ok, err = pcall(svc.frame)
+  draw.cover_set = false
+  local ok, err = pcall(svc.frame, dt)
   if not ok then frame_error(err) end
+  if not draw.cover_set then draw.cover = nil end
   ok, err = pcall(svc.util.frame)
   if not ok then frame_error(err) end
   ok, err = pcall(draw_notices)
   if not ok then frame_error(err) end
   ok, err = pcall(draw_flush)
   if not ok then frame_error(err) end
+  -- (a language on: every text of the options menu is looked up once, and again when the menu's rows or the language
+  -- change, so the texts it has no entry for are listed whether or not the player has scrolled to them)
+  if draw.tr == svc.lang.tr then
+    if draw.tr_layout ~= svc.layout_ver() or draw.tr_lv ~= svc.lang.v then
+      draw.tr_layout, draw.tr_lv, draw.tr_list, draw.tr_at = svc.layout_ver(), svc.lang.v, nil, 1
+    end
+    if draw.tr_list ~= false and not svc.lang.budget_spent() then
+      ok, err = pcall(draw.tr_pass)
+      if not ok then frame_error(err); draw.tr_list = false end
+    end
+  end
+  if svc.lang.dirty then
+    ok, err = pcall(svc.lang.flush, elapsed)
+    if not ok then frame_error(err) end
+  end
   if svc.ctx.health_dirty and elapsed >= (svc.ctx.health_at or 0) then
     svc.ctx.health_dirty, svc.ctx.health_at = false, elapsed + 5
     ok, err = pcall(svc.util.write_health)
@@ -7708,7 +10371,7 @@ function starter.trust(sb)
       local g = { files = t.files }
       if t.patches then
         local row = svc.loader_option('patches.' .. name:gsub('[^%w_%-]', '.'), { type = 'toggle',
-          label = 'Game patch files: ' .. t.title, default = false })
+          label = 'Game patch files: ' .. t.title, default = false, section = 'permissions' })
         local asked = false
         g.patches = { scratch = t.patches.scratch, marker = t.patches.marker,
           consent = function() return row ~= nil and row.value == true end,
@@ -7729,10 +10392,84 @@ function starter.trust(sb)
     end
   end
 end
+-- Another loader, named from its own markers (its title line otherwise)
+function starter.loader_name(src, title)
+  local v = src:match('local MARKER = "boot%-mod%-loader%-([%d%.]+)"')
+  if v then return 'Boot Mod Loader ' .. v end
+  v = src:find('CowboyBingusModLoader', 1, true) and src:match('revision = "loader%-v(%d+)"')
+  if v then return 'Bingus Shared Loader v' .. v end
+  return ((title:match('^([^%(%.;]+)') or 'another loader'):gsub('%s+$', ''))
+end
+-- A mod another loader already started in this Lua state (it handed off to me after starting some): it isn't started
+-- a second time. Their marks: a `__boot_mod_loader.mods` list, the `modules` table of a CowboyBingusModLoader or
+-- HD2ModLoader that isn't mine, and package.loaded (set for every mod a loader started, or left by a require that
+-- failed).
+function starter.elsewhere(name)
+  local bml = chef_before.loaders.__boot_mod_loader
+  local list = type(bml) == 'table' and rawget(bml, 'mods')
+  if type(list) == 'table' then
+    for i = 1, 4096 do
+      local e = rawget(list, i)
+      if e == nil then break end
+      if type(e) == 'table' and rawget(e, 'name') == name and rawget(e, 'state') == 'loaded' then return 'Boot Mod Loader', 'loaded' end
+    end
+  end
+  for _, k in ipairs({ 'HD2ModLoader', 'CowboyBingusModLoader' }) do
+    local L = chef_before.loaders[k]
+    local rev = type(L) == 'table' and rawget(L, 'revision')
+    local mods = type(L) == 'table' and rawget(L, 'modules')
+    if type(mods) == 'table' and not (type(rev) == 'string' and rev:find('^chef%-shared%-loader')) then
+      local s = rawget(mods, name)
+      if s == 'loaded' or s == 'loading' then return type(rev) == 'string' and rev:sub(1, 40) or k, s end
+    end
+  end
+  -- (require's own placeholder, a userdata, is a require that failed or never finished: that mod isn't running)
+  local pkg = rawget(G, 'package')
+  local loaded = type(pkg) == 'table' and rawget(pkg, 'loaded')
+  local v = type(loaded) == 'table' and rawget(loaded, name)
+  if v ~= nil and type(v) ~= 'userdata' and not starter.marks[v] then return 'another loader', 'started' end
+end
+-- (my start-up steps never stop on another loader's odd table: an error there means "not started elsewhere")
+function starter.elsewhere_safe(r)
+  -- a mod made for me (HD2-Requires: chef-shared-loader) did nothing under another loader: I start it
+  local head = r.src and r.src:sub(1, 1200)
+  if head and (head:find('\n%-%- HD2%-Requires: chef%-shared%-loader') or head:find('\n%-%- HD2%-Requires: chef%-loader')) then return nil end
+  local ok, by, how = pcall(starter.elsewhere, r.name)
+  if ok then return by, how end
+end
+-- and the other way round: every mod I start is marked in the game's package.loaded, so a loader that starts mods
+-- with require, or checks package.loaded first, skips it. The mark is a read-only stand-in that reads the mod's own
+-- table (a boot script that requires it as a library still gets its fields), never the table itself.
+starter.marks = setmetatable({}, { __mode = 'k' })
+function starter.value_of(name)
+  for _, a in ipairs(addons) do if a.name == name then return a.module end end
+end
+function starter.publish(name)
+  local pkg = rawget(G, 'package')
+  local loaded = type(pkg) == 'table' and rawget(pkg, 'loaded')
+  if type(loaded) == 'table' and rawget(loaded, name) == nil then
+    local m = newproxy and newproxy(true)
+    if m then
+      local mt = getmetatable(m)
+      mt.__index = function(_, k)
+        local v = starter.value_of(name)
+        if type(v) == 'table' then return v[k] end
+      end
+      mt.__metatable = false
+    else
+      m = setmetatable({}, { __index = function(_, k) local v = starter.value_of(name); if type(v) == 'table' then return v[k] end end,
+                             __newindex = function() error('read-only', 2) end, __metatable = false })
+    end
+    starter.marks[m] = true
+    rawset(loaded, name, m)
+  end
+end
 function starter.other_loader(src)
   if src:find('__boot_mod_loader', 1, true) then return true end
-  local wants_addons = src:find('HD2%-Addon', 1, true) or src:find('HD2-Addon', 1, true)
-  return (wants_addons and src:find('9ba626afa44a3aa3', 1, true)) and true or false
+  -- one that reads the patches for HD2-Addon mods itself
+  local reads = (src:find('HD2%-Addon', 1, true) or src:find('HD2-Addon', 1, true)) and src:find('9ba626afa44a3aa3', 1, true)
+  if not reads then return false end
+  return true
 end
 function starter.named_one(r)
   local fp = fingerprint(r.src)
@@ -7788,6 +10525,7 @@ function starter.named_one(r)
     log(fmt('%s failed to run: %s', r.name, tr.why(err)))
   else
     boots[#boots + 1] = a
+    starter.publish(r.name)
     log(fmt('started %s (boot-style, %s)', r.name, r.file))
   end
 end
@@ -7798,6 +10536,7 @@ local function start_named()
       log(fmt('two copies of %s: running the one deployed last (%s), skipped %s', r.name, seen[r.name], r.file))
     else
       seen[r.name] = r.file
+      -- (no other loader starts an HD2-Boot mod: never "started elsewhere")
       local ok, err = pcall(starter.named_one, r)
       if not ok then log('starting ' .. r.name .. ' failed: ' .. tr.why(err)) end
     end
@@ -7848,11 +10587,17 @@ function starter.boot_one(b, seen)
     log(fmt('the HD2 Lua Runtime\'s boot script in %s (%s): not needed, its mods run on my look-alike of it', b.file, title))
   elseif starter.other_loader(b.src) then
     seen[fp] = true
-    starter.never('boot:' .. fp, b.file, 'not started', 'another mod loader (' .. title .. '): it would start every mod a second time')
-    log(fmt('another mod loader\'s boot script in %s (%s): not run, it would start every addon a second time. ' ..
-      'Only one loader can run: remove that mod (deployed after me, it would run instead of me)', b.file, title))
-    local short = (title:match('^([^%(%.;]+)') or 'another loader'):gsub('%s+$', ''):sub(1, 24)
-    notices[#notices + 1] = { text = 'OTHER LOADER NOT RUN: ' .. short:upper() .. ' (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
+    local who = starter.loader_name(b.src, title)
+    if starter.handoff and starter.handoff:find(who, 1, true) == 1 then
+      -- the loader that handed off to me: its boot is the one the game ran
+      starter.never('boot:' .. fp, b.file, 'handed off', who .. ' started me and left its mods to me')
+      log(fmt('%s\'s boot script in %s handed off to me: I run its mods', who, b.file))
+    else
+      starter.never('boot:' .. fp, b.file, 'not started', who .. ': it would start every mod a second time')
+      log(fmt('%s\'s boot script is in %s, below mine: not run, it would start every addon a second time; its mods run '
+        .. 'here. If it is ever deployed after me, the game runs it instead of me and no %s mod starts', who, b.file, LOADER))
+      notices[#notices + 1] = { text = 'OTHER LOADER NOT RUN: ' .. who:upper():sub(1, 24) .. ' (SEE ' .. FILES:upper() .. '.LOG)', dur = 10 }
+    end
   else
     seen[fp] = true
     local chunk, cerr = loadstring(b.src, '@boot (' .. b.file .. ')')
@@ -7889,11 +10634,77 @@ function starter.boot_one(b, seen)
     end
   end
 end
+-- How I came to run, said once: the boot the game ran (the one in the highest-numbered patch) and my core's copies.
+-- Boots carrying my marker are mine (my stub, a changed copy of it, or this loader built into a mod) and never run.
+-- Started by require from a boot that isn't mine, I don't run that boot again (the game already did); the callbacks
+-- it set before it loaded me (mine replaced them) run as its own, like any other boot script's.
+function starter.started_how()
+  local top
+  for _, list in ipairs({ scan.mine, found_boots }) do
+    for _, b in ipairs(list) do if not top or b.n > top.n then top = b end end
+  end
+  local others = {}
+  for _, b in ipairs(scan.mine) do
+    local ver = b.src:match("\nlocal VERSION = '([^'\n]+)'")
+    b.stub = fingerprint(b.src) == scan.STUB
+    b.kind = b.stub and 'my start-up stub'
+      or ver and fmt('a full copy of %s %s', b.src:match("\nlocal LOADER = '([^'\n]+)'") or LOADER, ver)
+      or 'a changed copy of my start-up stub'
+    b.src = nil
+    if b ~= top then others[#others + 1] = b.file .. ': ' .. b.kind end
+  end
+  local core = ''
+  if #scan.cores > 0 then
+    local hi = scan.cores[1]
+    for _, c in ipairs(scan.cores) do if c.n > hi.n then hi = c end end
+    core = fmt('; my core (%s) is in %s', hi.version, hi.file)
+    if #scan.cores > 1 then
+      local l = {}
+      for _, c in ipairs(scan.cores) do l[#l + 1] = c.file .. ' ' .. c.version end
+      core = core .. fmt(', the highest of %d copies (%s): the game loads that one', #scan.cores, concat(l, ', '))
+    end
+  end
+  local mine = top and top.kind
+  if not scan.via then
+    log(fmt('start-up: running as the game\'s boot script%s%s', top and fmt(' (the boot in %s is %s)', top.file,
+      mine or 'another mod\'s') or '', core))
+  elseif not top then
+    log('start-up: started as ' .. scan.CORE .. ', but no patch has a boot script' .. core)
+  elseif top.stub then
+    log(fmt('start-up: started by my start-up stub, the boot in %s%s', top.file, core))
+  elseif mine then
+    log(fmt('start-up: started by the boot in %s, %s: it isn\'t the stub I ship, and a changed copy may stop starting ' ..
+      'me after an update (the mod that carries it should ship chef_loader_stub.lua unchanged)%s', top.file, mine, core))
+  else
+    top.title = (top.src:match('^%-%-%s*([^\r\n]+)') or 'no title'):sub(1, 90)
+    top.fp = fingerprint(top.src)
+    scan.ran = top
+    log(fmt('start-up: started by the boot in %s (%s), which %s: the game already ran it, so I don\'t run it again%s',
+      top.file, top.title, starter.handoff and 'handed off to me' or 'isn\'t my stub', core))
+  end
+  if #others > 0 then log('boot scripts of mine, not run: ' .. concat(others, ', ')) end
+end
 local function start_boots()
   local seen = {}
+  local top = scan.ran
+  if top then
+    -- the boot that loaded me (the game ran it): only the callbacks it set before mine replaced them
+    seen[top.fp] = true
+    local owner, cb, n = 'boot:' .. top.fp, {}, 0
+    for k, fn in pairs(scan.prev) do if type(fn) == 'function' then cb[k] = fn; n = n + 1 end end
+    if off[owner] then
+      starter.never(owner, top.file, 'kept off', off[owner].why)
+      log(fmt('kept off: the boot script in %s (%s)', top.file, off[owner].why))
+    elseif n > 0 then
+      boots[#boots + 1] = { owner = owner, file = top.file, env = cb, errors = 0, on = true, title = top.title }
+      log(fmt('running the callbacks the boot script in %s set before it started me (%d)', top.file, n))
+    end
+  end
   for _, b in ipairs(found_boots) do
-    local ok, err = pcall(starter.boot_one, b, seen)
-    if not ok then log('starting the boot script in ' .. tostring(b.file) .. ' failed: ' .. tr.why(err)) end
+    if b ~= top then
+      local ok, err = pcall(starter.boot_one, b, seen)
+      if not ok then log('starting the boot script in ' .. tostring(b.file) .. ' failed: ' .. tr.why(err)) end
+    end
   end
 end
 -- one callback of every other boot script, after mine
@@ -7948,6 +10759,8 @@ function starter.update_body(dt)
 end
 
 function init()
+  if st.inited then return end            -- (once: a loader that hands off can make it come twice)
+  st.inited = true
   if #boots > 0 and not st.busy then
     st.busy = true
     local ok, err = pcall(call_boots, 'init')
@@ -7968,7 +10781,7 @@ function render()
     if not ok then frame_error(err) end
   end
   -- the texts this frame didn't draw go now, not a frame late (and a render is noted for the text hold)
-  if draw.nt.main or draw.nt.top or draw.nt.holding then
+  if draw.nt.main or draw.nt.top or draw.nt.holding or draw.nt.reclaim_frame then
     local ok, err = pcall(draw.nt_sweep, 0)
     if not ok then frame_error(err) end
   end
@@ -7983,6 +10796,7 @@ function shutdown()
   -- installer does its work here)
   if #boots > 0 then pcall(call_boots, 'shutdown') end
   pcall(svc.util.write_health)
+  pcall(svc.lang.flush, elapsed, true)
   pcall(svc.shutdown)
   pcall(svc.util.shutdown)
   pcall(log, 'shutdown (clean)')
@@ -7993,6 +10807,20 @@ end
 
 -- ------------------------------------------------------------------ start-up
 log(fmt('==== %s %s%s starting', LOADER, VERSION, TEST and (' Test ' .. TEST) or ''))
+-- started by another loader that handed off to me: its note says which (the callbacks it set first run after mine, as
+-- its boot's: start_boots)
+do
+  local note = rawget(G, 'ChefSharedLoaderHandoff')
+  if note ~= nil then
+    rawset(G, 'ChefSharedLoaderHandoff', nil)
+    local from = type(note) == 'table' and type(rawget(note, 'from')) == 'string' and (rawget(note, 'from'):sub(1, 60):gsub('%c', ' ')) or 'another loader'
+    starter.handoff = from
+    log('started by ' .. from .. ', which handed off to me')
+    -- handed off from inside its init (phase 'init'): the game has called init already, so I call mine once I'm
+    -- loaded, and its own init (the one running now) isn't called again
+    if type(note) == 'table' and rawget(note, 'phase') == 'init' then chef_before.init_now = true; chef_before.cb.init = nil end
+  end
+end
 -- What the game's Lua is, before I add anything (so the probe sees the game's own), then the LuaJIT parts it lacks.
 do   -- (one ok/v pair: the loader is near Lua 5.1's 200 locals)
   local ok, v = pcall(probe.run, G, { timing = TEST ~= nil })
@@ -8039,7 +10867,8 @@ if blamed then
   skip[blamed] = true
   local owner = blamed:match('^([^|]+)|')
   log('the last launch crashed in: ' .. blamed .. ' (that call is skipped from now on)')
-  if owner and owner ~= 'loader' then
+  -- (a language file's key carries its own fingerprint: skipping it is enough, no mod is turned off for it)
+  if owner and owner ~= 'loader' and not blamed:match('^[^|]+|lang:%x+$') then
     off[owner] = { fp = 'pending', why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') }
   end
   save_state()
@@ -8071,6 +10900,26 @@ log(fmt('found %d addon(s), %d boot-style script(s) and %d option file(s) in %d 
   #found_named, #found_options, scan.files, scan.ms))
 if scan.bad > 0 then log(fmt('%d patch file(s) or mod(s) skipped: not laid out the way I read them, or cut short', scan.bad)) end
 if scan.big > 0 then log(fmt('%d Lua resource(s) over 4 MB not read (too big to be a mod)', scan.big)) end
+if #scan.langs > 0 then
+  ok, err = pcall(function()
+    svc.lang.load(scan.langs)
+    if svc.lang.row(svc.loader_option, svc.loader_get, svc.loader_put, svc.set_row) then draw.tr, draw.tr_keep, draw.lang = svc.lang.tr, svc.lang.keep, svc.lang end
+  end)
+  if not ok then log('language files: ' .. tr.why(err)) end
+end
+ok, err = pcall(starter.started_how)
+if not ok then log('telling how I started failed: ' .. tr.why(err)) end
+-- the line my start-up stub writes when it found my core but couldn't start it: said once here, then the file goes
+if services.GAME_DIR then
+  local p = services.GAME_DIR .. 'chef_loader_stub.txt'
+  local f = open(p, 'r')
+  if f then
+    local okr, line = pcall(f.read, f, '*l')
+    pcall(f.close, f)
+    if okr and type(line) == 'string' and line ~= '' then log('the start-up stub could not start me before: ' .. line:sub(1, 300)) end
+    if type(os_) == 'table' then pcall(os_.remove, p) end
+  end
+end
 -- (dev mode, test builds only) loose files listed in chef_loader_dev.txt: each wins over a deployed mod of the same name
 if TEST then
   ok, err = pcall(svc.dev_files)
@@ -8102,6 +10951,7 @@ do
     log('mods run locked down: no programs, no native code or bytecode, files only in the game\'s folders (sandbox '
       .. services.sandbox.version .. ')')
     if svc.runtime then sb.on_global = svc.runtime.on_global end
+    sb.module_of = svc.module_of           -- (package.loaded's fallback: the other addons' modules)
     starter.trust(sb)
   else
     log('the locked-down space for mods failed, so no loader mod starts: ' .. tr.why(sb))
@@ -8109,7 +10959,8 @@ do
   end
   if services.MOVED then log('moved from %LOCALAPPDATA% to %APPDATA%\\Arrowhead\\Helldivers2: ' .. concat(services.MOVED, ', ')) end
 end
-start_addons()
+ok, err = pcall(start_addons)
+if not ok then log('starting the addons failed: ' .. tr.why(err)) end
 ok, err = pcall(start_named)
 if not ok then log('starting the boot-style scripts failed: ' .. tr.why(err)) end
 ok, err = pcall(start_boots)
@@ -8129,3 +10980,4 @@ if not loader_ok then
   why = 'failed to start: ' .. (ok and type(why) == 'string' and why or 'an error that can\'t be shown as text')
   if not (loader_log and pcall(loader_log, why)) and type(print) == 'function' then pcall(print, '[Chef Shared Loader] ' .. why) end
 end
+if loader_ok and chef_before.init_now then init() end
