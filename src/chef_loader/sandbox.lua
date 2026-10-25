@@ -7,8 +7,8 @@
 --     functions, _G is its own environment, no require of the game's modules (require('_G') would hand out everything),
 --     no module() (package.seeall), and the metatables of its environment are locked
 --   * open files outside a short list: it reads the game's settings folder, the game's data folder and its own files,
---     and writes only .log .txt .json .csv .dat .ini files in the loader's folder, never the loader's own files or another
---     mod's saved tables
+--     and writes only .log .txt .json .csv .dat .ini .marker .fatal files in the loader's folder, never the loader's
+--     own files or another mod's saved tables
 -- It still can use: everything the engine's script API offers (stingray, Unit, World ...), the chef helpers,
 -- os.clock/time/date/getenv, reading and writing its own files.
 -- Each mod gets its own copies of string, table, math, coroutine, bit, os and debug, and of every engine table
@@ -24,7 +24,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.2.0' }
+local M = { version = '1.2.1' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -37,7 +37,8 @@ local t_concat = table.concat
 local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
-local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true }
+local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true,
+                  marker = true, fatal = true }   -- (.marker and .fatal: a mod's own crash notes)
 local DEVICES = { con = true, prn = true, aux = true, nul = true, ['conin$'] = true, ['conout$'] = true, ['clock$'] = true }
 -- (0 to 9, and the superscripts 1 2 3 Windows also counts as their digits, in the ANSI code page)
 for _, n in ipairs({ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '\185', '\178', '\179' }) do
@@ -47,8 +48,8 @@ local LIBS = { 'string', 'table', 'math', 'coroutine', 'bit' }
 local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
 local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
 -- engine tables that aren't for mods (M.engine_off), and calls left out of engine tables mods otherwise keep
--- (M.CALLS_OFF): Network and GameSession keep only their reads (no lobby, connection or writes to what other players
--- see). (utilities.lua refuses the same through chef.call.)
+-- (M.CALLS_OFF): Network, GameSession and UnitSynchronizer keep only their reads (no lobby, connection or writes to
+-- what other players see). (utilities.lua refuses the same through chef.call.)
 function M.engine_off(k)
   return k == 'PluginManager' or k == 'Http' or k == 'WebSocket' or k == 'Localizer' or s_find(k, 'Lobby', 1, true) ~= nil
     or s_find(k, 'GameServer', 1, true) ~= nil
@@ -66,16 +67,30 @@ M.CALLS_OFF = {
       or s_find(f, 'send', 1, true) or s_find(f, 'dump', 1, true)) ~= nil
   end,
   -- GameSession the same way: its reads stay (in_session, peers, game_session_host, game_object_field / _exists /
-  -- _owner / _is_type, objects_owned_by, is_ / has_ / get_ / num_), every write to what other players see is left out,
-  -- and so is a call a game update adds. (Network.object_info, a game object type's field list, is a read too.)
+  -- _owner / _is_type, objects_owned_by, other_peers, unit_synchronizer, is_ / has_ / get_ / num_), every write to what
+  -- other players see is left out, and so is a call a game update adds. (Network.object_info, a game object type's
+  -- field list, is a read too.) unit_synchronizer hands out the session's unit <-> game object map (UnitSynchronizer
+  -- below keeps only its lookups). game_object_field_batched is a read but stays out: it has crashed the game on
+  -- other players' objects.
   GameSession = function(f)
     f = s_lower(f)
-    local read = f == 'in_session' or f == 'peers' or f == 'game_session_host' or f == 'game_object_field'
+    local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'unit_synchronizer'
+      or f == 'game_session_host' or f == 'game_object_field'
       or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
     return (s_find(f, 'send', 1, true) or s_find(f, 'set', 1, true) or s_find(f, 'create', 1, true)
       or s_find(f, 'destroy', 1, true) or s_find(f, 'migrate', 1, true)) ~= nil
+  end,
+  -- UnitSynchronizer keeps its lookups (unit <-> game object id, is_ / has_ / get_ / num_); its spawns and destroys
+  -- make game objects every player sees
+  UnitSynchronizer = function(f)
+    f = s_lower(f)
+    local read = f == 'game_object_id_to_unit' or f == 'unit_to_game_object_id' or s_match(f, '^is_')
+      or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
+    if not read then return true end
+    return (s_find(f, 'spawn', 1, true) or s_find(f, 'destroy', 1, true) or s_find(f, 'set', 1, true)
+      or s_find(f, 'create', 1, true) or s_find(f, 'send', 1, true)) ~= nil
   end,
 }
 
@@ -190,12 +205,15 @@ function M.install(ctx)
     local file = names[#names]
     local ext = s_match(file, '%.(%w+)$')
     if root == ODIR and not (#names == 1 and ext and MOD_EXT[ext]) then
-      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini files'
+      return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini .marker '
+        .. '.fatal files'
     end
     if not writes then return true, root, names, ext end
     if root ~= WDIR then return nil, 'mods write only in the loader\'s folder' end
     if #names ~= 1 then return nil, 'mods write only straight into the loader\'s folder, not below it' end
-    if not (ext and MOD_EXT[ext]) then return nil, 'mods write only .log .txt .json .csv .dat .ini files' end
+    if not (ext and MOD_EXT[ext]) then
+      return nil, 'mods write only .log .txt .json .csv .dat .ini .marker .fatal files'
+    end
     if not s_match(file, '^[%w_%-%.]+$') then return nil, 'file names are letters, digits, _ - and .' end
     if s_sub(file, 1, #OWN) == OWN or s_sub(file, 1, 11) == 'chef_loader' or s_sub(file, 1, 10) == 'chef_data_' then
       return nil, 'the loader\'s own files and saved tables are off limits (chef.save_table saves a table)'
@@ -248,7 +266,8 @@ function M.install(ctx)
       elseif M.CALLS_OFF[k] then base[k] = (type(S) == 'table' and S[k] == v and base.stingray[k]) or trimmed(k, v) end
     end
   end
-  setmetatable(base, { __index = G, __metatable = 'locked' })
+  local base_mt = { __index = G, __metatable = 'locked' }     -- (its __index narrowed below, once base is filled)
+  setmetatable(base, base_mt)
   -- an engine object's metatable whose __index is one of those tables: a mod gets the table as it sees it
   -- (trimmed, or nothing), so the calls left out aren't a method call away
   local as_seen = {}
@@ -317,6 +336,66 @@ function M.install(ctx)
   -- (the engine's names in base read as false from now on: a mod that sets its stingray or Unit to nil finds nothing
   -- behind it, not the shared tables; each environment holds its own copies as its own keys)
   for k, v in pairs(engine_names) do if is_engine[v] then base[k] = false end end
+  -- Lua's own base functions as each mod's own keys too: mods written for the old loaders check
+  -- rawget(_G, 'unpack') and the like before hooking anything. Never the game's update, render and shutdown, so a mod
+  -- chaining rawget(_G, 'update') never finds (and calls) the game's own.
+  local plain = {}
+  for _, k in ipairs({ 'assert', 'collectgarbage', 'dofile', 'error', 'gcinfo', 'ipairs', 'loadfile', 'module', 'next',
+    'pairs', 'pcall', 'print', 'rawequal', 'rawget', 'rawset', 'select', 'setmetatable', 'tonumber', 'tostring',
+    'type', 'unpack', 'xpcall', '_VERSION' }) do
+    local v = base[k]                                -- (base's own, else the game's)
+    if type(v) == 'function' or type(v) == 'string' then plain[k] = v end
+  end
+  -- what sb.env makes each mod's own reads as false behind it: a mod that sets one of them to nil finds nothing there,
+  -- never the game's own (its io, os, debug, require, loadstring, getfenv / setfenv, _G, or the shared libraries)
+  for _, k in ipairs(LIBS) do if rawget(base, k) == nil then rawset(base, k, false) end end
+  for _, k in ipairs({ 'os', 'io', 'debug', 'package', 'require', 'load', 'loadstring', 'getfenv', 'setfenv',
+    'getmetatable', 'newproxy', 'xpcall', '_G' }) do
+    if rawget(base, k) == nil then rawset(base, k, false) end
+  end
+  -- The game's other lower case globals (whatever its engine adds next to Lua's own), taken once, here: each mod gets
+  -- a value as it is and a table as its own copy (sb.env), so nothing a mod writes into one reaches the game or another
+  -- mod. From here on a lower case name behind base is nothing: the game's callbacks (init, update, render, shutdown:
+  -- mine) and whatever is set later (a boot script's) aren't reached. Capitalized names still read the game's.
+  local CALLBACKS = { init = true, update = true, render = true, shutdown = true }
+  local extra = {}
+  for k, v in pairs(G) do
+    if type(k) == 'string' and not s_match(k, '^%u') and not CALLBACKS[k] and rawget(base, k) == nil and plain[k] == nil then
+      plain[k] = v
+      local n = 0
+      if type(v) == 'table' then
+        -- (what a mod's copy holds: the entries of every table reached from it and their metatables, counted up to
+        -- 10,000; the game's globals, the libraries and the engine's tables aren't copied with it, so not counted)
+        local seen, todo = { [v] = true }, { v }
+        local function reach(x)
+          if type(x) == 'table' and not seen[x] and is_engine[x] == nil and as_seen[x] == nil and x ~= string_mt then
+            seen[x] = true; todo[#todo + 1] = x
+          end
+        end
+        while todo[1] and n < 10000 do
+          local t = table.remove(todo)
+          reach(raw_mt(t))
+          for _, x in pairs(t) do
+            n = n + 1
+            if n >= 10000 then break end
+            reach(x)
+          end
+        end
+      end
+      extra[#extra + 1] = k .. (type(v) == 'table' and (' (table, ' .. (n >= 10000 and '10,000+' or n) .. ' entries)') or '')
+    end
+  end
+  if extra[1] and ctx.log then
+    table.sort(extra)
+    ctx.log('the game\'s other lower case globals, each mod its own: ' .. t_concat(extra, ', '))
+  end
+  base_mt.__index = function(_, k)
+    if type(k) == 'string' then
+      local b = s_byte(k, 1)                         -- (a byte test: this runs on every miss past base)
+      if not (b and b >= 65 and b <= 90) then return nil end
+    end
+    return G[k]
+  end
   -- sb.on_global(env, key, value): told of each new global a mod sets (the runtime look-alike shares some between its
   -- mods); the assignment itself always happens first
   local env_mt = { __index = base, __metatable = 'locked', __newindex = function(t, k, v)
@@ -884,7 +963,8 @@ function M.install(ctx)
         end
       end
       local lib = REQUIRE_OK[name]
-      if lib and env[lib] ~= nil then return env[lib] end
+      local own_lib = lib and rawget(env, lib)                -- (its own copy: one it cleared isn't looked for behind it)
+      if type(own_lib) == 'table' then return own_lib end
       if name == 'table.new' or name == 'table.clear' then
         local fn = env.table and env.table[s_sub(name, 7)]
         if fn then return fn end
@@ -908,6 +988,11 @@ function M.install(ctx)
     for _, n in ipairs({ 'os', 'io', 'debug', 'package' }) do
       local lib = rawget(G, n)
       if type(lib) == 'table' and type(rawget(env, n)) == 'table' then mine[lib] = rawget(env, n) end
+    end
+    -- (the base functions this environment doesn't replace above, and the game's other lower case globals: a table as
+    -- this mod's own copy)
+    for k, v in pairs(plain) do
+      if rawget(env, k) == nil then rawset(env, k, type(v) == 'table' and own(v, true) or v) end
     end
     return env
   end

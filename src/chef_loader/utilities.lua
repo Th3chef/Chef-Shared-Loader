@@ -1494,19 +1494,20 @@ function M.install(ctx, L)
     end
   end
 
-  -- the frame budget behind chef.budget: the loader's own "Budget warning (ms)" row (util.budget_row, set by the
-  -- loader), 2 ms until it's there
-  util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
+  -- the frame budget behind chef.budget: the loader's own "Budget (ms)" row (util.budget_row, set by the loader;
+  -- a mod over it is named in the log and marked in the monitor), 1 ms until it's there
+  util.default_budget = function() return util.budget_row and util.budget_row.value or 1.0 end
 
   -- ---------------------------------------------------------------- the performance monitor
   -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel (where "Monitor position" puts it)
-  -- with each mod's cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs,
-  -- a boot script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a,
-  -- shown on the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a
-  -- second I turn the last second into averages a frame: each mod's milliseconds and its share of the frame (from the
-  -- game's own frame time), the worst single call, and the total. Off, it costs one check a frame; nothing is drawn or
-  -- added up. Its own drawing (the loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its
-  -- own line, so it never counts against the loader or a mod.
+  -- with each mod's cost ("Hide mods under N ms" folds the ones under their budget into one line). Every mod's time
+  -- (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot script's into b.pm_ms (and an
+  -- HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on the same line), and the
+  -- loader's own share of its update into pm.loader (all from the loader). Once a second I turn the last second into
+  -- averages a frame: each mod's milliseconds and its share of the frame (from the game's own frame time), the worst
+  -- single call, and the total. Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the
+  -- loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its own line, so it never counts
+  -- against the loader or a mod.
   local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
   util.pm = pm
   -- the mods' time so far (the loader asks before and after its update, to find its own share)
@@ -1538,10 +1539,11 @@ function M.install(ctx, L)
     local n = max(1, pm.frames)
     local frame_ms = (now - pm.t0) * 1000 / n
     local rows, total = {}, 0
+    local budget = util.default_budget()               -- (the Budget row; a row's budget: its mod's chef.budget, else this)
     for _, a in ipairs(L.addons) do
       local avg = ((a.pm_ms or 0) - (a.pm_base or 0)) / n
       total = total + avg
-      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on }
+      rows[#rows + 1] = { name = a.short or a.name, avg = avg, worst = a.pm_max or 0, on = a.on, budget = a.budget or budget }
     end
     for _, b in ipairs(L.boots()) do
       local a = b.a ~= b and b.a or nil
@@ -1552,7 +1554,8 @@ function M.install(ctx, L)
       -- time still counts in All Mods
       local name = boot_name(b)
       if not name:lower():find('file%-mod installer') then
-        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false }
+        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false,
+                            budget = type(b.a) == 'table' and b.a.budget or budget }
       end
     end
     sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
@@ -1560,19 +1563,32 @@ function M.install(ctx, L)
     local loader = max(0, pm.loader / n - self)
     local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
     -- { left, { the MS, SHARE and WORST cells }, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod
-    -- (1 ms or more), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't monospaced,
-    -- so one string padded with spaces wouldn't line up).
+    -- (at or over its budget), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't
+    -- monospaced, so one string padded with spaces wouldn't line up).
     local function ms(v) return fmt('%.2f', v) end
     local function share(v) return fmt('%.1f%%', pct(v)) end
     local out = {
       { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), { 'MS', 'SHARE', 'WORST' }, 2 },
       { 'ALL MODS', { ms(total + loader), share(total + loader) }, 3 },
     }
-    for i, r in ipairs(rows) do
-      if i > 12 then break end
-      out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
-                        r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { 'OFF' },
-                        r.on and (r.avg >= 1 and 5 or 4) or 6 }
+    -- "Hide mods under N ms" (util.perf_hide): the mods running under their budget (the Budget row, or their own
+    -- chef.budget) share one line, their sum and the worst call among them (a mod that's off keeps its line: OFF
+    -- says something)
+    local hide = util.perf_hide ~= nil and util.perf_hide.value == true
+    local shown, low, low_worst, low_n = 0, 0, 0, 0
+    for _, r in ipairs(rows) do
+      if hide and r.on and r.avg < r.budget then
+        low, low_n = low + r.avg, low_n + 1
+        if r.worst > low_worst then low_worst = r.worst end
+      elseif shown < 12 then
+        shown = shown + 1
+        out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
+                          r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { 'OFF' },
+                          r.on and (r.avg >= r.budget and 5 or 4) or 6 }
+      end
+    end
+    if low_n > 0 then
+      out[#out + 1] = { fmt('MODS UNDER %g MS', budget), { ms(low), share(low), fmt('%.1f', low_worst) }, 6 }
     end
     out[#out + 1] = { 'LOADER', { ms(loader), share(loader) }, 4 }
     out[#out + 1] = { 'THIS MONITOR', { ms(self), share(self) }, 6 }
