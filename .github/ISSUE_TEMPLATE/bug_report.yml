@@ -10,7 +10,7 @@ body:
     attributes:
       label: Loader version
       description: The first line of chef_loader.log says it.
-      placeholder: 1.2.0
+      placeholder: 1.2.1
     validations:
       required: true
   - type: input
