@@ -14,7 +14,7 @@ FONTS = {'Anton': 'anton-latin-400-normal.woff2', 'Barlow Condensed': 'barlow-co
          'Barlow Condensed B': 'barlow-condensed-latin-800-normal.woff2', 'Mono': 'jetbrains-mono-latin-500-normal.woff2',
          'Mono B': 'jetbrains-mono-latin-700-normal.woff2'}
 TAGLINE = 'One shared Lua loader for every Helldivers 2 mod, HD2 Lua Runtime mods too: side by side, crash-guarded and locked down, with an in-game options menu and a performance monitor'
-FEATURES = ['ANY AUTHOR', 'F9 OPTIONS MENU', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'HD2 LUA RUNTIME MODS', 'MOD API + GUIDE']
+FEATURES = ['ANY AUTHOR', 'F9 MENU OVER THE GAME UI', 'CONTROLLER + MOUSE', 'LANGUAGE FILES', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'WORKS BESIDE OTHER LOADERS', 'MOD API + GUIDE']
 
 
 def background(W, H):
@@ -111,7 +111,7 @@ def render(page, W, H, body):
 
 def main():
     out = sys.argv[1]
-    ver = sys.argv[2] if len(sys.argv) > 2 else '1.1.0'
+    ver = sys.argv[2] if len(sys.argv) > 2 else '1.2.0'
     badge = 'v' + '.'.join(ver.split('.')[:2])
     os.makedirs(out, exist_ok=True)
     v = {'b': badge, 't': TAGLINE}
