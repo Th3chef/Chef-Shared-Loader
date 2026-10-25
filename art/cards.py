@@ -10,11 +10,14 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# the full screen menu's title picture, the loader's own (src/menu_banner.png)
+VERSION = ['1.2.0']                     # (the one the art is made for, from the command line)
+BANNER = base64.b64encode(open(os.path.join(HERE, '..', 'src', 'menu_banner.png'), 'rb').read()).decode()
 FONTS = {'Anton': 'anton-latin-400-normal.woff2', 'Barlow Condensed': 'barlow-condensed-latin-600-normal.woff2',
          'Barlow Condensed B': 'barlow-condensed-latin-800-normal.woff2', 'Mono': 'jetbrains-mono-latin-500-normal.woff2',
          'Mono B': 'jetbrains-mono-latin-700-normal.woff2'}
-TAGLINE = 'One shared Lua loader for every Helldivers 2 mod, HD2 Lua Runtime mods too: side by side, crash-guarded and locked down, with an in-game options menu and a performance monitor'
-FEATURES = ['ANY AUTHOR', 'F9 MENU OVER THE GAME UI', 'CONTROLLER + MOUSE', 'LANGUAGE FILES', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'WORKS BESIDE OTHER LOADERS', 'MOD API + GUIDE']
+TAGLINE = 'One Lua loader for every Helldivers 2 mod, HD2 Lua Runtime mods too: side by side, crash-guarded and locked down. F9 opens one options menu for all of them.'
+FEATURES = ['FULL SCREEN F9 MENU', 'CONTROLLER + MOUSE', 'OVER THE GAME UI', 'LANGUAGE FILES', 'PERFORMANCE MONITOR', 'CRASH GUARD', 'LOCKED DOWN', 'WORKS BESIDE OTHER LOADERS', 'ANY AUTHOR']
 
 
 def background(W, H):
@@ -58,19 +61,35 @@ body { width:%(W)dpx; height:%(H)dpx; overflow:hidden; background:#000; position
 .perf { position:absolute; background:rgba(8,12,10,.93); border:2px solid rgba(255,231,16,.6); border-top:0.25em solid #ffe710;
   border-radius:0.3em; box-shadow:0 0.5em 1.6em rgba(0,0,0,.7); font-family:'Mono'; color:#dcdcdc; padding-bottom:0.45em; }
 .perf .ph { font-family:'Mono B'; color:#ffe710; padding:0.45em 0.75em 0.3em; letter-spacing:0.03em; }
-.perf .row { display:flex; justify-content:space-between; padding:0.14em 0.75em; white-space:pre; }
+.perf .row { display:flex; justify-content:space-between; gap:1.2em; padding:0.14em 0.75em; white-space:pre; }
 .perf .row.hd { color:#96ffb4; } .perf .row.w { color:#fff; font-family:'Mono B'; }
-/* the options menu (F9) */
-.menu { position:absolute; background:rgba(8,10,9,.95); border:2px solid #ffe710; border-radius:0.3em;
-  box-shadow:0 0.6em 2em rgba(0,0,0,.8); font-family:'Mono'; color:#e8e8e2; }
-.menu .head { font-family:'Mono B'; background:#ffe710; color:#111; padding:0.4em 0.75em; display:flex; justify-content:space-between; }
-.menu .grp { font-family:'Mono B'; color:#ffe710; padding:0.55em 0.75em 0.15em; letter-spacing:0.04em; }
-.menu .row { display:flex; justify-content:space-between; padding:0.18em 0.75em 0.18em 1.4em; }
-.menu .row.sel { background:rgba(255,231,16,.16); box-shadow:inset 0.2em 0 0 #ffe710; }
-.menu .v { font-family:'Mono B'; color:#8fe08f; }
-.menu .k { font-family:'Mono B'; color:#111; background:#e8e8e2; padding:0 0.35em; border-radius:0.15em; }
-.menu .foot { color:#7d877f; padding:0.5em 0.75em 0.55em; border-top:1px solid rgba(255,231,16,.25); margin-top:0.4em;
-  white-space:nowrap; font-size:0.85em; }
+/* the full screen menu (1.2.0): the title picture, the mods on the left, the open mod's options on the right, the
+   hints along the bottom */
+.fs { position:absolute; background:#090b0a; border:2px solid rgba(255,231,16,.55); border-radius:0.25em;
+  box-shadow:0 0.8em 2.6em rgba(0,0,0,.85), 0 0 0 1px #000; font-family:'Mono'; color:#e8e8e2; overflow:hidden; }
+.fs .hdr { background:#111513; display:flex; align-items:center; justify-content:space-between; padding:0.55em 1em;
+  border-bottom:0.18em solid #ffe710; }
+.fs .hdr img { height:1.9em; image-rendering:pixelated; display:block; }
+.fs .hdr .ver { color:#7d877f; font-size:0.8em; letter-spacing:0.04em; }
+.fs .body { display:flex; gap:0.8em; padding:0.8em 1em 0.7em; }
+.fs .pane { background:#111513; border:1px solid rgba(255,231,16,.28); }
+.fs .pt { display:flex; justify-content:space-between; color:#7d877f; padding:0.45em 0.7em 0.35em; font-size:0.85em;
+  border-bottom:1px solid rgba(255,231,16,.28); margin:0 0.3em 0.3em; letter-spacing:0.04em; }
+.fs .ln { display:flex; justify-content:space-between; align-items:center; gap:0.8em; padding:0.2em 0.7em 0.2em 1em;
+  white-space:nowrap; }
+.fs .ln .val { display:inline-block; min-width:2.2em; text-align:right; }
+.fs .ln.lit { background:rgba(255,231,16,.16); box-shadow:inset 0.22em 0 0 #ffe710; }
+.fs .ln.lit > span:first-child { color:#ffe710; }
+.fs .ln .n { color:#7d877f; }
+.fs .hd { color:#ffe710; font-family:'Mono B'; padding:0.45em 0.7em 0.15em; font-size:0.85em; letter-spacing:0.05em; }
+.fs .on { color:#8fe08f; font-family:'Mono B'; } .fs .off { color:#7d877f; font-family:'Mono B'; }
+.fs .arr { color:#7d877f; } .fs .lit .arr { color:#ffe710; }
+.fs .sl { display:inline-block; width:5em; height:0.18em; background:#4a524c; position:relative; vertical-align:middle;
+  margin-right:0.7em; } .fs .sl i { position:absolute; left:0; top:0; bottom:0; background:#8fe08f; }
+.fs .key { font-family:'Mono B'; color:#111; background:#e8e8e2; padding:0 0.35em; border-radius:0.15em; }
+.fs .foot { border-top:0.12em solid rgba(255,231,16,.35); padding:0.55em 1em 0.6em; display:flex; gap:1.3em;
+  align-items:center; color:#7d877f; font-size:0.85em; white-space:nowrap; }
+.fs .foot.clash { color:#ffe710; }
 """
 
 
@@ -83,15 +102,30 @@ def perf(x, y, w, size):
             '%s</div>') % (x, y, w, size, body)
 
 
-def menu(x, y, w, size):
-    """the options menu (F9): the mods in alphabetical order; Enter opens one"""
-    def row(label, n, sel=False):
-        return '<div class="row%s"><span>%s</span><span class="v">&gt;</span></div>' % (' sel' if sel else '', label)
-    body = ''.join([
-        '<div class="head"><span>CHEF SHARED LOADER OPTIONS</span><span>F9</span></div>',
-        row('Chef Shared Loader', 3), row('Treasure Radar', 27, sel=True), row('Your Mod', 4),
-        '<div class="foot">Enter open &nbsp; / search &nbsp; F9 close</div>'])
-    return '<div class="menu" style="left:%dpx;top:%dpx;width:%dpx;font-size:%dpx">%s</div>' % (x, y, w, size, body)
+def fullmenu(x, y, w, size, pick=None):
+    """the full screen options menu, as on the ship: the mods on the left, Treasure Radar's options open on the right,
+    and along the bottom the hint for a key two options use (pick: which of the right pane's lines to show)"""
+    mods = [('Chef Shared Loader', '9', False), ('Treasure Radar', '27', True), ('Your Mod', '4', False)]
+    left = ''.join('<div class="ln%s"><span>%s</span><span class="n">%s</span></div>' % (' lit' if l else '', n, c)
+                   for n, c, l in mods)
+    def tog(label, on, lit=False):
+        return '<div class="ln%s"><span>%s</span><span class="%s">%s</span></div>' % (
+            ' lit' if lit else '', label, 'on' if on else 'off', 'ON' if on else 'OFF')
+    def sld(label, v, f):
+        return ('<div class="ln"><span>%s</span><span><span class="sl"><i style="width:%d%%"></i></span>'
+                '<span class="arr">&lt;</span> <span class="on val">%s</span> <span class="arr">&gt;</span></span></div>') % (label, f, v)
+    def key(label, k, lit=False):
+        return '<div class="ln%s"><span>%s</span><span class="key">%s</span></div>' % (' lit' if lit else '', label, k)
+    right = [ '<div class="hd">MARKERS</div>', tog('Show radar', True), sld('Range', '150', 60), sld('Opacity (%)', '50', 50),
+              tog('Show enemies', True), tog('Show common samples', False), '<div class="hd">KEYS</div>',
+              key('Hide key', 'F7 !', lit=True), key('Ledger key', 'F6')]
+    if pick: right = [right[i] for i in pick]
+    foot = '<div class="foot clash">F7 ALSO USED BY: YOUR MOD (TOGGLE)</div>'
+    return ('<div class="fs" style="left:%dpx;top:%dpx;width:%dpx;font-size:%dpx">'
+            '<div class="hdr"><img src="data:image/png;base64,%s"><span class="ver">CHEF SHARED LOADER %s</span></div>'
+            '<div class="body"><div class="pane" style="flex:0 0 36%%"><div class="pt"><span>MODS</span><span>3</span></div>%s</div>'
+            '<div class="pane" style="flex:1"><div class="pt"><span>TREASURE RADAR</span></div>%s</div></div>%s</div>') % (
+        x, y, w, size, BANNER, VERSION[0], left, ''.join(right), foot)
 
 
 def feats(size):
@@ -112,42 +146,43 @@ def render(page, W, H, body):
 def main():
     out = sys.argv[1]
     ver = sys.argv[2] if len(sys.argv) > 2 else '1.2.0'
+    VERSION[0] = ver
     badge = 'v' + '.'.join(ver.split('.')[:2])
     os.makedirs(out, exist_ok=True)
     v = {'b': badge, 't': TAGLINE}
     jobs = [
-        # square: the title at the top, the log behind the menu in the middle, the tagline at the bottom
+        # square: the title at the top, the full screen menu with the monitor over its corner, the tagline at the bottom
         ('thumbnail_1254.png', 1254, 1254, """
-      <div style="position:absolute;left:0;right:0;top:54px;text-align:center">
-        <div class="title" style="font-size:128px">Chef Shared Loader</div>
-        <div style="margin-top:20px"><span class="badge" style="font-size:46px">%(b)s</span></div>
-      </div>""" % v + menu(80, 340, 760, 36) + perf(420, 712, 760, 32) + """
-      <div style="position:absolute;left:70px;right:70px;bottom:44px;text-align:center">
-        <div class="tag" style="font-size:38px">%(t)s</div>
+      <div style="position:absolute;left:0;right:0;top:48px;text-align:center">
+        <div class="title" style="font-size:124px">Chef Shared Loader</div>
+        <div style="margin-top:18px"><span class="badge" style="font-size:44px">%(b)s</span></div>
+      </div>""" % v + fullmenu(64, 318, 1126, 28) + perf(96, 660, 400, 17) + """
+      <div style="position:absolute;left:70px;right:70px;bottom:40px;text-align:center">
+        <div class="tag" style="font-size:36px">%(t)s</div>
       </div>""" % v),
-        # 16:9: the text on the left, the windows on the right
+        # 16:9: the text on the left, the menu and the monitor on the right
         ('gallery_1920x1080.png', 1920, 1080, """
-      <div class="plate" style="left:70px;top:110px;width:640px;padding:40px 40px 42px">
-        <div class="title" style="font-size:104px">Chef Shared<br>Loader</div>
-        <div style="margin:22px 0 26px"><span class="badge" style="font-size:44px">%(b)s</span></div>
-        <div class="tag" style="font-size:35px">%(t)s</div>
-        <div style="margin-top:30px">%(f)s</div>
-      </div>""" % dict(v, f=feats(30)) + menu(790, 150, 780, 34) + perf(1060, 500, 790, 31)),
+      <div class="plate" style="left:64px;top:96px;width:600px;padding:38px 38px 40px">
+        <div class="title" style="font-size:100px">Chef Shared<br>Loader</div>
+        <div style="margin:20px 0 24px"><span class="badge" style="font-size:42px">%(b)s</span></div>
+        <div class="tag" style="font-size:33px">%(t)s</div>
+        <div style="margin-top:28px">%(f)s</div>
+      </div>""" % dict(v, f=feats(28)) + fullmenu(712, 120, 1150, 28) + perf(1300, 742, 572, 22)),
         ('GitHub-Social-1280x640.png', 1280, 640, """
-      <div class="plate" style="left:48px;top:40px;width:470px;padding:28px 30px 30px">
-        <div class="title" style="font-size:72px">Chef Shared<br>Loader</div>
-        <div style="margin:18px 0 20px"><span class="badge" style="font-size:34px">%(b)s</span></div>
+      <div class="plate" style="left:44px;top:44px;width:430px;padding:24px 26px 26px">
+        <div class="title" style="font-size:64px">Chef Shared<br>Loader</div>
+        <div style="margin:14px 0 16px"><span class="badge" style="font-size:28px">%(b)s</span></div>
+        <div class="tag" style="font-size:21px">%(t)s</div>
+        <div style="margin-top:16px">%(f)s</div>
+      </div>""" % dict(v, f=feats(17)) + fullmenu(506, 64, 730, 17) + perf(930, 432, 310, 13)),
+        # 1.6:1, everything inside the middle 1190x800
+        ('AyakaMods-Cover-1600x1000.png', 1600, 1000, """
+      <div class="plate" style="left:210px;top:150px;width:450px;padding:28px 30px 30px">
+        <div class="title" style="font-size:78px">Chef Shared<br>Loader</div>
+        <div style="margin:16px 0 18px"><span class="badge" style="font-size:32px">%(b)s</span></div>
         <div class="tag" style="font-size:25px">%(t)s</div>
         <div style="margin-top:20px">%(f)s</div>
-      </div>""" % dict(v, f=feats(20)) + menu(560, 80, 430, 18) + perf(790, 300, 440, 17)),
-        # 1.6:1, the plate inside the middle 1190x800
-        ('AyakaMods-Cover-1600x1000.png', 1600, 1000, """
-      <div class="plate" style="left:210px;top:160px;width:480px;padding:32px 32px 34px">
-        <div class="title" style="font-size:86px">Chef Shared<br>Loader</div>
-        <div style="margin:18px 0 22px"><span class="badge" style="font-size:36px">%(b)s</span></div>
-        <div class="tag" style="font-size:28px">%(t)s</div>
-        <div style="margin-top:22px">%(f)s</div>
-      </div>""" % dict(v, f=feats(21)) + menu(740, 180, 470, 20) + perf(960, 420, 470, 19)),
+      </div>""" % dict(v, f=feats(19)) + fullmenu(690, 176, 700, 18) + perf(1050, 586, 340, 14)),
         # the Nexus header (1300x372): Nexus fades the lower half and puts the page's title, stats and buttons over
         # it, and its Manage button sits top right, so everything stays in the upper half, clear of that corner
         ('header_1300x372.png', 1300, 372, """
@@ -155,7 +190,7 @@ def main():
         <div style="white-space:nowrap"><span class="title" style="font-size:58px">Chef Shared Loader</span>
           <span class="badge" style="font-size:24px;vertical-align:14px;margin-left:12px">%(b)s</span></div>
         <div class="tag" style="font-size:19px;margin-top:12px">%(t)s</div>
-      </div>""" % v + menu(596, 30, 268, 13) + perf(880, 30, 296, 12)),
+      </div>""" % v + fullmenu(620, 16, 520, 9.5, pick=[0, 1, 2, 3, 6, 7])),
     ]
     with sync_playwright() as p:
         b = p.chromium.launch()
