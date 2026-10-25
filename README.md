@@ -463,7 +463,7 @@ Lua 5.1's limit of 200 active locals (about a dozen free), so new start-up code 
 
 ## Credits
 
-- **tyrypyrking** (HD2 Transmog): the boot-script callback fixes, the mod list with each mod's state and the health
+- **RatInPlat** (HD2 Transmog): the boot-script callback fixes, the mod list with each mod's state and the health
   file, and `chef.index()` (pull requests #2 and #3).
 - **Rosensterner:** the full screen menu look, its title picture, and the controller and mouse support in the options
   menu.
