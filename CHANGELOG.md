@@ -1,5 +1,109 @@
 # Changelog
 
+## 1.2.0
+
+**The load-order stub**
+- The loader's `boot` is now a small, frozen start-up stub that starts the loader itself (the Lua resource
+  `mods/chef_shared_loader/core_1`) with the game's `require`. Any mod may ship the stub, unchanged, as its own `boot`:
+  whichever copy the game runs, every loader mod keeps running, whatever the load order (docs/MODDING.md, "Carrying
+  the stub"). The stub's own license lets anyone ship it byte for byte, free and with no credit needed.
+- Without the loader installed, the stub does just what the game's own boot does. If the loader is there but can't
+  load, the stub writes one line to `chef_loader_stub.txt` and the game carries on; the next launch logs that line.
+- The log says which boot the game ran and how the loader started, names the loader's own boots it didn't run (other
+  copies of the stub, a changed copy, a copy of the loader built into a mod), and lists the copies of the loader when
+  more than one mod carries it.
+- Another mod's boot that starts the loader itself isn't run a second time; the callbacks it set run as that boot's.
+- A trusted mod's game patch file can't carry a copy of the loader, and its exports aren't handed to other mods. A
+  trusted mod may offer the other HD2 Lua Runtime mods a read-only view of one global of its own (the calls its place
+  on the list names; every answer a copy, nothing that changes the mod). Of what the other mods share, it gets only the
+  globals its place on the list names, each from the one mod named.
+- Each mod gets its own copy of every engine table (`stingray`, `Unit`, `World` ...): a mod that replaces an engine
+  function or adds a field changes only its own copy, never the game's, the loader's or another mod's.
+
+**Fixes**
+- The options menu key (F9) could stay dead for the whole session when the game wasn't ready to report the key in the
+  first frames. A key with no answer yet is asked about again every 2 seconds, and the log says so.
+- When the game's HUD font wasn't loaded yet at start-up, the loader used its backup font for the whole session. It
+  now switches to the HUD font as soon as it's loaded.
+- A world that restarted in place (as the title screen can) kept the loader's last texts on screen. They're now
+  removed once that world has settled.
+
+**The options menu**
+- A full screen look on the ship: the mods on the left, the picked mod's options on the right, a title picture at the
+  top. In a mission the menu is the compact panel (the game keeps running under it). F9 > Chef Shared Loader > Menu
+  look picks Full screen or Compact.
+- A controller works in the menu: the D-pad moves, cross/A picks, circle/B goes back (and closes at the list of mods),
+  square/X puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens
+  it. Row: Controller in this menu.
+- The mouse works in the menu (on the ship by default, since moving it still turns the camera): hover, click, right
+  click to go back, the wheel, and dragging a slider. Row: Mouse in this menu.
+- New rows: Menu position (left, center, right; the compact look) and Monitor position (top, middle or bottom, left
+  or right).
+- A key two options use: with that row selected, the hint line names the other options on the key, in yellow.
+- The "OTHER LOADER NOT RUN" notice goes after 10 seconds.
+- The loader's own options are grouped under headings: Menu, Performance and Permissions.
+- The options menu, the performance monitor and the loader's notices draw over the game's HUD, map, terminals and Esc
+  menu (all but the menus' top bar and button prompts). For mods, layers `chef.TOP` to `chef.TOP + 999` do the same
+  (docs/MODDING.md). A mod that drew at `chef.TOP + N` under the game's menus in 1.1.0 adds 1000 to keep that.
+
+**Language files**
+- A language file translates the loader's menu, monitor and notices and every mod's text at once: a Lua resource
+  starting `-- HD2-Lang: mods/<author>/<name>` that returns only data (a name, exact texts, optional patterns). Pick it
+  in F9 > Chef Shared Loader > Language (shown once one is installed; kept by name, so adding another never changes it).
+  Files with the same name are one language, so a mod can ship its own texts for it (docs/MODDING.md, "Language
+  files").
+- While a language is on, the texts it has no entry for are listed in `chef_loader_lang_missing.txt`, ready to copy
+  into the file: the texts drawn, and every mod's option texts in the menu, scrolled to or not.
+- For mods: `chef.lang()` (the language's name and code) and `chef.tr(s)`.
+- A language file is read as data before it runs (no loops, calls or operators), with limits on its size and on how
+  long its patterns may take; a file that ends the game is skipped from the next launch until it changes.
+
+**Other mod loaders**
+- Boot Mod Loader's and Bingus Shared Loader v21's boot scripts in a lower patch are named in the log and on screen
+  (they're still not run).
+- A mod another loader already started (in `package.loaded`, Boot Mod Loader's list, or the `modules` table of another
+  loader's `CowboyBingusModLoader`) isn't started again; the log and `chef.mods()` name that loader. A mod made for
+  Chef Shared Loader (`-- HD2-Requires: chef-shared-loader`) is always started. Every mod the loader starts is marked in
+  `package.loaded`, so a loader that starts mods with `require` skips it.
+- Another loader can hand the game to Chef Shared Loader with a few lines at the top of its `boot`; the callbacks it set
+  first keep running after the loader's (docs/MODDING.md, "For other loaders"). A public, read-only
+  `ChefSharedLoader` value says it's running, and it runs once per Lua state.
+- The start-up log names an `ffi` written in Lua (another loader's stand-in) as one, not as the real `ffi`.
+
+**Mods written for Bingus Shared Loader, Boot Mod Loader and Mod Options Menu**
+- `CowboyBingusModLoader` (also `HD2ModLoader`) has those loaders' calls: `on_update(id, fn)`, `on_shutdown` in both
+  forms, `modules`, `game`, `version` 17. Every callback is timed in the performance monitor and crash-guarded.
+- `ModOptionsMenu` version 3: headings by `mod_id`, and an option with no value saved yet starts from the value it had
+  before (`mom_<mod>_settings.txt`, else `ModOptionsMenu.values`).
+- New: `ModBindingsMenu` (each binding a key row in the options menu) and `BingusRuntime`.
+- `package.loaded` and `require` give another running mod's module.
+- `ffi` and `jit` read as `false` for every mod, even when another loader left a stand-in for them.
+- A mod that keeps its log or settings straight in `%LOCALAPPDATA%` (as mods for those loaders often do) has those
+  files kept in the loader's folder instead, under the same names; settings it saved there before are still read.
+  `.ini` files are allowed too.
+- `open_log` starts a fresh file the first time each name is opened in a launch (it added to the old one).
+- `ModOptionsMenu`: up to 32 options a heading and 112 headings; `set` and `register_option` check what they're given.
+
+**For mod authors**
+- A mod the loader stops (too many errors, a start that failed half-way, a dev reload) first gets `on_stop()` (in its
+  table) or `handle.on('stop', fn)` (an HD2 Lua Runtime mod), to put back what only it knows, such as textures it set
+  on the game's materials. Breadcrumbed: one that ends the game is skipped from then on.
+- Mod names may have more parts (`mods/<author>/<group>/<name>`).
+- A mod file that returns `false`, a number or a string runs, as one that returns nothing does.
+- Patch files are found across up to 64 missing numbers in a row (was 40), as Boot Mod Loader does.
+- With the game's render scale below native, a mod's plain layers stay under the game's menus.
+- UTF-8 text in the game's font (`chef.text`, the menu, the monitor): each character is kept whole, measured whole and
+  never cut in the middle; one the font has no glyph for shows as `?`. The pixel font shows a non-ASCII character as one
+  `?` (it showed one per byte). The log says whether the game's font has CJK glyphs.
+- File names Windows keeps for devices are refused in more spellings (`COM0`, `LPT0`, any case, spaces before the dot).
+- Three more read-only network calls for mods: `GameSession.objects_owned_by`, `GameSession.game_object_is_type` (the
+  check before reading a field) and `Network.object_info`.
+
+**Credits**
+- MCTimeRL: the report on what kept UTF-8 (Chinese) text out of the game's font, with a working translated build,
+  and the idea for language files.
+- Rosensterner: the full screen menu look, its title picture, and the controller and mouse support in the options menu.
+
 ## 1.1.0
 
 **License**
