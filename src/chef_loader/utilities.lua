@@ -100,13 +100,13 @@ function M.index(ctx, P)
   local t0, busy = P.clock(), 0
   local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
               compared = 0, read = 0, excl = 0 }
-  -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index
-  -- * 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
+  -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index *
+  -- 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
   -- table by up to 200,000, and each doubling of it is one step of tens of ms no pause can split. The number is the
-  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits
-  -- go with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits are told apart. The rare
-  -- second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's low byte into 256, so no
-  -- single table grows to 200,000 keys (one rehash of that is tens of ms too).
+  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits go
+  -- with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits
+  -- are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's
+  -- low byte into 256, so no single table grows to 200,000 keys (one rehash of that is tens of ms too).
   local wins, shads, wins_s, shads_s, tix, ntypes = {}, {}, {}, {}, {}, 0
   for b = 0, 255 do wins[b], shads[b] = {}, {} end
   local list = P.patches()
@@ -494,9 +494,21 @@ function M.data_name(owner, name)
   if type(owner) ~= 'string' or owner:sub(1, 5) ~= 'mods/' or #owner < 6 then return nil end
   return 'chef_data_' .. data_enc(owner:sub(6)) .. '__' .. data_enc(name) .. '.lua'
 end
+-- An owner's name flattened the way file names before 1.0.1 had it: mods/a/b -> a_b. A nested name (more than two
+-- parts) gets "_" and 8 hex digits of a hash of the whole name on top, so mods/a/b/c and mods/a/b_c never share a
+-- file (two-part names keep their old files). The hash: two 16-bit halves of a 32-bit one, since string.format's %x
+-- only goes to 2^31 on Windows.
+function M.flat_owner(owner)
+  local flat = owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_')
+  local _, slashes = owner:gsub('/', '')
+  if slashes <= 2 then return flat end
+  local h = 2166136261
+  for i = 1, #owner do h = (h * 31 + owner:byte(i)) % 4294967296 end
+  return flat .. '_' .. fmt('%04x%04x', floor(h / 65536), h % 65536)
+end
 -- the file name before 1.0.1 (not one to one: two pairs could share one), read once to move a table over
 function M.old_data_name(owner, name)
-  return 'chef_data_' .. owner:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_' .. name .. '.lua'
+  return 'chef_data_' .. M.flat_owner(owner) .. '_' .. name .. '.lua'
 end
 
 -- ------------------------------------------------------------------ install
@@ -1406,7 +1418,7 @@ function M.install(ctx, L)
       local mid = M.old_data_name(owner, name):sub(11, -5)
       for _, o in ipairs(L.found and L.found() or {}) do
         if type(o) == 'string' and o ~= owner then
-          local p = o:gsub('^mods/', ''):gsub('[^%w_%-]', '_') .. '_'
+          local p = M.flat_owner(o) .. '_'
           if #mid > #p and mid:sub(1, #p) == p then return false end
         end
       end
@@ -1487,14 +1499,14 @@ function M.install(ctx, L)
   util.default_budget = function() return util.budget_row and util.budget_row.value or 2.0 end
 
   -- ---------------------------------------------------------------- the performance monitor
-  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel in the top right with each mod's
-  -- cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs, a boot
-  -- script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a, shown on
-  -- the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a second I turn
-  -- the last second into averages a frame: each mod's milliseconds and its share of the frame (from the game's own
-  -- frame time), the worst single call, and the total.
-  -- Off, it costs one check a frame; nothing is drawn or added up. Its own drawing (the loader's pixel font is rects,
-  -- a few hundred a frame) is timed apart and shown on its own line, so it never counts against the loader or a mod.
+  -- The loader's "Performance monitor" row (util.perf_row, off by default): a panel (where "Monitor position" puts it)
+  -- with each mod's cost. Every mod's time (its hooks, timers and spread work) goes into a.pm_ms / a.pm_max as it runs,
+  -- a boot script's into b.pm_ms (and an HD2-Boot mod's timers, spread work and callbacks into its own record, b.a,
+  -- shown on the same line), and the loader's own share of its update into pm.loader (all from the loader). Once a
+  -- second I turn the last second into averages a frame: each mod's milliseconds and its share of the frame (from the
+  -- game's own frame time), the worst single call, and the total. Off, it costs one check a frame; nothing is drawn or
+  -- added up. Its own drawing (the loader's pixel font is rects, a few hundred a frame) is timed apart and shown on its
+  -- own line, so it never counts against the loader or a mod.
   local pm = { on = false, at = 0, frames = 0, t0 = 0, loader = 0, self = 0, lines = nil }
   util.pm = pm
   -- the mods' time so far (the loader asks before and after its update, to find its own share)
@@ -1514,7 +1526,7 @@ function M.install(ctx, L)
       if b.a and b.a ~= b then b.a.pm_base, b.a.pm_max = b.a.pm_ms or 0, 0 end
     end
   end
-  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? ]', ' ')) end
+  local function plain(t) return (tostring(t):upper():gsub('[^A-Z0-9%.,:%-%+/%%%(%)!%? \128-\255]', ' ')) end
   -- a boot script's name: an HD2-Boot mod's name, else its first comment line up to a bracket, else its patch file
   local function boot_name(b)
     if b.a and type(b.a.short) == 'string' then return b.a.short end      -- an HD2-Boot mod: its own name
@@ -1573,11 +1585,15 @@ function M.install(ctx, L)
                       { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
   -- The layout is the panel's 5 rects and one text per column of a line ({ x, y, text, color index }); each frame I
   -- draw them through ctx.text, whose fast path takes a whole text through one pcall.
-  local function pm_layout(ls, w, h)
+  -- place: the "Monitor position" row (1 top right, 2 top left, 3 middle right, 4 middle left, 5 bottom right,
+  -- 6 bottom left); the game draws its HUD over anything of mine, so the player picks a spot it leaves free
+  local function pm_layout(ls, w, h, place)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
     local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
-    local x0, y1 = w - pw - floor(w * 0.02), floor(h * 0.96)        -- top right, clear of the options menu (top left)
+    local right = place % 2 == 1
+    local x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
+    local y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
     local b = max(1, floor(px * 0.75))
     local out = { px = px, rects = {
       { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
@@ -1625,8 +1641,9 @@ function M.install(ctx, L)
     local w, h = ctx.screen()
     -- (laid out again when the screen size or the font changes: the game's font measures differently)
     local native = ctx.text_native and ctx.text_native() or false
-    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native then
-      pm.rects, pm.w, pm.h, pm.native = pm_layout(pm.lines, w, h), w, h, native
+    local place = util.perf_place and tonumber(util.perf_place.value) or 1
+    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place then
+      pm.rects, pm.w, pm.h, pm.native, pm.place = pm_layout(pm.lines, w, h, place), w, h, native, place
     end
     local cs = pm.cs or {}
     pm.cs = cs

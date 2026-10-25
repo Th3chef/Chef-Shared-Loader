@@ -4,7 +4,9 @@
 --   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off }; spec: id (letters, digits, _ . -), api
 --     (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
---     pcall
+--     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
+--     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
+--     it set on the game's materials: the engine can't tell what a material had before)
 --   * handle.engine: the API's engine calls, in its call shapes (Gui.rect takes numbers, Gui.text a font name,
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
@@ -14,7 +16,9 @@
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
--- _G; never a name the game already has.
+-- _G; never a name the game already has. A trusted mod's globals stay its own, but its TRUSTED entry may name one
+-- (view) the others get as a read-only view: only the calls listed, plain arguments in, copies of plain values out.
+-- Of the others' globals, a trusted mod takes only the ones its entry accepts, each from the one mod named.
 -- Plain Lua 5.1.
 
 local M = { version = '1.1.0', runtime_version = '0.1.0' }
@@ -41,7 +45,7 @@ local function extents(lo, hi, caret) return lo.x, lo.y, hi.x, hi.y, caret.x end
 local function int(v, lo, hi) return type(v) == 'number' and v == floor(v) and v >= lo and v <= hi end
 local function finite(v, limit) return type(v) == 'number' and v == v and abs(v) <= limit end
 local function hex16(s) return type(s) == 'string' and #s == 16 and s:match('^%x+$') ~= nil end
-local EVENTS = { update = true, render = true, shutdown = true }
+local EVENTS = { update = true, render = true, shutdown = true, stop = true }
 -- the fonts a GUI's text may use: the ones the game makes a material for itself (another name ends the game), each
 -- with that material; a locale's own UI font by its 16-hex id
 local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
@@ -63,6 +67,11 @@ function M.install(ctx)
   local orphan = {}                                   -- name -> { by, v }: a stopped mod's shared value, until set again
   local shared, shared_by = {}, {}                    -- capitalized globals runtime mods set, shared between them; who
   local G = ctx.G or {}
+  -- a trusted mod's read-only view: global name -> { by, real, spec, on }; view.made: the views handed out (weak)
+  local view = { by_name = {}, made = setmetatable({}, { __mode = 'k' }), LIMIT = 4000, DEPTH = 8,
+                  reserved = ctx.reserved or {} }   -- view name -> its trusted mod (no one else shares under it)
+  -- the engine values a view passes on as they are (others, file handles say, are left out)
+  view.PASS = { Unit = true, IdString64 = true, Vector3 = true, Quaternion = true }
 
   -- ---------------------------------------------------------------- calls
   -- a binding's first call for this mod goes through guarded (breadcrumbed, keyed by the mod); later ones straight to
@@ -157,6 +166,13 @@ function M.install(ctx)
     return setmetatable(w, {
       __index = function(_, k)
         local f = type(t) == 'table' and t[k] or nil
+        if type(f) == 'table' then
+          -- (a table in it: the mod's own shallow copy, so what it writes there stays its own)
+          local c = {}
+          for k2, v2 in pairs(f) do c[k2] = v2 end
+          rawset(w, k, c)
+          return c
+        end
         if type(f) ~= 'function' then return f end
         local b = name .. '.' .. tostring(k)
         local g = function(...)
@@ -880,6 +896,10 @@ function M.install(ctx)
     if rec.state ~= 'active' then return true end
     rec.state = 'off: ' .. why
     for ev in pairs(EVENTS) do rec.callbacks[ev] = {} end
+    -- (its view, if it has one, answers "not running" once none of its mods is active)
+    local any = false
+    for _, r in ipairs(owners[rec.owner] and owners[rec.owner].order or {}) do if r.state == 'active' then any = true end end
+    if not any then for _, vw in pairs(view.by_name) do if vw.by == rec.owner then vw.on = false end end end
     local ok, d, s = pcall(release, rec)
     log(fmt('[%s] %s switched off: %s (%s)', rec.owner, rec.id, why,
       ok and fmt('destroyed %d, shown %d', d or 0, s or 0) or ('undoing failed: ' .. tostring(d))))
@@ -896,6 +916,10 @@ function M.install(ctx)
     -- name its own, X = X or {})
     for k, by in pairs(shared_by) do
       if by == owner then orphan[k], shared[k], shared_by[k] = { by = owner, v = shared[k] }, nil, nil end
+    end
+    -- its read-only view answers "not running" from now on (the readers keep the table)
+    for k, vw in pairs(view.by_name) do
+      if vw.by == owner then vw.on, view.by_name[k] = false, nil end
     end
   end
   -- a new world: what belonged to a world that's gone is let go without being touched (any call on it ends the game)
@@ -960,7 +984,7 @@ function M.install(ctx)
     end
     if #o.order >= 8 then return nil, 'eight mods per file at most' end
     local rec = { owner = o.name, short = o.short, id = spec.id, name = type(spec.name) == 'string' and spec.name or spec.id,
-                  state = 'active', errors = 0, callbacks = { update = {}, render = {}, shutdown = {} }, owned = {},
+                  state = 'active', errors = 0, callbacks = { update = {}, render = {}, shutdown = {}, stop = {} }, owned = {},
                   hidden = {}, guis = {}, bones = bones, lobby_key = spec.lobby_key, seen = {}, said = {}, said_n = 0,
                   set_at = -1, sets = 0 }
     rec.engine = engine_for(rec)
@@ -992,16 +1016,33 @@ function M.install(ctx)
         update = function(dt) return dispatch(o, 'update', dt) end,
         render = function() return dispatch(o, 'render') end,
         shutdown = function() return dispatch(o, 'shutdown') end,
+        stop = function() return dispatch(o, 'stop') end,
       })
     end
     -- its environment shares the runtime mods' globals from now on
     if o.env and not envs[o.env] then
       envs[o.env] = o
-      for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
+      -- (a trusted mod gets only the shared globals its TRUSTED entry accepts, each from the one mod it names: its
+      -- environment otherwise holds only what it set itself)
+      local trusted = ctx.trusted(o.name)
+      if not trusted then
+        for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
+        for k, vw in pairs(view.by_name) do
+          if vw.on and vw.by ~= o.name and rawget(o.env, k) == nil then rawset(o.env, k, view.make(k, vw, o.name)) end
+        end
+      else
+        for k, v in pairs(shared) do
+          if view.accepts(trusted, k, shared_by[k]) then
+            if rawget(o.env, k) == nil then rawset(o.env, k, view.take(k, v, shared_by[k])) end
+          else
+            view.refused(trusted, k, shared_by[k], o.name)
+          end
+        end
+      end
       -- and what it set before registering is shared now (a library mod defines its global, then calls mod())
       local own = {}
       for k, v in pairs(o.env) do own[k] = v end
-      for k, v in pairs(own) do if shared_by[k] == nil then rt.on_global(o.env, k, v) end end
+      for k, v in pairs(own) do if shared_by[k] == nil or trusted then rt.on_global(o.env, k, v) end end
     end
     log(fmt('[%s] HD2 Lua Runtime look-alike: mod %s%s', o.name, rec.id, rec.lobby_key and ' (lobby key ' .. rec.lobby_key .. ')' or ''))
     return handle
@@ -1033,13 +1074,149 @@ function M.install(ctx)
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
     return true
   end
+  -- a shared global a trusted mod takes: its TRUSTED entry's accepts names the global and the one mod it takes it from
+  -- (a library its own package carries, say)
+  function view.accepts(t, k, by)
+    return by ~= nil and type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k] == by
+  end
+  -- the trusted mod's copy of an accepted value: its top level copied when the named mod sets it (before any other
+  -- mod runs), so a change another mod makes to the shared table never reaches the trusted mod, nor the other way
+  -- round; one copy per name, mod and value set
+  view.taken, view.said = {}, {}
+  function view.take(k, v, by)
+    local key = k .. '|' .. tostring(by)
+    local t = view.taken[key]
+    if t and t.src == v then return t.v end
+    local c = v
+    if type(v) == 'table' then c = {}; for kk, x in next, v do c[kk] = x end end
+    view.taken[key] = { src = v, v = c }
+    return c
+  end
+  -- an accepted name another mod set first: the trusted mod goes without it (said once, so a missing feature of the
+  -- trusted mod has a line in the log)
+  function view.refused(t, k, by, name)
+    local want = type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k]
+    if not want or view.said[k] then return end
+    view.said[k] = true
+    log(fmt('[%s] %s is set by %s, not %s: not given to it', name, k, tostring(by), want))
+  end
   -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet
   -- A trusted mod's globals stay its own: what it sets could let another mod use what only it was given (its game
   -- patch files, say).
+  -- ---------------------------------------------------------------- a trusted mod's read-only view
+  -- spec (its TRUSTED entry's view): global = the name, fields = { plain values, read when asked }, calls = { name = true
+  -- (every answer copied) or { keys } (the first answer's top-level keys kept, the rest left out) }.
+  -- Copies: tables are new tables of plain keys, functions and threads left out, engine handles (units) as they are,
+  -- 8 deep and 4,000 values a call at most; cycles cut. Nothing a reader gets leads back into the trusted mod.
+  function view.copy(v, keep, depth, budget, seen)
+    local t = type(v)
+    if t == 'function' or t == 'thread' then return nil end
+    if t == 'userdata' then                            -- (a handle from a gone world is never asked its kind:
+      if util.gone(v) then return nil end              -- its tostring asks the engine)
+      return view.PASS[kind(v)] and v or nil
+    end
+    if t ~= 'table' then return v end
+    if depth > view.DEPTH or seen[v] then return nil end
+    seen[v] = true
+    local out = {}
+    for k, x in next, v do                             -- (raw: a metatable on the answer never runs)
+      if budget.n <= 0 then break end
+      local tk = type(k)
+      if (tk == 'string' or tk == 'number' or tk == 'boolean') and (keep == nil or keep[k]) then
+        budget.n = budget.n - 1
+        local c = view.copy(x, nil, depth + 1, budget, seen)
+        if c ~= nil then out[k] = c end
+      end
+    end
+    seen[v] = nil
+    return out
+  end
+  -- arguments a reader may hand in: nil, booleans, numbers, strings up to 256 characters (no tables or functions that
+  -- the trusted mod's code would run or keep)
+  function view.plain(...)
+    local n = select('#', ...)
+    if n > 4 then return false end
+    for i = 1, n do
+      local a = (select(i, ...))
+      local t = type(a)
+      if not (a == nil or t == 'boolean' or (t == 'number' and a == a) or (t == 'string' and #a <= 256)) then return false end
+    end
+    return true
+  end
+  -- one reader's view: each call guarded under the reader's own crash key (<global>.<call>), so a call that ends the
+  -- game is skipped for that reader from then on, not for the trusted mod
+  function view.make(k, vw, reader)
+    local pub, fields = {}, {}
+    for _, f in ipairs(type(vw.spec.fields) == 'table' and vw.spec.fields or {}) do fields[f] = true end
+    for name, keep in pairs(type(vw.spec.calls) == 'table' and vw.spec.calls or {}) do
+      local keys = nil
+      if type(keep) == 'table' then keys = {}; for _, f in ipairs(keep) do keys[f] = true end end
+      local key = k .. '.' .. name
+      -- (the trusted mod's current view looked up each call: a reader that kept this table in a local still reaches
+      -- the trusted mod after it set its global again)
+      pub[name] = function(...)
+        local cur = view.by_name[k]
+        if not cur or not cur.on then return nil, 'not running' end
+        if not view.plain(...) then return nil, 'arguments must be plain values' end
+        local fn = rawget(cur.real, name)
+        if type(fn) ~= 'function' then return nil, 'not there' end
+        local r, why = guarded(reader, key, packed, fn, ...)
+        if type(r) ~= 'table' then return nil, why end
+        local budget, out = { n = view.LIMIT }, { n = r.n }
+        for i = 1, r.n do out[i] = view.copy(r[i], i == 1 and keys or nil, 1, budget, {}) end
+        return unpack(out, 1, out.n)
+      end
+    end
+    -- (fields read when asked: the trusted mod may fill its table after making it; plain values only)
+    local t = setmetatable({}, { __metatable = 'locked',
+      __index = function(_, key)
+        local f = pub[key]
+        if f ~= nil then return f end
+        local cur = view.by_name[k]
+        if fields[key] and cur and cur.on then
+          local x = rawget(cur.real, key)
+          local tx = type(x)
+          if tx == 'string' or tx == 'number' or tx == 'boolean' then return x end
+        end
+      end,
+      __newindex = function() error(k .. ' is read-only', 2) end })
+    view.made[t] = true
+    return t
+  end
+  -- the trusted mod set its view's global: every other runtime mod gets its own view (in place of nothing, of a copy
+  -- another mod shared under that name, or of an older view)
+  function view.publish(o, env, k, real, spec)
+    local old = view.by_name[k]
+    if old and old.by ~= o.name then return end
+    if view.reserved[k] ~= o.name then return end                 -- (only the mod the list names)
+    if real == shared[k] or (orphan[k] and orphan[k].v == real) then return end   -- (never another mod's value)
+    local vw = { by = o.name, real = real, spec = spec, on = true }
+    if old then old.on = false end
+    view.by_name[k] = vw
+    local fake, faker = shared[k], shared_by[k]
+    for e, r in pairs(envs) do
+      if e ~= env and r.name ~= o.name and r.name ~= faker then
+        local cur = rawget(e, k)
+        if cur == nil or (fake ~= nil and cur == fake) or view.made[cur] then rawset(e, k, view.make(k, vw, r.name)) end
+      end
+    end
+    shared[k], shared_by[k] = nil, nil
+    local calls = {}
+    for name in pairs(type(spec.calls) == 'table' and spec.calls or {}) do calls[#calls + 1] = name end
+    table.sort(calls)
+    log(fmt('[%s] %s: a read-only view for the other runtime mods (%s)', o.name, k, concat(calls, ', ')))
+  end
   function rt.on_global(env, k, v)
     local o = envs[env]
     if not o or type(k) ~= 'string' or not k:match('^%u[%w_]*$') or rawget(G, k) ~= nil or k == 'HD2Runtime' then return end
-    if v == nil or ctx.trusted(o.name) then return end
+    if v == nil then return end
+    local trust = ctx.trusted(o.name)
+    if trust then
+      local spec = type(trust) == 'table' and trust.view
+      if type(spec) == 'table' and spec.global == k and type(v) == 'table' then view.publish(o, env, k, v, spec) end
+      return
+    end
+    if view.by_name[k] or view.reserved[k] then return end            -- a view's name: this copy is its own
     if shared_by[k] ~= nil and shared_by[k] ~= o.name then return end   -- another mod's name: this one's copy is its own
     local prev = shared[k]
     -- after its mod stopped: only that mod setting it again (a reload) replaces the old copies
@@ -1047,10 +1224,18 @@ function M.install(ctx)
     orphan[k] = nil
     shared[k], shared_by[k] = v, o.name
     -- the others get it where they have nothing, or still the value it had before (set to nil and back)
-    for e in pairs(envs) do
-      if e ~= env then
+    -- (a trusted mod only when its TRUSTED entry accepts this name from this mod, and then its own copy, made now)
+    local old = view.taken[k .. '|' .. o.name]           -- (this mod's own earlier copy: the one a trusted mod may still hold)
+    for e, r in pairs(envs) do
+      local t = e ~= env and ctx.trusted(r.name)
+      if e ~= env and not t then
         local cur = rawget(e, k)
         if cur == nil or (prev ~= nil and cur == prev) then rawset(e, k, v) end
+      elseif t and view.accepts(t, k, o.name) then
+        local cur = rawget(e, k)
+        if cur == nil or (old ~= nil and cur == old.v) then rawset(e, k, view.take(k, v, o.name)) end
+      elseif t then
+        view.refused(t, k, o.name, r.name)
       end
     end
   end
@@ -1061,5 +1246,4 @@ function M.install(ctx)
   end
   return rt
 end
-
 return M

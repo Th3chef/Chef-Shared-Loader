@@ -81,6 +81,20 @@ function M.run(G, opts)
   r['loaded.ffi'] = (loaded and loaded.ffi ~= nil) and 'yes' or 'no'
   r['loaded.jit'] = (loaded and loaded.jit ~= nil) and 'yes' or 'no'
   r['loaded.bit'] = (loaded and loaded.bit ~= nil) and 'yes' or 'no'
+  -- An ffi written in Lua is another loader's stand-in (it can't reach memory), not the real one. string.dump takes
+  -- only a Lua function (debug, the other way to tell, is only there on the game's non-release builds).
+  local f, dbg = rawget(G, 'ffi') or (loaded and loaded.ffi), rawget(G, 'debug')
+  local str = rawget(G, 'string')
+  local dump = type(str) == 'table' and rawget(str, 'dump') or nil
+  if type(f) == 'table' and type(rawget(f, 'cdef')) == 'function' then
+    local lua = nil
+    if type(dump) == 'function' then lua = pcall(dump, f.cdef)
+    elseif type(dbg) == 'table' and type(dbg.getinfo) == 'function' then
+      local ok, i = pcall(dbg.getinfo, f.cdef, 'S')
+      lua = ok and type(i) == 'table' and i.what == 'Lua'
+    end
+    if lua ~= nil then r['ffi.kind'] = lua and 'lua-stub' or 'native' end
+  end
 
   -- Syntax LuaJIT accepts and plain 5.1 doesn't.
   r['syntax.goto'] = compiles(G, 'do goto skip end ::skip::')

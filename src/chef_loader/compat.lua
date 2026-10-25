@@ -233,9 +233,13 @@ M.xpcall, M.load = xpcall_args, load_compat
 -- Install
 ---------------------------------------------------------------------------------------------------
 
--- Is this already LuaJIT? Then its own bit, xpcall and load are the real thing and I stay out of the way.
+-- Is this already LuaJIT? Then its own bit, xpcall and load are the real thing and I stay out of the way. A jit table
+-- alone isn't enough (another loader's stand-in can leave one): LuaJIT also compiles goto, which Lua 5.1 never does.
 local function is_luajit(G)
-  return type(rawget(G, 'jit')) == 'table'
+  local ls = rawget(G, 'loadstring')
+  if type(rawget(G, 'jit')) ~= 'table' or type(ls) ~= 'function' then return false end
+  local ok, f = pcall(ls, 'do goto s end ::s::')
+  return ok and f ~= nil
 end
 
 -- Fills in only what's missing in the shared globals. The game's own scripts never see a changed
