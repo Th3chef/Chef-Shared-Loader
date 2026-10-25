@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.2.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.2.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -18,7 +18,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.2.0
+- **Version:** 1.2.1
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -125,7 +125,9 @@ exactly one of these:
   over its budget is named in the log (at most every 10 minutes).
 - **Performance monitor** (the loader's own options, off by default): a panel with the game's frame time and every
   mod's average milliseconds a frame, share of the frame and worst call, once a second, plus the loader's own share
-  and the panel's own cost. "Monitor position" puts it in a corner or at the middle of either side.
+  and the panel's own cost. "Monitor position" puts it in a corner or at the middle of either side. "Budget (ms)"
+  (1 ms by default) marks the mods over it in orange (and names them in the log); "Hide mods under N ms" (N follows the
+  Budget row) puts the rest on one line.
 - **Options menu (F9):** the list of mods in alphabetical order; Enter opens one mod's options, under a < Back row
   (Backspace goes back too); Delete puts an option's default back; Escape or F9 closes the menu. On the ship it's a
   full screen look (the mods on the left, the picked mod's options on the right, a title picture at the top); in a
@@ -136,7 +138,9 @@ exactly one of these:
     puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens it.
     A button already down when the menu opens does nothing until it's let go. Row: "Controller in this menu".
   - **Mouse:** hover, click, right click to go back, the wheel (one row a notch), and dragging a slider. On the ship
-    by default (moving it still turns the camera). Row: "Mouse in this menu".
+    by default. While the menu has the mouse the camera stays still: the mouse's delta axis gets a dead zone no
+    movement reaches (the one it had is put back when the menu closes, and at shutdown), and the menu's cursor follows
+    the engine's cursor axis. Row: "Mouse in this menu".
   - **Over the game's screens:** the menu, the monitor and the notices draw in the top world (see `chef.TOP` in
     [docs/MODDING.md](docs/MODDING.md)), over the game's HUD, map, terminals and Esc menu, all but the menus' top bar
     and button prompts. While the full screen look is open, other texts of the top world aren't drawn (the game's
@@ -163,7 +167,13 @@ exactly one of these:
 Source: `src/chef_loader/sandbox.lua`.
 
 **Environment chain:**
-- **Lookups:** `mod env` → `base` (replaced and refused names) → the game's globals. Both metatables carry
+- **Lookups:** `mod env` → `base` (replaced and refused names) → the game's capitalized globals. Lua's own base
+  functions (`pairs`, `unpack` ...) are the environment's own keys too (`rawget(_G, 'unpack')` finds them). The
+  game's other lower case globals, taken at start-up (listed in the log), are each mod's own: a value as it is, a
+  table as the mod's own copy. A lower case name behind `base` is nothing: the game's `init`/`update`/`render`/
+  `shutdown` and lower case globals set later aren't reached. A name the environment makes its own (`io`, `os`,
+  `debug`, `require`, `loadstring`, `getfenv`, `_G`, the libraries ...) reads as `false` behind it, so a mod that sets
+  one to nil never finds the game's. Both metatables carry
   `__metatable = 'locked'`, so `getmetatable` can't climb the chain and `setmetatable` on them fails.
 - **`_G`:** the mod's own environment, so assignments never reach the game's globals.
 - **Own copies:** each mod gets its own copies of `string`, `table`, `math`, `coroutine`, `bit`, `os` and `debug`,
@@ -185,7 +195,7 @@ Source: `src/chef_loader/sandbox.lua`.
 | `dofile`, `loadfile`, `module` | Raise errors (`module(..., package.seeall)` would hand out the game's globals). |
 | `require` | The mod's own `package.loaded`, then its own `package.preload` (a loop is an error), then only `bit`, `string`, `table`, `math`, `coroutine`, `table.new`, `table.clear` (the mod's own copies). Everything else raises an error: no C modules, and no `require('_G')`, `('debug')` or `('io')`. Another mod's exports go through `chef.require`; `require('mods/<author>/<name>')` and `package.loaded` give another running mod's module too (a trusted mod's never). |
 | `package` | A per-mod table (`loaded`, `preload`, empty `path`/`cpath`). No `loadlib`. |
-| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer` and every `*Lobby*` / `*GameServer*` table (each reads as `false`). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `is_*`, `has_*`, `get_*`, `num_*`) and `Network.object_info`. A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
+| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer` and every `*Lobby*` / `*GameServer*` table (each reads as `false`). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `is_*`, `has_*`, `get_*`, `num_*`; not `game_object_field_batched`, which has crashed the game) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
 | `debug` | `traceback` and `getinfo` (levels shifted past the wrapper, `func` removed). No `getlocal`, `getupvalue`, `setupvalue`, `getregistry`, `sethook`, `getmetatable`, `setfenv`. |
 | `getfenv` / `setfenv` | A function of the game, of the loader or of another mod reads as the caller's own environment and can't be changed. Level 0 (the thread) reads as the mod's own and can't be set. |
 | `collectgarbage` | `count`, `step` and `collect` only. Other options (`stop`, ...) do nothing. |
@@ -193,12 +203,12 @@ Source: `src/chef_loader/sandbox.lua`.
 **File policy** (`sb.check`, applied to `io.open` and `io.lines`):
 - **Reads are allowed** anywhere under the loader's folder and the game's settings folder (the same folder,
   `%APPDATA%\Arrowhead\Helldivers2\`, `saves\` included), and under the game's `data\`. Reads are also allowed for
-  `.log .txt .json .csv .dat .ini` files directly in the old `%LOCALAPPDATA%\` folder, so a mod can pick up its own
+  `.log .txt .json .csv .dat .ini .marker .fatal` files directly in the old `%LOCALAPPDATA%\` folder, so a mod can pick up its own
   old files.
 - **A mod's own files in `%LOCALAPPDATA%\`:** a file opened directly there (one name, an allowed type) is opened in
   the loader's folder instead, under the same name (said once per mod in the log). A read of one not there yet falls
   back to `%LOCALAPPDATA%\`. Trusted mods keep their own files where they are.
-- **Writes are allowed** only directly in the loader's folder, only as `.log .txt .json .csv .dat .ini`, with names made
+- **Writes are allowed** only directly in the loader's folder, only as `.log .txt .json .csv .dat .ini .marker .fatal`, with names made
   of `[%w_%-%.]`, and never `chef_loader*` or `chef_data_*`. Saved tables go through `chef.save_table`.
 - **Refused always:** `..`, a `:` after the drive (alternate data streams), `~` (8.3 short names such as
   `CHEF_L~1.LOG`), names ending in a dot or a space (Windows drops them, which would alias a protected file),
@@ -352,7 +362,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.2.0 starting`
+- `==== Chef Shared Loader 1.2.1 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -364,7 +374,7 @@ The old place keeps a trace:
   - `start-up: running as the game's boot script (...)`: a mod with the loader built in, or the simulator.
 - `boot scripts of mine, not run: <patch>: my start-up stub, <patch>: a full copy of Chef Shared Loader 1.1.0 ...`
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
-- `mods run locked down: ... (sandbox 1.2.0)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.2.1)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`.
 
 **Per mod:**
@@ -410,7 +420,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.0 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.1 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build

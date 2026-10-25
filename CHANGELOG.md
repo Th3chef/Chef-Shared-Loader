@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.1
+
+**The options menu**
+- On the ship, while the full screen menu has the mouse, the camera no longer turns with it: the mouse only moves the
+  menu's cursor, and the camera gets the mouse back the moment the menu closes (or the mouse is turned off for it, or
+  at shutdown). With Mouse in this menu set to Always, the same goes for the compact panel in a mission. A mod that
+  already holds the mouse that way is left alone.
+- Going back a step (right click, Backspace, circle/B) no longer flashes the menu for a frame.
+
+**Performance monitor**
+- "Budget warning (ms)" is now "Budget (ms)", 1 ms by default (it was 2). A mod over it (or over its own
+  `chef.budget`) is still named in the log, and is now marked orange in the monitor.
+- New row: Hide mods under N ms, N following the Budget row (off by default). On, the mods running under their
+  budget share one line, MODS UNDER N MS (their sum and the worst call among them), so the heavy ones stand out. A
+  mod that's off keeps its line.
+
+**Mods made for other loaders**
+- Lua's own base functions (`unpack`, `pairs`, `pcall` ...) are a mod's own globals, so mods that check
+  `rawget(_G, 'unpack')` before they hook the game start their update. The game's `update`, `render` and `shutdown`
+  aren't among them.
+- Mods may call `GameSession.other_peers` and `GameSession.unit_synchronizer` (teammates' objects, a unit's game
+  object). `UnitSynchronizer` keeps only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`); its spawns
+  and destroys, which every player sees, are left out.
+- `.marker` and `.fatal` files are allowed next to `.log .txt .json .csv .dat .ini` (a mod's own crash notes; kept in
+  the loader's folder like the others).
+
+**Fixes**
+- Lockdown: a mod that set one of its own names (`io`, `os`, `debug`, `require`, `loadstring`, `getfenv`, `_G`, a
+  library ...) to nil found the game's own behind it. It now finds nothing there.
+- Lockdown: the game's other lower case globals were shared, so a mod could change a table of the game's for the
+  game and every other mod. Each mod now gets its own (a table as its own copy), taken when the loader starts and
+  listed in the log; lower case globals set later, and the game's `init`, `update`, `render` and `shutdown`, aren't
+  reached.
+
 ## 1.2.0
 
 **The load-order stub**
