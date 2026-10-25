@@ -155,8 +155,8 @@ loader. An older loader has no `chef.has`: calling it there is an error, so test
 | `chef.capabilities` | Read-only. `api` (the level, 3), and true for each of: `after_startup`, `settings`, `share`, `events`, `require`, `bind`, `menu`, `shims`, `dev`, `logs`, `own_log` (api 2) and `units`, `spawn`, `timers`, `budget`, `session`, `settings_file`, `shapes`, `sprite_sheets`, `notify`, `typed`, `key_labels`, `save_table`, `mods` (api 3). |
 | `chef.has(name)` | True when the loader has that capability (`chef.has('api')` is true too). |
 | `chef.after_startup(fn)` | Runs `fn` once every mod has started (so other mods' shared values, exports and menu rows exist). Called at once when start-up is already over. |
-| `chef.log_directory` | The folder the loader's files are in (`%APPDATA%\Arrowhead\Helldivers2`), without a trailing `\`. Keep your own files there (`.log .txt .json .csv .dat .ini`). |
-| `chef.previous_directory` | Where older builds of the loader kept its folder (`%LOCALAPPDATA%`), or nil. You may read your own `.log .txt .json .csv .dat .ini` files there; a read of a missing file in `chef.log_directory` already falls back to it. |
+| `chef.log_directory` | The folder the loader's files are in (`%APPDATA%\Arrowhead\Helldivers2`), without a trailing `\`. Keep your own files there (`.log .txt .json .csv .dat .ini .marker .fatal`). |
+| `chef.previous_directory` | Where older builds of the loader kept its folder (`%LOCALAPPDATA%`), or nil. You may read your own `.log .txt .json .csv .dat .ini .marker .fatal` files there; a read of a missing file in `chef.log_directory` already falls back to it. |
 | `chef.own_log(name)` | From now on your `chef.log` lines go to `<name>.log` in that folder instead of `chef_loader.log` (no `[mods/...]` prefix there; a fresh file each launch once it passes 1 MB). The loader's own lines about your mod (started, Lua errors, crashes, timings) stay in `chef_loader.log`. Call it first thing; returns false and keeps logging to `chef_loader.log` when the name is taken or the file can't be opened. Names are letters, digits, `_ -`, 48 at most, and can't start with `chef_loader`. Check `chef.has('own_log')`. |
 | `chef.log_file` | The full path of the file your `chef.log` lines go to. |
 
@@ -255,7 +255,12 @@ it stops, and no mod can replace another's. When nothing else defines them, they
 - `package.loaded['mods/x/y']` and `require('mods/x/y')` give another running mod's module (or `true` while it starts
   or when it returned nothing).
 - **The engine through `rawget`:** `rawget(_G, 'stingray')`, `rawget(_G, 'Unit')` and the like find the engine as the
-  mod sees it (a table that's off reads as `false`).
+  mod sees it (a table that's off reads as `false`). Lua's own base functions (`rawget(_G, 'unpack')` ...) are there
+  too.
+- **The game's lower case globals** (what the engine adds next to Lua's own, taken when the loader starts) are your
+  own: a value as it is, a table as your own copy, so nothing you write into one reaches the game or another mod.
+  `chef_loader.log` lists them at start-up. A lower case global set later, and the game's `init`, `update`, `render`
+  and `shutdown`, aren't reached. Capitalized game globals are read as they are.
 - **The game's callbacks:** a mod's globals start with empty `update`, `render` and `shutdown`. A mod that keeps the one
   it finds and sets its own (the old loaders' way of hooking in) has that one run as its hook, guarded and timed like
   any other. This is only for a mod that returns nothing, or a table with no hooks and no functions
@@ -511,7 +516,7 @@ Ship the unit or effect in your patch (or use one the game has loaded): `Applica
 | `chef.after(s, fn)` | `fn()` once after `s` seconds. Returns `{ cancel(), active() }`. |
 | `chef.every(s, fn)` | `fn()` every `s` seconds (a timer that errors 20 times stops). |
 | `chef.spread(list, n, fn, done, opts)` | `fn(item, i)` for `n` items a frame; `done(true)` at the end, `done(false)` when a new world stops it (`opts.keep = true` carries on: only for lists without units). Returns `{ cancel(), active(), progress() }`. |
-| `chef.budget(ms)` | Your average milliseconds a frame before the log warns (the loader's menu setting, 2 ms, by default). |
+| `chef.budget(ms)` | Your average milliseconds a frame before the log warns and the performance monitor marks you (the loader's Budget row, 1 ms, by default). |
 
 Your time is your hooks plus your timers and spread jobs, divided by the frames the game ran: a mod that only uses
 timers is measured too. It's checked against your budget every minute (a warning at most every 10 minutes). Timers and
@@ -602,12 +607,13 @@ Two header lines say what your mod expects:
 |---|---|
 | Open this menu | The menu key (F9). It can't be off or a menu navigation key; such a value falls back to F9. |
 | Menu look | Full screen (default; on the ship only, the compact panel in a mission) or Compact. |
-| Mouse in this menu | On the ship (default), Always or Off. The game still sees the mouse while the menu is open (moving it turns the camera). |
+| Mouse in this menu | On the ship (default), Always or Off. While the menu has the mouse, the camera doesn't turn with it: the loader gives the mouse's delta axis a dead zone no movement reaches and puts back the one it found when the menu closes (a dead zone already that far up, another mod's, is left alone). The menu's cursor follows the engine's cursor axis. |
 | Controller in this menu | On, and holding the touchpad / View button two seconds opens it on the ship (default); On; or Off. |
 | Menu position (Compact look) | Left (default), Center or Right. |
-| Budget warning (ms) | The default frame budget behind `chef.budget`. |
 | Performance monitor | Off by default. On, a panel shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
 | Monitor position | Where the monitor sits: top right (default), top left, middle right, middle left, bottom right or bottom left. |
+| Budget (ms) | 1 ms by default. A mod averaging more a frame (or more than its own `chef.budget`) is named in the log (at most every 10 minutes) and marked orange in the performance monitor. |
+| Hide mods under N ms | N is the Budget row's value (the row's name follows it). Off by default. On, the mods running under their budget share one monitor line (MODS UNDER N MS: their sum and the worst call among them), so the heavy ones stand out. A mod that's off keeps its line. |
 | Language | Only when a language file is installed: English or one of the installed languages (on by default when exactly one is installed). See "Language files". |
 
 ## Rules that keep the game alive
@@ -654,7 +660,7 @@ their computer. Your mod has:
 - **`io.open` / `io.lines`:**
   - **Reading:** the loader's folder (`chef.log_directory`, which is also the game's settings folder, `saves\`
     included) and the game's `data\` folder.
-  - **Writing:** only `.log .txt .json .csv .dat .ini` files straight in `chef.log_directory`, with names made of
+  - **Writing:** only `.log .txt .json .csv .dat .ini .marker .fatal` files straight in `chef.log_directory`, with names made of
     letters, digits, `_ - .`. The loader's own files (`chef_loader*`) and saved tables (`chef_data_*`) are off limits;
     use `chef.save_table`.
   - **A file straight in `%LOCALAPPDATA%`** (`os.getenv('LOCALAPPDATA') .. '\\my_mod.ini'`) is opened in
@@ -668,16 +674,21 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
 
 - **Programs and files:** `os.execute`, `os.exit`, `os.remove`, `os.rename` and `io.popen`.
 - **Native code and compiled Lua:** `package.loadlib`, C modules and bytecode.
-- **The game's globals:** `require` of anything but the libraries above, `dofile`, `loadfile` and `module`.
+- **The game's globals:** `require` of anything but the libraries above, `dofile`, `loadfile` and `module`. A name your
+  environment makes its own (`io`, `os`, `debug`, `require`, `loadstring`, `getfenv`, `_G`, the libraries ...) set to
+  nil finds nothing behind it.
 - **Climbing out:** the rest of `debug`, `setmetatable` on your environment, and `getfenv`/`setfenv` on the game's,
   the loader's or another mod's functions.
 - **Engine tables that aren't for mods** (in `stingray` and the globals alike; a table left out reads as `false`):
   - `PluginManager` (native code), `Http` and `WebSocket`, and the `Localizer` (it ends the game);
   - every `*Lobby*` table, and all of Network but its reads (`peer_id`, `game_session`, `object_info`, `is_*`, `has_*`,
     `get_*`, `num_*`, without lobby or connection names);
-  - all of GameSession but its reads (`in_session`, `peers`, `game_session_host`, `game_object_field`,
-    `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `is_*`, `has_*`, `get_*`,
-    `num_*`): no writes to what other players see;
+  - all of GameSession but its reads (`in_session`, `peers`, `other_peers`, `game_session_host`, `game_object_field`,
+    `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `is_*`,
+    `has_*`, `get_*`, `num_*`): no writes to what other players see (`game_object_field_batched`, a read, stays out:
+    it has crashed the game on other players' objects);
+  - all of UnitSynchronizer but its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`,
+    `get_*`, `num_*`): no spawns or destroys every player sees;
   - the same through an engine object's metatable (`getmetatable` gives the trimmed table).
 
   `chef.call` refuses the same.
