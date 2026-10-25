@@ -18,6 +18,7 @@ took. See [LICENSE](../LICENSE).
 
 **Why not replace `boot` yourself?** The game runs only one `boot`: whichever mod deploys last. Two mods that both
 replace it can't work together. With Chef Shared Loader, no mod but the loader touches `boot`, and deploy order doesn't matter.
+A mod that must ship a `boot` can ship the loader's start-up stub as it (see [Carrying the stub](#carrying-the-stub)).
 
 ## Two ways to write one
 
@@ -43,8 +44,9 @@ Your `init`, `update`, `render` and `shutdown` are called as before, after Chef 
 
 ## Names and headers
 
-- **The header** is the file's very first line, exactly `-- HD2-Addon: mods/<author>/<name>` (or `-- HD2-Boot:`, or
-  `-- HD2-Options:` for an options file). `<author>` and `<name>` use letters, digits, `_` and `-`.
+- **The header** is the file's very first line, exactly `-- HD2-Addon: mods/<author>/<name>` (or `-- HD2-Boot:`,
+  `-- HD2-Options:` for an options file, or `-- HD2-Lang:` for a language file, from 1.2.0). `<author>` and `<name>`
+  use letters, digits, `_` and `-`; a name may have more parts (`mods/<author>/<group>/<name>`, from 1.2.0).
 - **The author folder** should be unique to you (your handle). Two mods with the same full name run once: the one
   deployed last (the highest patch number).
 - **Load order:** `mods/chef/...` (my own mods) start first, then everyone else's by name. A mod's requirements start
@@ -129,16 +131,17 @@ version, `chef.name` your mod's name.
 | `chef.screen()` | The screen's width and height. |
 | `chef.color(r, g, b, a)` | A color for this frame. |
 | `chef.rect(x, y, w, h, c, layer)` | A filled rectangle; bottom-left origin. Layers 880-960 are the usual range (higher draws on top). |
-| `chef.text(x, y, s, px, c, layer)` | Text in capitals, 7 `px` tall, its left end at x and its bottom at y; returns its width. In the game's own font (FSSinclair Medium) once the game has it loaded, else the loader's pixel font (capitals, digits, `. , : - + / % ( ) ! ?`). |
+| `chef.text(x, y, s, px, c, layer)` | Text in capitals (in the player's language when a language file has it), 7 `px` tall, its left end at x and its bottom at y; returns its width. In the game's own font (FSSinclair Medium) once the game has it loaded, else the loader's pixel font (capitals, digits, `. , : - + / % ( ) ! ?`). |
 | `chef.text_width(s, px)` | Its width in the font in use (measured: the game's font is proportional). |
 | `chef.text_fit(s, px, w)` | The text cut to `w` wide, ending in `...` when it was cut. |
 | `chef.text_wrap(s, px, w, most)` | The text broken into lines `w` wide at spaces (at most `most`, 64 if not given). |
+| `chef.lang()`, `chef.tr(s)` | The language picked (its name and code; nil for English), and a text as that language has it (see "Language files"). |
 | `chef.sprite(x, y, rows, cell, colors, layer)` | A pixel sprite: `rows` are strings, each character a key in `colors`. |
 | `chef.bitmap(tex, x, y, w, h, c, layer)` | A texture shipped in your patch (its resource id as hex), tinted `c`. Returns false when it can't be drawn: then draw something else. |
 | `chef.ui_textures(map)` | Texture → its copy for below-native drawing. |
 | `chef.texture_sizes(map)` | Texture → pre-shrunk sizes `{ width, id, ... }`, smallest first. |
 | `chef.line(x1, y1, z1, x2, y2, z2, c)` | A line in the world. |
-| `chef.TOP` | Add it to a layer to draw over the game's own HUD and map. |
+| `chef.TOP` | Add it to a layer to draw over the game's HUD, map and menus: `chef.TOP + 0` to `chef.TOP + 999` show over all of them but the menus' top bar and button prompts (the loader's own menu is at 950-959, its monitor at 940-949, its notices at 930-939); higher ones only over the HUD and the map. While the loader's full screen menu is open, top-world texts under it aren't drawn (below native render scale, that's every text but the menu's). Without it, a mod draws under the game's HUD and menus. From 1.1.0: `chef.TOP + N` drew under the game's menus there; to keep that placement, add 1000. |
 
 ## Shared services (api 2)
 
@@ -152,8 +155,8 @@ loader. An older loader has no `chef.has`: calling it there is an error, so test
 | `chef.capabilities` | Read-only. `api` (the level, 3), and true for each of: `after_startup`, `settings`, `share`, `events`, `require`, `bind`, `menu`, `shims`, `dev`, `logs`, `own_log` (api 2) and `units`, `spawn`, `timers`, `budget`, `session`, `settings_file`, `shapes`, `sprite_sheets`, `notify`, `typed`, `key_labels`, `save_table`, `mods` (api 3). |
 | `chef.has(name)` | True when the loader has that capability (`chef.has('api')` is true too). |
 | `chef.after_startup(fn)` | Runs `fn` once every mod has started (so other mods' shared values, exports and menu rows exist). Called at once when start-up is already over. |
-| `chef.log_directory` | The folder the loader's files are in (`%APPDATA%\Arrowhead\Helldivers2`), without a trailing `\`. Keep your own files there (`.log .txt .json .csv .dat`). |
-| `chef.previous_directory` | Where older builds of the loader kept its folder (`%LOCALAPPDATA%`), or nil. You may read your own `.log .txt .json .csv .dat` files there; a read of a missing file in `chef.log_directory` already falls back to it. |
+| `chef.log_directory` | The folder the loader's files are in (`%APPDATA%\Arrowhead\Helldivers2`), without a trailing `\`. Keep your own files there (`.log .txt .json .csv .dat .ini`). |
+| `chef.previous_directory` | Where older builds of the loader kept its folder (`%LOCALAPPDATA%`), or nil. You may read your own `.log .txt .json .csv .dat .ini` files there; a read of a missing file in `chef.log_directory` already falls back to it. |
 | `chef.own_log(name)` | From now on your `chef.log` lines go to `<name>.log` in that folder instead of `chef_loader.log` (no `[mods/...]` prefix there; a fresh file each launch once it passes 1 MB). The loader's own lines about your mod (started, Lua errors, crashes, timings) stay in `chef_loader.log`. Call it first thing; returns false and keeps logging to `chef_loader.log` when the name is taken or the file can't be opened. Names are letters, digits, `_ -`, 48 at most, and can't start with `chef_loader`. Check `chef.has('own_log')`. |
 | `chef.log_file` | The full path of the file your `chef.log` lines go to. |
 
@@ -214,7 +217,7 @@ off, **Enter** keeps the search, **Escape** clears it. Values are saved between 
 | `chef.option(id, spec)` | Adds a row and returns its current value. Ids are letters, digits, `_ . -`. `spec`: `{ type = 'toggle' \| 'choice' \| 'slider' \| 'key', label, default, ... }`. A choice has `choices` (2 to 32 strings; the value is the index), a slider `min` < `max` (finite numbers) and optionally `step` (0 or more; values snap within the range). A spec that doesn't fit is refused with the reason. A row at its default isn't stored, so a new default in an update reaches players who never changed it. |
 | `chef.get(id)`, `chef.set(id, value)` | Read or change a row. |
 | `chef.on_change(id, fn)` | `fn(value)` whenever the row changes (from the menu or `set`). Up to 64 per row; it stops when your mod stops. |
-| `chef.bind(id, default_key, label)` | A key row (key names in any case: `'F6'` is `'f6'`). Returns `b` with `b.key()` (`'off'` for none), `b.pressed()` and `b.down()` for this frame. A key two rows use is marked `!` in the menu and noted in the log. |
+| `chef.bind(id, default_key, label)` | A key row (key names in any case: `'F6'` is `'f6'`). Returns `b` with `b.key()` (`'off'` for none), `b.pressed()` and `b.down()` for this frame. A key two rows use is marked `!` in the menu and noted in the log; with that row selected, the hint line names the other options on the key. |
 
 Arsenal options (`chef.options`) still work and stay the place for what has to be chosen before the game starts (which
 textures ship, for example). A good pattern: take the Arsenal value as the menu row's default.
@@ -229,17 +232,28 @@ if chef.has and chef.has('menu') then
 end
 ```
 
-### Mods written for Bingus Shared Loader and Mod Options Menu
+### Mods written for Bingus Shared Loader, Boot Mod Loader and Mod Options Menu
 
-When nothing else defines them, the loader puts two look-alikes in the game's globals, so Lua-only mods written for
-them run (the parts that needed `ffi` or the JIT can't come back):
+The loader gives Lua-only mods written for those loaders the same calls they had there (the parts that needed `ffi` or
+the JIT can't come back). Each mod gets its own read-only copy of each, tied to that mod: what it registers stops when
+it stops, and no mod can replace another's. When nothing else defines them, they're also in the game's globals.
 
-- `CowboyBingusModLoader`: `after_startup(fn)`, `capabilities`, `log_directory` and `open_log(name)` (a `.log` file in
-  the loader's folder).
-- `ModOptionsMenu`: `register_option(id, spec)`, `get`, `set`, `on_change`, `ready`. Its rows appear in this menu,
-  under each `spec.mod` heading (128 options and 64 headings at most). Any id saves, spaces and all.
-- Each mod gets its own read-only copy of both, tied to that mod: its `after_startup` and `on_change` stop when it
-  stops, and no mod can replace another's.
+- `CowboyBingusModLoader` (also as `HD2ModLoader`): `version` 17, `api` 1, `revision`, `capabilities`,
+  `after_startup(fn)`, `on_update(id, fn)` (once a frame with `dt`; the same id replaces its function; a function that
+  errors is dropped and logged), `on_shutdown(id, fn)` or `on_shutdown(fn)`, `log_directory`, `open_log(name)` (a `.log`
+  file in the loader's folder, started fresh at each launch), `game` (`build_identifier`) and `modules` (each mod's
+  state in those loaders' words: `loaded`, `loading`, `load failed: ...`). Every callback is timed into the mod's line
+  in the performance monitor and crash-guarded like the mod's own hooks.
+- `ModOptionsMenu` (version 3): `register_option(id, spec)`, `get`, `set`, `on_change`, `ready`. Its rows appear in this
+  menu under the mod's heading (`spec.mod_id`, else `spec.mod`, else the mod's name; 32 options a heading). An option
+  with no value saved here yet starts from the value the mod had before: `mom_<mod>_settings.txt` in the game's folder,
+  else the old menu's `ModOptionsMenu.values`. Any id saves, spaces and all.
+- `ModBindingsMenu`: `register_binding`, `is_down` (press, hold or release), `poll`, `set_binding`, `binding`. Each
+  binding is a key row in this menu under the mod's heading. While this menu is open, `is_down` is false.
+- `BingusRuntime`: `shared(env)`, `guard(spec)` and `install()`, with the same status fields; its guards are ticked by
+  the loader.
+- `package.loaded['mods/x/y']` and `require('mods/x/y')` give another running mod's module (or `true` while it starts
+  or when it returned nothing).
 - **The engine through `rawget`:** `rawget(_G, 'stingray')`, `rawget(_G, 'Unit')` and the like find the engine as the
   mod sees it (a table that's off reads as `false`).
 - **The game's callbacks:** a mod's globals start with empty `update`, `render` and `shutdown`. A mod that keeps the one
@@ -247,7 +261,8 @@ them run (the parts that needed `ffi` or the JIT can't come back):
   any other. This is only for a mod that returns nothing, or a table with no hooks and no functions
   (`{ installed = true }`): a mod returning hooks or an API never has a global named `update` run as one.
 - **`require('ffi')` / `require('jit')`:** the game has neither since 7.2.0. A mod that asks gets an error, and the log
-  says once that what in it needs them won't work, even when the mod catches the error and carries on.
+  says once that what in it needs them won't work, even when the mod catches the error and carries on. `ffi` and `jit`
+  read as `false`, even when another loader left a stand-in for them in the game's globals.
 
 ### Mods written for the HD2 Lua Runtime
 
@@ -258,7 +273,7 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   `log_dir`, the loader's folder) and `frame()`.
 - **`HD2Runtime.mod(spec)`:** `spec.id` (letters, digits, `_ . -`), `api` (1 or nil), `name`, `lobby_key` and `bones`
   (16-hex unit resources). It returns a handle: `id`, `engine`, `raw` (your own `stingray`, as locked down as the rest), `on(event, fn)` (`update`,
-  `render`, `shutdown`), `log(...)`, `state()`, `switch_off(why)`.
+  `render`, `shutdown`, and `stop`: see below), `log(...)`, `state()`, `switch_off(why)`.
 - **The callbacks** run with the mod's own hooks, each in its own `pcall`. A file may return `true` (or nothing).
 - **`handle.engine`** has that runtime's calls in its own shapes:
   - `Gui.rect` and `Gui.rects` take plain numbers; `Gui.text` takes a font from its list;
@@ -274,11 +289,16 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   - a unit is checked before it's asked anything (with the loader's unit rules);
   - a refused call returns `nil, why`.
 - **What it made is undone when it stops:** its units, its GUIs, the units it hid, the materials it swapped on the
-  game's units and the mouse dead zones it changed.
+  game's units and the mouse dead zones it changed. Textures it set with `Material.set_texture` can't be: the engine
+  can't tell what a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
+  once when it stops your mod (errors, a failed start, a dev reload), before it undoes anything, while your engine
+  calls still work. (`stop` is Chef Shared Loader's own; the HD2 Lua Runtime itself never calls it.) A mod that
+  switches itself off (`handle.switch_off`) gets no `stop` afterwards: put things back before you call it.
 - **Shared globals:** a capitalized global one runtime mod sets (`NativeNotification`, say) reaches the other runtime
   mods, as in that runtime, where they share one `_G` (one set before `HD2Runtime.mod()` too). A name the game
-  already has never does, and a trusted mod's globals stay its own. When a mod stops, what it shared isn't handed to
-  mods that start later; mods that have it keep their copy. A stopped mod's `HD2Runtime.mod()` is refused.
+  already has never does. A trusted mod's globals stay its own, except the one its place on the list names as its
+  view (below), and it takes only the shared globals its place on the list names, each from one named mod. When a
+  mod stops, what it shared isn't handed to mods that start later; mods that have it keep their copy. A stopped mod's `HD2Runtime.mod()` is refused.
 - **The Steam lobby** (`Steam.user_id`, `Friends.playing_game`, `Network.join_steam_lobby`, `SteamLobby.*`) is only
   for mods the loader trusts with it (below): the lobby the game reports this player in (`Friends.playing_game` takes only the player's own id), the mod's own
   `lobby_key` (the one the loader's list gives it), values up to
@@ -298,6 +318,26 @@ each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
     and every Lua resource in it must be comment lines only, the size the row gives, with no stream or GPU data;
   - a file still open for writing is never renamed or removed: close it first (a handle you drop is closed for you
     when it's collected).
+- **A read-only view for the other runtime mods:** its `TransmogUI` global, with only `version`, `snapshot()` (just
+  `api_version`, `revision`, `context`, `applied`, `capabilities` and `health`; not its catalog), `worn(group)` (the
+  native pieces it wears in `'armor'`, `'helmet'` or `'cape'`, and its avatar) and `report()` (what its last apply
+  spawned, with the materials it swapped). Nothing that applies, saves, builds or opens anything.
+  - Each answer is a copy: tables are new tables (functions left out, units as they are, 8 deep and 4,000 values at
+    most), so changing one changes nothing in HD2 Transmog.
+  - Arguments are plain values only (nil, booleans, numbers, strings up to 256 characters).
+  - Each call is guarded under the reading mod's own crash key (`TransmogUI.worn`, say): one that ends the game is
+    skipped for that mod from then on.
+  - When HD2 Transmog stops, the calls answer `nil, 'not running'`; when it starts again (a dev-mode reload), the same
+    view reaches it again, so keeping `TransmogUI` in a local is fine.
+  - Each call costs what HD2 Transmog takes to answer plus the copy: call them a few times a second at most, not
+    every frame.
+  - No other mod's value is ever shared under the name `TransmogUI`. Its module (what it returns) isn't handed to other
+    mods through `package.loaded` either.
+- **What a trusted mod takes from the others:** only the shared globals its place on the list names, each from one
+  named mod, as its own copy (made when that mod sets it, so a change another mod makes to the shared table never
+  reaches it). HD2 Transmog takes only `NativeNotification`, from the Native Notification its package carries
+  (`mods/native_notification/core`). If another mod sets that name first, HD2 Transmog goes without it and the log
+  says so.
 
 A name isn't proof of who made a mod, which is why writing game files also waits for the player. To ask for a place
 on the list, open an issue on GitHub with what the mod needs and why.
@@ -332,13 +372,83 @@ Two things differ from the pixel font:
   (the main one, or the one at `chef.TOP` and above), whatever its layer. Text layers still order text among itself.
   Don't put a rect over text to hide it: stop drawing the text instead.
 - **Letters have different widths:** a layout that counts characters (`#s * 6 * px`) is off. Use `chef.text_width`.
-- Characters outside plain ASCII show as `?` in both fonts.
+- **UTF-8 text** (from 1.2.0): the game's font takes UTF-8 whole, measured and cut a character at a time (a cut or a
+  wrapped line never splits one). A character the font has no glyph for, or a byte that isn't UTF-8, shows as `?`. The
+  pixel font shows each non-ASCII character as one `?`. Only A-Z are put in capitals.
+
+### Language files (from 1.2.0)
+
+A language file translates the loader's menu, monitor and notices and every mod's text at once: every text drawn
+through `chef.text` (and measured with `chef.text_width`, `chef.text_fit`, `chef.text_wrap`) is looked up first. It's
+a Lua resource that returns only data:
+
+```lua
+-- HD2-Lang: mods/<you>/<language>
+return {
+  name = 'Deutsch',                      -- shown in F9 > Chef Shared Loader > Language (40 bytes at most)
+  code = 'de',                           -- optional: what chef.lang() gives mods
+  text = {                               -- English as drawn (any case) = the translation
+    ['ALL MODS'] = 'ALLE MODS',
+    ['PERFORMANCE MONITOR'] = 'LEISTUNGSANZEIGE',
+  },
+  patterns = {                           -- optional, tried in order when no exact text matches (Lua patterns on
+    { '^FRAME (.*)$', 'BILD %1' },       -- the text in capitals)
+  },
+}
+```
+
+- **Data only:** before it runs, the loader reads its code (strings and comments aside) and takes only names, numbers,
+  `{ } [ ] = , ; .` and spaces, and of Lua's keywords only `local`, `return`, `nil`, `true` and `false`: no loops,
+  functions, conditions, calls, operators (a minus sign included) or `..`, so write every text whole. 4 MB at most a
+  file, 64 files in all (the highest patches), about 2 s of reading at start-up (files past that, the highest patches,
+  are left out, every launch while it lasts); a file that takes over 5 s to read is skipped from the next launch on
+  until it changes. It runs once at start-up with nothing to reach; a file that ends the game is skipped from the next
+  launch on (a changed file is tried again). Texts are checked (1 to 300 bytes, a translation up to 300; 20,000 texts
+  at most), and so are patterns (200 at most); the first 5 things left out of each file are named in the log. 31
+  languages at most. A translation that is itself another entry's English text is translated again where it's drawn:
+  keep them apart.
+- **Patterns:** each must start with `^`, have at most 2 of `*`, `+` and `-` (not 2 together with a `?`, and at most
+  24 classes such as `.`, `%a` or `[...]` after the first of 2; letters and spaces don't count) and 3 of `?`, use only
+  captures it has closed (32 at most; `%0` the whole match, `%%` a percent sign), have no zero byte or `%z`, and be
+  quick on a few long test texts, some made from its own letters (it's timed at start-up, with about 100 ms of timing
+  a file: patterns past that are left out). Keep patterns simple: one that's slow is left out. It's tried on the text
+  in capitals, so its captures come out in capitals; texts longer than 160 bytes only match exactly. Pattern work is
+  held to about 1 ms a frame (looked at after each pattern; each new text also costs a little), so a new text can show
+  in English for a frame before its pattern is found.
+- **Capitals:** texts are drawn in capitals, but only A-Z are made capitals: write accented letters as capitals (`É`,
+  not `é`).
+- **One language, several files:** files with the same `name` are merged; a higher patch's entries win (its patterns
+  are tried first). So a mod can ship its own texts for a language as a file of its own.
+- **The choice is kept by name:** adding or removing a language file never changes the language picked (one that's
+  missing for a launch gives English and comes back when it's installed again). With one language installed and none
+  picked before, it's on.
+- **Finding what to translate:** while a language is on, every text with two letters in a row, no digits and no entry
+  is written (once, 3,000 at most) to `chef_loader_lang_missing.txt` in the loader's folder, as lines ready to copy
+  into `text`: the texts drawn, and every mod's option texts in the menu, scrolled to or not. Texts over 300 bytes and
+  the languages' own names aren't listed. Picking another language writes the list first; the next language's list
+  starts empty.
+- **Lines the menu puts together** (the hint for a key two options use: `F7 ALSO USED BY: SOME MOD (TOGGLE)`) are
+  made from texts translated one by one (`ALSO USED BY:`, the mods' titles and labels), so they need no pattern.
+- **Fonts:** the game's font has CJK glyphs (the log says "CJK glyphs: yes"); in the pixel font, non-ASCII text shows
+  as `?`.
+- **For mods:** `chef.lang()` gives the language's name and code (nil for English); `chef.tr(s)` gives a text as the
+  language has it (for a text you lay out yourself; ask again rather than keeping it forever: it can still be English
+  for a frame). A text that changes every frame (a number) is best kept apart from its label, so the label has one
+  entry.
+- Packing: `tools/pack_addon.py` takes a language file like an addon (`"lua": [{"resource": "mods/you/de", "file":
+  "de.lua"}]`).
 
 ### Drawing every frame
 
 An addon's table can have `render()` besides `update(dt)`; the loader calls it after the game's render each frame.
 The loader looks `update`, `render` and `shutdown` up in the table at every call, so you can set or swap them later.
 Boot-style scripts keep their global `render`.
+
+`on_stop()` in the table is called once when the loader stops your mod (20 errors, a start that failed half-way, a
+dev-mode reload), before it forgets your timers, watches and events: put back what only you know there, such as
+textures you set on the game's materials (the engine can't tell the loader what a material had before). It's
+breadcrumbed as `<mod>|on_stop`; one that ends the game is skipped from then on. (An HD2 Lua Runtime mod's
+`handle.on('stop')` callbacks run too.)
 
 ## Utilities (api 3)
 
@@ -443,7 +553,9 @@ jobs made inside a timer or job start on the next frame.
 
 `chef.mods()` gives every mod the loader found: `{ name, kind = 'addon' | 'boot', on, dev, file, version, state,
 why, errors, ms_avg, ms_max, requires }`. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
-(a requirement, a compile error ...; `why` says which) or `stopped` (too many errors). `ms_avg` / `ms_max` are its time
+(a requirement, a compile error ...; `why` says which), `stopped` (too many errors), `started elsewhere` (another
+loader started it first; `why` names it) or, for a boot entry, `handed off` (the loader that handed the game to this
+one). `ms_avg` / `ms_max` are its time
 a frame over the last status minute (nil before the first). The same list is written to `chef_loader_health.txt` next
 to the log (tab-separated, after start-up, at most every 5 s after a change, and at shutdown), so a player can see why
 a mod isn't running. `chef.has('health')`.
@@ -489,8 +601,14 @@ Two header lines say what your mod expects:
 | Row | What it does |
 |---|---|
 | Open this menu | The menu key (F9). It can't be off or a menu navigation key; such a value falls back to F9. |
+| Menu look | Full screen (default; on the ship only, the compact panel in a mission) or Compact. |
+| Mouse in this menu | On the ship (default), Always or Off. The game still sees the mouse while the menu is open (moving it turns the camera). |
+| Controller in this menu | On, and holding the touchpad / View button two seconds opens it on the ship (default); On; or Off. |
+| Menu position (Compact look) | Left (default), Center or Right. |
 | Budget warning (ms) | The default frame budget behind `chef.budget`. |
-| Performance monitor | Off by default. On, a panel in the top right shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
+| Performance monitor | Off by default. On, a panel shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
+| Monitor position | Where the monitor sits: top right (default), top left, middle right, middle left, bottom right or bottom left. |
+| Language | Only when a language file is installed: English or one of the installed languages (on by default when exactly one is installed). See "Language files". |
 
 ## Rules that keep the game alive
 
@@ -510,7 +628,8 @@ Two header lines say what your mod expects:
   errors is turned off for the session: its timers, watches, listeners and spawned things go with it.
 - **Below native Render Scale,** the loader draws your screen drawing where the whole screen is reachable and
   converts your colors, so you don't need to do anything. If you ship textures, `chef.ui_textures` lets you hand it
-  pre-converted copies.
+  pre-converted copies. Layers stay under the game's menus there, so layers 999 and up all draw at one layer: keep
+  plain layers at 998 or lower (`chef.TOP` layers aren't affected).
 
 ## The Lua you get
 
@@ -524,7 +643,10 @@ Two header lines say what your mod expects:
 Every `HD2-Addon` and `HD2-Boot` mod runs locked down, so players can install mods from anyone without handing them
 their computer. Your mod has:
 
-- **The engine's script API:** `stingray`, `Unit`, `World` and the rest, plus every `chef` helper.
+- **The engine's script API:** `stingray`, `Unit`, `World` and the rest, plus every `chef` helper. Every engine
+  table is your mod's own copy (and so is every table inside one, and an engine object's metatable from
+  `getmetatable`), taken when your mod starts: a function you replace there is replaced for your mod only, and an
+  engine table compared by identity with another mod's copy isn't the same table.
 - **Lua itself:** its own copies of `string`, `table`, `math`, `coroutine` and `bit`, so changing one changes it only
   for you. `require` gives your own `package.loaded` / `package.preload` first (a mod bundled as modules), then
   those, plus `table.new` and `table.clear`.
@@ -532,9 +654,12 @@ their computer. Your mod has:
 - **`io.open` / `io.lines`:**
   - **Reading:** the loader's folder (`chef.log_directory`, which is also the game's settings folder, `saves\`
     included) and the game's `data\` folder.
-  - **Writing:** only `.log .txt .json .csv .dat` files straight in `chef.log_directory`, with names made of letters,
-    digits, `_ - .`. The loader's own files (`chef_loader*`) and saved tables (`chef_data_*`) are off limits; use
-    `chef.save_table`.
+  - **Writing:** only `.log .txt .json .csv .dat .ini` files straight in `chef.log_directory`, with names made of
+    letters, digits, `_ - .`. The loader's own files (`chef_loader*`) and saved tables (`chef_data_*`) are off limits;
+    use `chef.save_table`.
+  - **A file straight in `%LOCALAPPDATA%`** (`os.getenv('LOCALAPPDATA') .. '\\my_mod.ini'`) is opened in
+    `chef.log_directory` instead, under the same name; a read of one not there yet falls back to `%LOCALAPPDATA%`. A
+    mod written for another loader keeps its log and settings this way with no change.
 - **`loadstring` / `load`:** text only. What you load runs in your environment, or in the table you hand `load`.
 - **`getfenv` / `setfenv`:** on your own functions.
 - **`debug`:** `traceback` and `getinfo`.
@@ -548,10 +673,11 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
   the loader's or another mod's functions.
 - **Engine tables that aren't for mods** (in `stingray` and the globals alike; a table left out reads as `false`):
   - `PluginManager` (native code), `Http` and `WebSocket`, and the `Localizer` (it ends the game);
-  - every `*Lobby*` table, and all of Network but its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`,
-    `num_*`, without lobby or connection names);
+  - every `*Lobby*` table, and all of Network but its reads (`peer_id`, `game_session`, `object_info`, `is_*`, `has_*`,
+    `get_*`, `num_*`, without lobby or connection names);
   - all of GameSession but its reads (`in_session`, `peers`, `game_session_host`, `game_object_field`,
-    `game_object_exists`, `game_object_owner`, `is_*`, `has_*`, `get_*`, `num_*`): no writes to what other players see;
+    `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `is_*`, `has_*`, `get_*`,
+    `num_*`): no writes to what other players see;
   - the same through an engine object's metatable (`getmetatable` gives the trimmed table).
 
   `chef.call` refuses the same.
@@ -565,13 +691,107 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
 - **A mod that truly needs more** (swapping game files, say) has to ship its own `boot`, and then it isn't a loader
   mod (see below).
 
+## Carrying the stub
+
+If your mod has to ship its own `boot` (a file-mod installer, say), ship Chef Shared Loader's **start-up stub** as that
+`boot` and put your own code in a `-- HD2-Boot:` mod (see [Porting a boot-replacing mod](#porting-a-boot-replacing-mod)).
+Then whichever of the two the game runs, every Chef Shared Loader mod keeps running, whatever the load order.
+
+- **The file:** `src/stub.lua` in the loader's repository (28 lines; the build also writes it next to the zip as
+  `chef_loader_stub.lua`).
+  Ship it as the Lua resource `boot` (id `0xf476df93691895fa`), as Lua source. With `tools/pack_addon.py`, list it in
+  `lua` as `{"resource": "boot", "file": "chef_loader_stub.lua"}` (its note that the file has no header line is
+  expected: the loader never runs the stub as a mod).
+- **What it does:** what the game's own boot does (four empty callbacks, `debug` on non-release builds), then, if
+  Chef Shared Loader is installed (`stingray.Application.can_get('lua', 'mods/chef_shared_loader/core_1')`), it loads
+  the loader with `require`. Without the loader it does nothing more than the game's boot. If the loader is there but
+  fails to load, the stub writes one line to `%APPDATA%\Arrowhead\Helldivers2\chef_loader_stub.txt` and the game
+  carries on.
+- **License:** anyone may copy and ship the stub unchanged, byte for byte, as their mod's `boot`, free and with no
+  credit needed. A changed copy isn't the stub: it must not carry the stub's name or the `--@@LOADER@@` marker on its
+  first line.
+- **Unchanged means unchanged:** the loader knows the stub by its fingerprint. A changed copy that keeps the marker is
+  named in the log as one (`a changed copy of my start-up stub`), and nothing promises it keeps starting the loader. The
+  stub is frozen: a stub that has to change gets a new core name (`core_2`) and ships as a new file, so the copies in
+  mods stay as they are.
+- **Don't write your own boot that loads the loader.** It works (the loader doesn't run that boot a second time, and
+  runs the callbacks it set before the loader replaced them), but code in it runs with the game's whole Lua, before any
+  crash guard, and nothing in it is locked down. Ship the stub and a `-- HD2-Boot:` mod instead.
+- **Two mods with the stub:** any number of mods may carry it; the game runs the copy in the highest patch, and the
+  loader logs the others as not run.
+
+## For other loaders
+
+For authors of other mod loaders. The game runs one `boot`: the one in the highest patch. These are the ways another
+loader and Chef Shared Loader can share a game without starting a mod twice. Everything here is free to copy into your
+loader as it is. (A mod that only needs a `boot` of its own ships the stub instead: see
+[Carrying the stub](#carrying-the-stub).)
+
+### Finding Chef Shared Loader
+
+- **Running:** `rawget(_G, 'ChefSharedLoader')` is set (read-only) once it runs; index it for `name`, `version` (a string such as
+  `'1.2.0'`), `api` (a number), `revision` (`'chef-shared-loader-<version>'`) and `core` (the core's resource name).
+- **Installed:** `stingray.Application.can_get('lua', 'mods/chef_shared_loader/core_1')` is true when its core is
+  deployed. The core has no `-- HD2-` header, so a loader that scans the patches for `-- HD2-Addon:` mods never starts it
+  as a mod.
+
+### Handing off to it
+
+A loader whose `boot` the game runs can hand the whole game to Chef Shared Loader when it's installed, and stop. Put this
+at the very top of your `boot`, before it sets any global or callback:
+
+```lua
+local A = rawget(_G, 'stingray') and stingray.Application
+if A and type(A.can_get) == 'function' and A.can_get('lua', 'mods/chef_shared_loader/core_1')
+    and rawget(_G, 'ChefSharedLoader') == nil then
+  rawset(_G, 'ChefSharedLoaderHandoff', { from = 'My Loader 1.0' })
+  require('mods/chef_shared_loader/core_1')
+  return
+end
+```
+
+- `from` is your loader's name and version, 60 characters at most. The log says "started by My Loader 1.0, which handed
+  off to me", and your `boot` (the game already ran it) isn't run again or reported as a loader it didn't run.
+- If your `boot` must run the game's own boot first, do that, then hand off: `init`, `update`, `render` and `shutdown`
+  set before the hand-off are kept and run after the loader's own each frame, crash-guarded.
+- Handing off from inside your `init` (the game has called it already): add `phase = 'init'` to the note. The loader then
+  calls its own `init` once it's loaded, and doesn't call yours again.
+- The loader runs once per Lua state: a second hand-off, or a second copy of it, does nothing.
+
+### Not starting a mod twice
+
+- **Mods it starts:** every mod Chef Shared Loader starts is marked in the game's `package.loaded[name]` (a marker, never
+  the mod's own table). A loader that starts mods with `require(name)` therefore skips them by itself; a loader that
+  starts them another way can check `package.loaded[name] ~= nil` first.
+- **Mods you start:** before it starts a mod, Chef Shared Loader looks for it in `package.loaded`, in Boot Mod Loader's
+  `__boot_mod_loader.mods`, and in the `modules` table of a Bingus-style `CowboyBingusModLoader` / `HD2ModLoader`
+  (`'loaded'`, `'loading'` or `'load failed: ...'`). A mod found there isn't started again; the log and `chef.mods()`
+  say which loader has it.
+
+### Mods made for Chef Shared Loader
+
+- A Chef Shared Loader mod reads its helpers from `...` (`local chef = ...`). Under a loader that passes something else, it
+  should stop at once instead of failing at its first `chef.` call:
+
+```lua
+local chef = ...
+if type(chef) ~= 'table' then return end
+```
+
+- A mod that only works on Chef Shared Loader should say so in its header lines, right after the first:
+  `-- HD2-Requires: chef-shared-loader` (or `-- HD2-Requires: chef-shared-loader >= 1.2.0` when it needs a version). A loader that finds `\n-- HD2-Requires: chef-shared-loader` in a mod's first lines
+  can skip it with a log line ("needs Chef Shared Loader").
+- `-- HD2-Boot:` mods are only started by Chef Shared Loader.
+
 ## Compatibility with mods that still replace `boot`
 
 - **When Chef Shared Loader deploys after such a mod:** Chef Shared Loader also runs that mod's `boot` script, in its own
   environment and crash-guarded, with full access (as the game gives any boot script; the log says so). Identical
   copies run once.
-- **When that mod deploys after Chef Shared Loader:** the game runs only that mod's `boot`, and no Chef Shared Loader mod runs.
-- So players who keep such a mod should give Chef Shared Loader the highest priority. The fix for good is to port the mod to `-- HD2-Boot:`.
+- **When that mod deploys after Chef Shared Loader:** the game runs only that mod's `boot`, and no Chef Shared Loader mod runs,
+  unless its `boot` is the start-up stub (see [Carrying the stub](#carrying-the-stub)).
+- So players who keep such a mod should give Chef Shared Loader the highest priority. The fix for good is to port the
+  mod to `-- HD2-Boot:`, and, if it must keep a `boot` of its own, to ship the start-up stub as that `boot`.
 - Code such a boot loads with `loadstring`, `load` or `dofile` stays in its own environment too.
 - **Wrapping the game's callbacks** (`local old = update; function update(dt) old(dt) ... end`) works in such a boot
   and in an `-- HD2-Boot:` mod: the one it finds is a stand-in, not Chef Shared Loader's own. Code it loads with
@@ -579,6 +799,8 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
   Shared Loader puts its own back once the boot has run, and runs the replaced one as that boot's (the log says so).
 - Its environment's metatable is locked (from 1.0.1), so no loader mod can reach the game's globals through it. A boot
   script that calls `setmetatable(_G, ...)` (a "strict mode" guard) gets an error there; port it to `-- HD2-Boot:`.
-- **Another mod loader's `boot`** (one that reads the patches for `-- HD2-Addon:` mods itself, such as Boot Mod Loader)
-  is not run: it would start every mod a second time. The log and the screen say so. Only one loader can run.
+- **Another mod loader's `boot`** (one that reads the patches for mods itself, such as Boot Mod Loader or Bingus Shared
+  Loader v21) is not run: it would start every mod a second time. The log and the screen name it. When such a loader is
+  deployed after Chef Shared Loader, the game runs it instead, unless it hands off (see
+  [For other loaders](#for-other-loaders)).
 - **Two copies of the same mod** (`-- HD2-Addon:` or `-- HD2-Boot:` with the same name): the one deployed last runs.
