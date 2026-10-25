@@ -18,7 +18,8 @@ mod.json:
     ]
   }
 
-Each Lua file must start with its header line ("-- HD2-Addon: mods/you/my_mod" or "-- HD2-Boot: mods/you/my_mod").
+Each Lua file must start with its header line ("-- HD2-Addon: mods/you/my_mod", "-- HD2-Boot: mods/you/my_mod", or
+"-- HD2-Lang: mods/you/my_language" for a language file).
 Every resource is a Lua resource in a 9ba626afa44a3aa3 patch, the way Arsenal deploys mods. The zip is the same byte
 for byte on every build."""
 import json, os, sys, uuid, zipfile, shutil
@@ -69,8 +70,8 @@ def main():
     for item in spec['lua']:
         src = open(os.path.join(base, item['file']), 'rb').read()
         first = src.split(b'\n', 1)[0].decode('utf-8', 'replace')
-        if not first.startswith(('-- HD2-Addon: ', '-- HD2-Boot: ')):
-            print('note: %s has no "-- HD2-Addon:" / "-- HD2-Boot:" first line, so Chef Shared Loader will not run it on its own' % item['file'])
+        if not first.startswith(('-- HD2-Addon: ', '-- HD2-Boot: ', '-- HD2-Lang: ')):
+            print('note: %s has no "-- HD2-Addon:" / "-- HD2-Boot:" / "-- HD2-Lang:" first line, so Chef Shared Loader will not use it on its own' % item['file'])
         entries.append((h.resource_hash(item['resource']), h.lua_resource(src)))
     core = os.path.join(d, 'core'); os.makedirs(core)
     h.write_lua_archive(os.path.join(core, '9ba626afa44a3aa3.patch_0'), entries, header)

@@ -114,18 +114,40 @@ LUA = 0xa14e8dfa2cd117e2
 def lua_resource(src_bytes):
     return struct.pack('<II', len(src_bytes), 2) + src_bytes
 
-def write_lua_archive(path, entries, header12_72):
-    """entries: list of (fid, data). Layout matches the game's Lua patch archives."""
-    head = struct.pack('<III', MAGIC, 1, len(entries)) + header12_72
+def texture_rgba_header(w, h):
+    """A texture resource's main part for w x h RGBA8 pixels with one mip (the pixels go to .gpu_resources): a 192-byte
+    Stingray header, then a DDS header with the DX10 extension (DXGI 28)."""
+    head = struct.pack('<III', 0, 0, 0xFFFFFFFF) + b'\0' * 180
+    dds = b'DDS ' + struct.pack('<7I', 124, 0x100F, h, w, w * 4, 0, 1) + b'\0' * 44
+    dds += struct.pack('<2I4s5I', 32, 4, b'DX10', 0, 0, 0, 0, 0)
+    dds += struct.pack('<5I', 0x1000, 0, 0, 0, 0)
+    dds += struct.pack('<5I', 28, 3, 0, 1, 0)
+    out = head + dds
+    assert len(out) == 340
+    return out
+
+def write_lua_archive(path, entries, header12_72, textures=()):
+    """entries: list of (fid, data). Layout matches the game's Lua patch archives. textures: (fid, main part, gpu
+    pixels) after the Lua rows, a type row of their own (alignment 64, pixels 64-byte aligned in .gpu_resources);
+    without textures the archive is byte for byte the Lua-only one."""
+    textures = list(textures)
+    n = len(entries) + len(textures)
+    head = struct.pack('<III', MAGIC, 2 if textures else 1, n) + header12_72
     head += struct.pack('<QQQII', 0, LUA, len(entries), 16, 16)
-    cursor = len(head) + 80 * len(entries); rows = body = b''
+    if textures: head += struct.pack('<QQQII', 0, TEXTURE, len(textures), 16, 64)
+    cursor = len(head) + 80 * n; rows = body = b''; gpu = bytearray()
     for i, (fid, data) in enumerate(entries):
         pad = -cursor % 16; body += b'\0' * pad; cursor += pad
         rows += struct.pack('<7Q6I', fid, LUA, cursor, 0, 0, 0, 0, len(data), 0, 0, 16, 16, i)
         body += data; cursor += len(data)
+    for j, (fid, data, pixels) in enumerate(textures, len(entries)):
+        pad = -cursor % 16; body += b'\0' * pad; cursor += pad
+        gpu += b'\0' * (-len(gpu) % 64); goff = len(gpu); gpu += pixels
+        rows += struct.pack('<7Q6I', fid, TEXTURE, cursor, 0, goff, 0, 0, len(data), 0, len(pixels), 16, 64, j)
+        body += data; cursor += len(data)
     out = head + rows + body
     out += b'\0' * (-len(out) % 16)   # the archive ends on a 16-byte boundary (as working Lua archives do)
     open(path, 'wb').write(out)
-    open(path + '.gpu_resources', 'wb').write(b'')
+    open(path + '.gpu_resources', 'wb').write(bytes(gpu))
     open(path + '.stream', 'wb').write(b'')
     return out

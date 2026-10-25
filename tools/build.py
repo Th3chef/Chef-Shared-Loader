@@ -4,17 +4,20 @@
   python3 tools/build.py <out dir> --header-from <a working Lua patch>            -> Chef-Shared-Loader-<ver>.zip (release)
   python3 tools/build.py <out dir> --header-from <a working Lua patch> --test N   -> Chef-Shared-Loader-<ver>-Test-N.zip
 
-The zip holds one patch with the game's `boot` script replaced by src/loader.lua (with compat.lua, probe.lua,
-services.lua, utilities.lua, sandbox.lua and runtime.lua copied in; tools/splice.py --check must pass), plus manifest.json and
-thumbnail.png.
+The zip holds one patch with two Lua resources, plus manifest.json and thumbnail.png:
+  boot                            the start-up stub, src/stub.lua: frozen (its sha256 is below; the build stops if the
+                                  file changed). It does what the game's own boot does, then loads the core with require.
+  mods/chef_shared_loader/core_1  the loader itself: src/loader.lua (with compat.lua, probe.lua, services.lua,
+                                  utilities.lua, sandbox.lua and runtime.lua copied in; tools/splice.py --check must pass)
 Same zip byte for byte on every build. Test builds share the loader's own GUID and update it in place.
 
 A test build also sets the loader's TEST line (`local TEST = N --@@TEST@@`): only a test build has dev mode
 (chef_loader_dev.txt) and the probe's Lua timing loop, and its log says "Test N". A release build leaves TEST nil.
-The boot script that went into the patch is written next to the zip too (chef_loader_boot.lua), for the simulator
-and for mods that carry the loader built in.
+Written next to the zip too: chef_loader_boot.lua (the core as it went into the patch, for the simulator, which can
+also run it as a boot, and for mods that carry the loader built in) and chef_loader_stub.lua (the stub, for mods that
+ship it as their own boot).
 """
-import json, os, re, subprocess, sys, zipfile, shutil
+import hashlib, json, os, re, subprocess, sys, zipfile, shutil
 sys.dont_write_bytecode = True          # no __pycache__ in the kit
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, 'tools'))
@@ -25,6 +28,10 @@ import re
 VERSION = re.search(r"^local VERSION = '([^']+)'", open(os.path.join(HERE, 'src', 'loader.lua'), encoding='utf-8').read(), re.M).group(1)
 GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader's mod id (fixed: mod managers match updates by it)
 ZIP_DATE = (2026, 10, 23, 0, 0, 0)
+# The start-up stub is frozen: mods ship it byte for byte as their own boot, and the loader tells it from a changed copy
+# by its fingerprint (scan.STUB in loader.lua). A new stub is a new core name (core_2) and a new release of both.
+STUB_SHA256 = '7da502fea32b041b320bc7b14b7cf6d24b0334860fced8832e8ca2b3910477e1'
+CORE = 'mods/chef_shared_loader/core_1'
 
 args = sys.argv[1:]
 OUT = args[0]
@@ -35,6 +42,15 @@ assert len(HEADER) == 60
 
 if subprocess.call([sys.executable, os.path.join(HERE, 'tools', 'splice.py'), '--check']) != 0:
     sys.exit('loader.lua is out of step with src/chef_loader/*.lua: run tools/splice.py first')
+
+stub = open(os.path.join(HERE, 'src', 'stub.lua'), 'rb').read()
+if hashlib.sha256(stub).hexdigest() != STUB_SHA256:
+    sys.exit('src/stub.lua changed: the start-up stub is frozen (mods ship it byte for byte); put it back')
+
+def stub_fp(b):           # loader.lua's fingerprint()
+    h = len(b)
+    for x in b: h = (h * 31 + x) % 2147483647
+    return '%x' % h
 
 def zip_dir(src, dest):
     paths = []
@@ -59,19 +75,30 @@ MARK = re.compile(rb'^local TEST = nil --@@TEST@@', re.M)
 assert len(MARK.findall(src)) == 1, 'loader.lua needs exactly one "local TEST = nil --@@TEST@@" line'
 if TEST:
     src = MARK.sub(b'local TEST = %d --@@TEST@@' % TEST, src)
-h.write_lua_archive(os.path.join(d, '9ba626afa44a3aa3.patch_0'), [(h.resource_hash('boot'), h.lua_resource(src))], HEADER)
+m = re.search(rb"^scan\.STUB, scan\.CORE, scan\.prev = '([0-9a-f]+)', '([^']+)'", src, re.M)
+assert m and m.group(1).decode() == stub_fp(stub) and m.group(2).decode() == CORE, \
+    "loader.lua's scan.STUB / scan.CORE don't match src/stub.lua and " + CORE
+assert stub.count(b"'" + CORE.encode() + b"'") == 1 and stub.splitlines()[0].endswith(b'--@@LOADER@@')
+# the menu's title picture (src/menu_banner.png, 534 x 74) as a texture of my own patch; services.lua draws it by id
+BANNER = 'mods/chef_shared_loader/menu_banner'
+from PIL import Image
+banner = Image.open(os.path.join(HERE, 'src', 'menu_banner.png')).convert('RGBA')
+assert banner.size == (534, 74), banner.size
+assert ("local BANNER_TEX = '%016x'" % h.resource_hash(BANNER)).encode() in src, "services.lua's BANNER_TEX isn't " + BANNER
+h.write_lua_archive(os.path.join(d, '9ba626afa44a3aa3.patch_0'),
+                    [(h.resource_hash('boot'), h.lua_resource(stub)), (h.resource_hash(CORE), h.lua_resource(src))], HEADER,
+                    textures=[(h.resource_hash(BANNER), h.texture_rgba_header(*banner.size), banner.tobytes())])
 json.dump({'Version': 1, 'Guid': GUID, 'Name': name, 'IconPath': 'thumbnail.png',
-           'Description': ("Runs Lua mods on the current game build (Lua 5.1) for any mod author: finds every Chef Shared Loader mod "
-                           "in your installed mods and runs each in its own space, side by side, with no fight over the game's "
-                           "boot script (mods that still replace boot run too when Chef Shared Loader is deployed last). Mods made for "
-                           "the HD2 Lua Runtime run too, without it. Puts back the "
-                           "pure-Lua parts of LuaJIT mods use. A mod that crashes the game is switched off on the next launch "
-                           "and named in chef_loader.log (%APPDATA%\\Arrowhead\\Helldivers2). Mods run locked down: no programs, no native code, "
-                           "files only in the game's own folders. F9 opens the options menu of every mod (and the loader's performance monitor). Mod makers: see docs/MODDING.md at github.com/Th3chef/Chef-Shared-Loader.")},
+           'Description': ("One Lua loader for every mod: runs them side by side, "
+                           "crash-guarded and locked down. F9 opens one options menu for every mod (keyboard, "
+                           "mouse or controller) and a performance monitor, drawn over the game's menus. Keep it at the highest "
+                           "priority. Log: chef_loader.log in %APPDATA%\\Arrowhead\\Helldivers2. "
+                           "Mod makers: github.com/Th3chef/Chef-Shared-Loader")},
           open(os.path.join(d, 'manifest.json'), 'w'), indent=2)
 shutil.copy(os.path.join(HERE, 'tools', 'thumbnail.png'), d)
 z = os.path.join(OUT, f'Chef-Shared-Loader-{VERSION}' + (f'-Test-{TEST}' if TEST else '') + '.zip')
 zip_dir(d, z)
-# the boot script next to the zip, for the simulator
+# the core next to the zip (the simulator runs it as a boot too) and the stub, for mods that ship it as their boot
 open(os.path.join(OUT, 'chef_loader_boot.lua'), 'wb').write(src)
+open(os.path.join(OUT, 'chef_loader_stub.lua'), 'wb').write(stub)
 print(z)
