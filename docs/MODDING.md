@@ -202,14 +202,19 @@ why (for example `not started: mods/you/my_mod needs mods/you/my_lib 1.2 or newe
 ### The options menu and key bindings
 
 The loader draws one menu for every mod's options, over everything, anywhere in the game. **F9** opens and
-closes it (players can change that key in the menu itself). It opens on the list of mods, always in alphabetical
-order by title (your `chef.title`); **Up/Down** picks a mod and **Enter** (or **Right**) opens its options, in the
+closes it (players can change that key in the menu itself). It opens on the list of mods: the loader's own entry
+first, under a divider, then the mods in alphabetical order by title (your `chef.title`); **Up/Down** picks a mod and **Enter** (or **Right**) opens its options, in the
 order your mod registered them. Every screen under the list starts with a **< Back** row (Enter on it returns to the
 list, where the cursor was; **Backspace** does the same from anywhere). In a mod's options, **Up/Down** (Page Up/Down)
 picks a row, **Left/Right** changes it, **Enter** toggles or starts a key capture, and **Delete** puts the default
 back. **Escape** closes the whole menu. In a key capture, any key binds it, **Delete** sets none and **Escape**
-cancels. **/** starts a search across every mod: type part of a mod's or a row's name, **Backspace** takes a letter
-off, **Enter** keeps the search, **Escape** clears it. Values are saved between launches. A mod with no options isn't listed.
+cancels. **/** starts a search across every mod: type part of a mod's or a row's name, **Backspace** (or Delete)
+takes a letter off, **Enter** keeps the search, **/** again or **Escape** leaves it. While the menu is open its keys and mouse buttons
+are its own: your mod's `Keyboard` / `Mouse` reads of them (`pressed`, `released`, `any_pressed`, `button`,
+`keystrokes`), `chef.typed()` and `chef.bind` keys answer nothing pressed, so a search never fires your hotkey (the
+mouse's movement and cursor still read as always). The game itself still sees the keys, in the menu and while a search is typed (so
+W walks, and Escape and Enter also reach its pause screen and chat; Delete erases and **/** leaves a search without
+that). Values are saved between launches. A mod with no options isn't listed.
 
 | Helper | What it does |
 |---|---|
@@ -434,6 +439,13 @@ return {
   starts empty.
 - **Lines the menu puts together** (the hint for a key two options use: `F7 ALSO USED BY: SOME MOD (TOGGLE)`) are
   made from texts translated one by one (`ALSO USED BY:`, the mods' titles and labels), so they need no pattern.
+- **The menu's hint lines** are drawn as pairs, each key (`ARROWS`, `ENTER`, `/`, `ESC`, `DEL`, `BKSP`, `CLICK`, `<`
+  `>`, `RIGHT CLICK`, `WHEEL`, the menu key) a light chip followed by what it does (`MOVE`, `OPEN`, `CHANGE`,
+  `SEARCH`, `CLOSE`, `BACK`, `DEFAULT`, `CANCEL`, `NONE`, `ERASE`, `EXIT`, `PICK`, `SCROLL`, and `PRESS A KEY` / `TYPE
+  TO SEARCH` on their own), each key and word translated on its own: translate the pieces, not the whole line (since
+  1.2.2). A pair that doesn't fit is left out whole (the arrows' first).
+- **Texts with a number** (`HIDE MODS UNDER 1 MS`, `MODS UNDER 1 MS`, `FRAME 16.7 MS  60 FPS`) need a pattern, and
+  aren't listed as missing.
 - **Fonts:** the game's font has CJK glyphs (the log says "CJK glyphs: yes"); in the pixel font, non-ASCII text shows
   as `?`.
 - **For mods:** `chef.lang()` gives the language's name and code (nil for English); `chef.tr(s)` gives a text as the
@@ -611,7 +623,8 @@ Two header lines say what your mod expects:
 | Controller in this menu | On, and holding the touchpad / View button two seconds opens it on the ship (default); On; or Off. |
 | Menu position (Compact look) | Left (default), Center or Right. |
 | Performance monitor | Off by default. On, a panel shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
-| Monitor position | Where the monitor sits: top right (default), top left, middle right, middle left, bottom right or bottom left. |
+| Monitor position | Where the monitor sits: Adjustable, top right (default), top left, middle right, middle left, bottom right, bottom left, or Center. Adjustable: drag it by its yellow title bar on the pause screen (the game's cursor), or on the ship with this menu's cursor (while the menu has the mouse, the monitor is drawn over it); never in a mission without the pause screen. Where it's let go is kept (as shares of the screen, so another resolution keeps the spot). |
+| Missions: monitor on pause screen only | Off by default. On, in a mission the monitor shows only while the game shows its own cursor (its pause screen); on the ship it shows as always. The numbers are still added up, so they're there the moment the pause screen opens. If the game doesn't say, the monitor shows all the time (said once in the log). |
 | Budget (ms) | 1 ms by default. A mod averaging more a frame (or more than its own `chef.budget`) is named in the log (at most every 10 minutes) and marked orange in the performance monitor. |
 | Hide mods under N ms | N is the Budget row's value (the row's name follows it). Off by default. On, the mods running under their budget share one monitor line (MODS UNDER N MS: their sum and the worst call among them), so the heavy ones stand out. A mod that's off keeps its line. |
 | Language | Only when a language file is installed: English or one of the installed languages (on by default when exactly one is installed). See "Language files". |
@@ -685,8 +698,11 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
     `get_*`, `num_*`, without lobby or connection names);
   - all of GameSession but its reads (`in_session`, `peers`, `other_peers`, `game_session_host`, `game_object_field`,
     `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `is_*`,
-    `has_*`, `get_*`, `num_*`): no writes to what other players see (`game_object_field_batched`, a read, stays out:
-    it has crashed the game on other players' objects);
+    `has_*`, `get_*`, `num_*`, and since 1.2.2 `game_object_field_batched`): no writes to what other players see.
+    `game_object_field_batched` has crashed the game on other players' objects, so it answers only for an object that
+    exists (a whole number id, else nil), and the loader learns from a crash in it: its first call on each object is
+    breadcrumbed, so a game that ends there skips that call for your mod and keeps the mod off until it changes (one
+    crash, not one every launch);
   - all of UnitSynchronizer but its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`,
     `get_*`, `num_*`): no spawns or destroys every player sees;
   - the same through an engine object's metatable (`getmetatable` gives the trimmed table).
