@@ -374,8 +374,7 @@ Delete the file (or empty it) to turn dev mode off.
 you still call `chef.text` every frame, and a text that didn't change since the last frame costs no engine call; one
 that did is changed in place. What you didn't draw this frame is gone in the next. Lay text out with
 `chef.text_width` / `chef.text_fit` / `chef.text_wrap`, not a count of characters: letters are of different widths. The
-pixel font is used until the font is loaded, if text calls fail, or when the player turns F9 > Chef Shared Loader >
-Game font off; the same calls work either way.
+pixel font is used until the font is loaded, or if text calls fail; the same calls work either way.
 
 Two things differ from the pixel font:
 - **Text is on top of shapes:** in the game's font, text draws over every rect, sprite and bitmap of the same screen
@@ -615,19 +614,30 @@ Two header lines say what your mod expects:
 
 ### The loader's own settings (options menu, Chef Shared Loader group)
 
+The rows sit under three headings: Menu (with the subheadings Compact look and Controls), Performance (with the
+subheading Monitor look) and Permissions (the game patch files the loader may touch, one row each). A subheading is
+drawn indented and in a dimmer yellow, its rows indented with it.
+
 | Row | What it does |
 |---|---|
+| **Menu** | |
 | Open this menu | The menu key (F9). It can't be off or a menu navigation key; such a value falls back to F9. |
 | Menu look | Full screen (default; on the ship only, the compact panel in a mission) or Compact. |
+| Language | Only when a language file is installed: English or one of the installed languages (on by default when exactly one is installed). See "Language files". |
+| **Compact look** | |
+| Menu position (Compact look) | Left (default), Center or Right. |
+| Menu opacity % (Compact look) | 100 by default, down to 30 in steps of 10: the compact panel, text included, gets that much see-through (the menu's mouse cursor stays solid). The full screen look stays opaque. |
+| **Controls** | |
 | Mouse in this menu | On the ship (default), Always or Off. While the menu has the mouse, the camera doesn't turn with it: the loader gives the mouse's delta axis a dead zone no movement reaches and puts back the one it found when the menu closes (a dead zone already that far up, another mod's, is left alone). The menu's cursor follows the engine's cursor axis. |
 | Controller in this menu | On, and holding the touchpad / View button two seconds opens it on the ship (default); On; or Off. |
-| Menu position (Compact look) | Left (default), Center or Right. |
+| **Performance** | |
 | Performance monitor | Off by default. On, a panel shows, once a second: the game's frame time, every mod's average milliseconds a frame (its hooks, timers and spread work), its share of the frame and its worst single call, the loader's own share, and the panel's own cost on a line of its own. Off, it costs nothing. |
-| Monitor position | Where the monitor sits: Adjustable, top right (default), top left, middle right, middle left, bottom right, bottom left, or Center. Adjustable: drag it by its yellow title bar on the pause screen (the game's cursor), or on the ship with this menu's cursor (while the menu has the mouse, the monitor is drawn over it); never in a mission without the pause screen. Where it's let go is kept (as shares of the screen, so another resolution keeps the spot). |
-| Missions: monitor on pause screen only | Off by default. On, in a mission the monitor shows only while the game shows its own cursor (its pause screen); on the ship it shows as always. The numbers are still added up, so they're there the moment the pause screen opens. If the game doesn't say, the monitor shows all the time (said once in the log). |
 | Budget (ms) | 1 ms by default. A mod averaging more a frame (or more than its own `chef.budget`) is named in the log (at most every 10 minutes) and marked orange in the performance monitor. |
 | Hide mods under N ms | N is the Budget row's value (the row's name follows it). Off by default. On, the mods running under their budget share one monitor line (MODS UNDER N MS: their sum and the worst call among them), so the heavy ones stand out. A mod that's off keeps its line. |
-| Language | Only when a language file is installed: English or one of the installed languages (on by default when exactly one is installed). See "Language files". |
+| **Monitor look** | |
+| Monitor position | Where the monitor sits: Adjustable, top right (default), top left, middle right, middle left, bottom right, bottom left, or Center. Adjustable: drag it by its yellow title bar on the pause screen (the game's cursor), or on the ship with this menu's cursor (while the menu has the mouse, the monitor is drawn over it); never in a mission without the pause screen. Where it's let go is kept (as shares of the screen, so another resolution keeps the spot). |
+| Monitor opacity (%) | 100 by default, down to 10 in steps of 10: the whole panel, text included, gets that much see-through. |
+| Monitor on pause screen only | Off (default), Missions or Always. Missions: in a mission the monitor shows only while the game shows its own cursor (its pause screen); on the ship it shows as always. Always: the same on the ship too (the ship's menus that show the game's cursor show it as well). The numbers are still added up, so they're there the moment the pause screen opens. If the game doesn't say, the monitor shows all the time (said once in the log). Up to 1.2.3 this was an on/off row for missions: a saved On is Missions. |
 
 ## Rules that keep the game alive
 
