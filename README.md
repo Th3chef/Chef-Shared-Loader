@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.2.3.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.2.4.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -18,7 +18,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.2.3
+- **Version:** 1.2.4
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -127,8 +127,8 @@ exactly one of these:
   mod's average milliseconds a frame, share of the frame and worst call, once a second, plus the loader's own share
   and the panel's own cost. "Monitor position" puts it in a corner, at the middle of either side, in the center, or
   Adjustable (drag it by its yellow title bar on the pause screen, or on the ship with the F9 menu's cursor);
-  "Missions: monitor on pause screen only" keeps it off the HUD while you play a mission (on the ship it shows as
-  always). "Budget (ms)"
+  "Monitor opacity (%)" makes it see-through (10 to 100, 100 by default); "Monitor on pause screen only" keeps it off
+  the HUD while you play: Missions (on the ship it shows as always) or Always (the ship too). "Budget (ms)"
   (1 ms by default) marks the mods over it in orange (and names them in the log); "Hide mods under N ms" (N follows the
   Budget row) puts the rest on one line.
 - **Options menu (F9):** the loader's own entry first (under a divider), then the mods in alphabetical order; Enter
@@ -136,8 +136,10 @@ exactly one of these:
   or F9 closes the menu. While it's open, mods read no key presses, mouse clicks or typed text, so a search never fires
   a mod's hotkey (the game itself still sees the keys). The hint line shows each key as a chip with what it does. On
   the ship it's a full screen look (the mods on the left, the picked mod's options on the right, a title picture at the
-  top); in a mission, or with "Menu look" set to Compact, a panel ("Menu position": left, center or right). The
-  loader's own options are grouped under Menu, Performance and Permissions. A key two options use is marked `!`; with
+  top); in a mission, or with "Menu look" set to Compact, a panel ("Menu position": left, center or right; "Menu
+  opacity %" makes it see-through, 30 to 100, 100 by default). The
+  loader's own options are grouped under Menu (with Compact look and Controls under it), Performance (with Monitor
+  look under it) and Permissions. A key two options use is marked `!`; with
   that row selected, the hint line names the other options on the key.
   - **Controller:** the D-pad moves, cross/A picks, circle/B goes back (and closes at the list of mods), square/X
     puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens it.
@@ -157,8 +159,7 @@ exactly one of these:
 - **Text in the game's font:** the menu, the monitor, notices and mods' `chef.text` use FSSinclair Medium (the HUD's
   font) once the game has it loaded, laid out by measured width, long notices wrapped. Each text is kept and only
   changed when it changes, so an open menu or monitor costs a few rects a frame, not hundreds. The pixel font is the
-  fallback (before the font is loaded, if text calls fail, after a crash in one), and the loader's own "Game font"
-  option turns it on by hand.
+  fallback (before the font is loaded, if text calls fail, after a crash in one).
 - **Worlds:** engine handles (units, GUIs, cameras) are dropped whenever the main world changes, and nothing made in
   one world is used in the next.
   - **Settled:** a world counts as settled after 3 s.
@@ -368,7 +369,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.2.3 starting`
+- `==== Chef Shared Loader 1.2.4 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -426,7 +427,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.3 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.4 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build

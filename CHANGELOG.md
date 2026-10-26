@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.4
+
+- New row "Monitor opacity (%)": the performance monitor, text included, from fully solid (100, the default) down to
+  10.
+- "Monitor on pause screen only" is now Off, Missions or Always. Always keeps the monitor off the screen on the ship
+  too, until the pause screen is up. It replaces "Missions: monitor on pause screen only" (a saved On is Missions).
+- New row "Menu opacity % (Compact look)": the compact F9 panel, text included, from 100 (the default) down to 30. The
+  full screen look stays solid.
+- The loader's own options are easier to scan: Menu, with the subheadings Compact look and Controls under it, and
+  Performance, with Monitor look under it.
+- The "Game font" row is gone: the menu, the monitor and notices always use the game's font once it's loaded. The
+  loader's pixel font is still there as the fallback.
+- For language file makers: new texts COMPACT LOOK, CONTROLS, MONITOR LOOK, MENU OPACITY % (COMPACT LOOK), MONITOR
+  OPACITY (%), MONITOR ON PAUSE SCREEN ONLY and MISSIONS; GAME FONT and MISSIONS: MONITOR ON PAUSE SCREEN ONLY are gone.
+
 ## 1.2.3
 
 - Small missions count as missions: the loader now tells a mission from the ship by the world's level count (the ship
