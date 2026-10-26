@@ -782,12 +782,14 @@ function M.install(ctx)
     end
   end
   -- On the ship (or the title screen), told by what I know, never guessed: a settled world, not being looked at again,
-  -- not a mission, and no bigger than the ship (about 3,800 units; the smallest missions are about 4,800). Anything
-  -- else counts as a mission: a world still loading, a small mission not recognized as one.
+  -- not a mission, and with a level count (the ship's few or none), else no bigger than the ship (about 3,800 units; the
+  -- smallest missions are about 4,800). Anything else counts as a mission: a world still loading, a small mission not
+  -- recognized as one.
   local SHIP_UNITS = 4300
   function nav.on_ship()
     local w = ctx.world
-    return w.stable == true and not w.checking and w.mission ~= true and (w.last_n or w.units or 0) <= SHIP_UNITS
+    return w.stable == true and not w.checking and w.mission ~= true
+      and (w.levels ~= nil or (w.last_n or w.units or 0) <= SHIP_UNITS)
   end
   function nav.mouse_on()
     local m = mouse_row.value
