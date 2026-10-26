@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.2
+
+**The options menu**
+- The hint line at the bottom shows each key (arrows, Enter, `/`, F9, Esc, Delete, Backspace, and the mouse's click,
+  `<` `>`, right click and wheel) as a light key chip, like the option rows' keys, followed by what it does (ARROWS
+  MOVE, ENTER OPEN, / SEARCH ...), in white instead of gray. The compact panel's line now ends with ESC CLOSE too;
+  when a line is short of room, whole pairs are left out (the arrows' first), never a key without its word. Language
+  files translate its keys and words one by one (docs/MODDING.md).
+- In the compact panel, opening a mod (or going back) draws the new screen in the same frame: the hint line no longer
+  jumps a frame late.
+- On the pause screen, the menu's mouse cursor follows the real mouse (it moved only with the mouse's movement
+  there, so it drifted off the game's cursor).
+- Chef Shared Loader's own entry is always first in the list of mods, under a thin divider; the mods follow in
+  alphabetical order.
+- Mods' hotkeys no longer fire while the menu is open: typing a search (an L, say) doesn't switch a mod's light on
+  and off. Mods read no key presses, mouse clicks or typed text while it's open.
+- Search: the hints say ENTER SEARCH, BKSP ERASE and / ESC EXIT; `/` again leaves a search, like Escape. Delete
+  erases too.
+
+**Performance monitor**
+- "Monitor position" has two more choices: Adjustable (first in the list) and Center. Adjustable: drag the monitor by
+  its yellow title bar on the pause screen, or on the ship with the F9 menu's cursor; it stays where you let it go,
+  across launches.
+- New row "Missions: monitor on pause screen only": in a mission the monitor shows only while the pause screen is up,
+  so nothing sits over the HUD while you play; on the ship it shows as always.
+
+**Mods made for other loaders**
+- More mods run: `GameSession.game_object_field_batched` (every field of a game object at once) is now allowed, so
+  mods like DRIVER HUD find your vehicle. It once crashed the game on other players' objects, so the loader asks
+  only about objects that exist and learns from a crash in it: a game that ends there skips that call for that mod
+  and keeps the mod off until it updates (with a notice), so it can't crash every launch.
+
 ## 1.2.1
 
 **The options menu**

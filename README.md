@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.2.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.2.2.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -18,7 +18,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.2.1
+- **Version:** 1.2.2
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -125,15 +125,20 @@ exactly one of these:
   over its budget is named in the log (at most every 10 minutes).
 - **Performance monitor** (the loader's own options, off by default): a panel with the game's frame time and every
   mod's average milliseconds a frame, share of the frame and worst call, once a second, plus the loader's own share
-  and the panel's own cost. "Monitor position" puts it in a corner or at the middle of either side. "Budget (ms)"
+  and the panel's own cost. "Monitor position" puts it in a corner, at the middle of either side, in the center, or
+  Adjustable (drag it by its yellow title bar on the pause screen, or on the ship with the F9 menu's cursor);
+  "Missions: monitor on pause screen only" keeps it off the HUD while you play a mission (on the ship it shows as
+  always). "Budget (ms)"
   (1 ms by default) marks the mods over it in orange (and names them in the log); "Hide mods under N ms" (N follows the
   Budget row) puts the rest on one line.
-- **Options menu (F9):** the list of mods in alphabetical order; Enter opens one mod's options, under a < Back row
-  (Backspace goes back too); Delete puts an option's default back; Escape or F9 closes the menu. On the ship it's a
-  full screen look (the mods on the left, the picked mod's options on the right, a title picture at the top); in a
-  mission, or with "Menu look" set to Compact, a panel ("Menu position": left, center or right). The loader's own
-  options are grouped under Menu, Performance and Permissions. A key two options use is marked `!`; with that row
-  selected, the hint line names the other options on the key.
+- **Options menu (F9):** the loader's own entry first (under a divider), then the mods in alphabetical order; Enter
+  opens one mod's options, under a < Back row (Backspace goes back too); Delete puts an option's default back; Escape
+  or F9 closes the menu. While it's open, mods read no key presses, mouse clicks or typed text, so a search never fires
+  a mod's hotkey (the game itself still sees the keys). The hint line shows each key as a chip with what it does. On
+  the ship it's a full screen look (the mods on the left, the picked mod's options on the right, a title picture at the
+  top); in a mission, or with "Menu look" set to Compact, a panel ("Menu position": left, center or right). The
+  loader's own options are grouped under Menu, Performance and Permissions. A key two options use is marked `!`; with
+  that row selected, the hint line names the other options on the key.
   - **Controller:** the D-pad moves, cross/A picks, circle/B goes back (and closes at the list of mods), square/X
     puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens it.
     A button already down when the menu opens does nothing until it's let go. Row: "Controller in this menu".
@@ -195,7 +200,7 @@ Source: `src/chef_loader/sandbox.lua`.
 | `dofile`, `loadfile`, `module` | Raise errors (`module(..., package.seeall)` would hand out the game's globals). |
 | `require` | The mod's own `package.loaded`, then its own `package.preload` (a loop is an error), then only `bit`, `string`, `table`, `math`, `coroutine`, `table.new`, `table.clear` (the mod's own copies). Everything else raises an error: no C modules, and no `require('_G')`, `('debug')` or `('io')`. Another mod's exports go through `chef.require`; `require('mods/<author>/<name>')` and `package.loaded` give another running mod's module too (a trusted mod's never). |
 | `package` | A per-mod table (`loaded`, `preload`, empty `path`/`cpath`). No `loadlib`. |
-| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer` and every `*Lobby*` / `*GameServer*` table (each reads as `false`). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `is_*`, `has_*`, `get_*`, `num_*`; not `game_object_field_batched`, which has crashed the game) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
+| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer` and every `*Lobby*` / `*GameServer*` table (each reads as `false`). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `game_object_field_batched`, `is_*`, `has_*`, `get_*`, `num_*`; `game_object_field_batched` answers only for an object that exists, and a game that ends in it skips that call for that mod and keeps the mod off until it changes) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
 | `debug` | `traceback` and `getinfo` (levels shifted past the wrapper, `func` removed). No `getlocal`, `getupvalue`, `setupvalue`, `getregistry`, `sethook`, `getmetatable`, `setfenv`. |
 | `getfenv` / `setfenv` | A function of the game, of the loader or of another mod reads as the caller's own environment and can't be changed. Level 0 (the thread) reads as the mod's own and can't be set. |
 | `collectgarbage` | `count`, `step` and `collect` only. Other options (`stop`, ...) do nothing. |
@@ -362,7 +367,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.2.1 starting`
+- `==== Chef Shared Loader 1.2.2 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -374,7 +379,7 @@ The old place keeps a trace:
   - `start-up: running as the game's boot script (...)`: a mod with the loader built in, or the simulator.
 - `boot scripts of mine, not run: <patch>: my start-up stub, <patch>: a full copy of Chef Shared Loader 1.1.0 ...`
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
-- `mods run locked down: ... (sandbox 1.2.1)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.2.2)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`.
 
 **Per mod:**
@@ -420,7 +425,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.1 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.2 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
