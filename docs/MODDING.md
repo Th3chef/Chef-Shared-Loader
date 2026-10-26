@@ -115,7 +115,7 @@ version, `chef.name` your mod's name.
 | `chef.camera()` | The view camera: `{ x, y, z, fx, fy, fz, yaw, fov }` (position, forward, yaw in radians and the vertical field of view when the engine gives it), or nil while there's none. Read only: the table is shared by every mod. When the camera is lost, the loader looks for it again over a few frames. |
 | `chef.world_to_screen(x, y, z)` | Screen pixels (bottom-left origin), or nil when behind the camera. |
 | `chef.watch(kinds, every)` | Lists units of the given resource ids (`{ ['a57ae2a703c02899'] = true }`) every `every` seconds (5 by default), spread over frames. Returns `w` with `w.items` (`{ unit, kind, x, y, z }`), `w.generation` (bumps on each new list) and `w.pause()`, `w.resume()`, `w.refresh()`, and `w.stop()` to drop the watch for good. Runtime-built units (`46cab355bd8d4d37`) are never listed (asking where one is ends the game). A mod that stops loses its watches. |
-| `chef.mission_kinds(kinds)` | Unit ids that only exist in missions (helps the loader tell a small mission from the ship). |
+| `chef.mission_kinds(kinds)` | Unit ids that only exist in missions. The loader tells a mission by its level count; these ids are only used if the engine can't count levels (from 1.2.3). |
 
 ### Input
 
