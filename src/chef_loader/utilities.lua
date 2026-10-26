@@ -1731,12 +1731,13 @@ function M.install(ctx, L)
     if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
     if not pm.lines then return end
     local t0 = L.clock()
-    -- "Missions: monitor on the pause screen only" (util.perf_pause): in a mission, drawn only while the game shows its
-    -- cursor (the numbers are still added up, so they're there the moment it opens); on the ship, as always. No
-    -- answer from the game: drawn all the time, said once. The game is asked only when its answer is used (that row
-    -- in a mission, or the Adjustable position).
+    -- "Monitor on pause screen only" (util.perf_pause: 1 Off, 2 Missions, 3 Always): drawn only while the game shows
+    -- its cursor (the numbers are still added up, so they're there the moment it opens), in a mission or everywhere;
+    -- Missions leaves the ship as always. No answer from the game: drawn all the time, said once. The game is asked
+    -- only when its answer is used (that row on, or the Adjustable position).
     local place = PM_PLACE[util.perf_place and tonumber(util.perf_place.value) or 2] or 1
-    local pause_only = util.perf_pause ~= nil and util.perf_pause.value == true and world.mission == true
+    local pp = util.perf_pause and tonumber(util.perf_pause.value) or 1
+    local pause_only = pp == 3 or (pp == 2 and world.mission == true)
     local cursor
     if pause_only or place == 8 then cursor = game_cursor() end
     if pause_only and cursor ~= true then
@@ -1796,7 +1797,9 @@ function M.install(ctx, L)
     end
     local cs = pm.cs or {}
     pm.cs = cs
-    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
+    -- ("Monitor opacity (%)": every color's alpha scaled by it, the panel and its text alike)
+    local op = (util.perf_alpha and tonumber(util.perf_alpha.value) or 100) / 100
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], floor(c[4] * op + 0.5)) end
     -- (over the options menu while it can be dragged there: the full screen menu covers from 950, its cursor at 958)
     local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects
