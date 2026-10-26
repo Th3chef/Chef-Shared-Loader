@@ -55,7 +55,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.2.1'
+local VERSION = '1.2.2'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
@@ -649,6 +649,94 @@ local function caps(s) return tostring(s or ''):upper() end
 local function fit_cells(s, px, maxw)
   local n = math.floor((maxw + px) / (6 * px))
   return #s > n and s:sub(1, math.max(0, n)) or s
+end
+
+-- The menu's hint lines, made once, as pairs: the keys, each drawn as a light chip like the option rows' keys (false:
+-- the menu's own key, named when drawn), and what they do. A pair is drawn whole or not at all; opt: a pair left out
+-- when the whole line doesn't fit. Each key and word is translated on its own.
+local KEY_NOW = false
+local HINTS = {
+  capture_default = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'DEFAULT' } },
+  capture_none = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'NONE' } },
+  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ENTER', word = 'SEARCH' }, { 'BKSP', word = 'ERASE' },
+             { '/', 'ESC', word = 'EXIT' } },
+  group = { { 'ARROWS', word = 'MOVE', opt = true }, { 'ENTER', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
+            { 'BKSP', word = 'BACK' }, { 'ESC', word = 'CLOSE' } },
+  list = { { 'ARROWS', word = 'MOVE', opt = true }, { 'ENTER', word = 'OPEN' }, { '/', word = 'SEARCH' },
+           { KEY_NOW, word = 'CLOSE' } },
+  mouse = { { 'CLICK', word = 'PICK' }, { '<', '>', word = 'CHANGE' }, { 'RIGHT CLICK', word = 'BACK' },
+            { 'WHEEL', word = 'SCROLL' }, { KEY_NOW, word = 'CLOSE' } },
+}
+-- A hint line from x (y its row's bottom, rh its height) up to x_end: in a pair its keys a little apart and the word
+-- close after them, the next pair further off; a chip is at least as wide as a capital letter. When the whole line
+-- doesn't fit, the optional pairs go, then the gaps narrow (a pair's word still closer to its keys than the next
+-- pair); past that, the pairs that don't fit are left off the end.
+-- (each hint text's width, measured once per measure, font and size: the line is laid out every frame the menu is
+-- open)
+local HINT_W = setmetatable({}, { __mode = 'k' })
+local function hint_line(ctx, x, y, rh, px, x_end, pairs_, key, word_c, chip_c, ink, layer, P)
+  local by_fn = HINT_W[ctx.text_width]
+  if not by_fn then by_fn = {}; HINT_W[ctx.text_width] = by_fn end
+  local font = ctx.text_native and ctx.text_native() and 'native' or 'mine'
+  local by_font = by_fn[font]
+  if not by_font then by_font = {}; by_fn[font] = by_font end
+  local known = by_font[px]
+  if not known then known = {}; by_font[px] = known end
+  local function tw(t)
+    local w = known[t]
+    if not w then
+      w = ctx.text_width(t, px)
+      if type(w) == 'number' then known[t] = w end
+    end
+    return w
+  end
+  local ty = y + math.floor((rh - 7 * px) / 2)
+  local function chip_w(k) return math.max(tw(P(k or key or '')), 5 * px) + 4 * px end
+  local wgap = 6 * px                                -- (between a pair's keys and its word)
+  local function pair_w(pr)                          -- (its width, the gap after it not counted)
+    local w = 0
+    for k = 1, #pr do w = w + chip_w(pr[k]) + (k > 1 and 3 * px or 0) end
+    if pr.word then w = w + (#pr > 0 and wgap or 0) + tw(P(pr.word)) end
+    return w
+  end
+  local function line_w(with_opt, gap)
+    local w, any = 0, false
+    for _, pr in ipairs(pairs_) do
+      if with_opt or not pr.opt then w = w + (any and gap or 0) + pair_w(pr); any = true end
+    end
+    return w
+  end
+  local room = x_end - x
+  local with_opt, gap = true, 12 * px
+  if line_w(true, gap) > room then
+    with_opt = false
+    if line_w(false, gap) > room then gap, wgap = 8 * px, 4 * px end
+  end
+  local first = true
+  for _, pr in ipairs(pairs_) do
+    if with_opt or not pr.opt then
+      local pw = pair_w(pr)
+      if (first and 0 or gap) + pw > x_end - x then break end
+      if not first then x = x + gap end
+      first = false
+      for k = 1, #pr do
+        local t = P(pr[k] or key or '')
+        local w = tw(t)
+        local cw = math.max(w, 5 * px)
+        if k > 1 then x = x + 3 * px end
+        ctx.rect(x, y + 2 * px, cw + 4 * px, rh - 4 * px, chip_c, layer)
+        ctx.text(x + 2 * px + math.floor((cw - w) / 2), ty, t, px, ink, layer + 1)
+        x = x + cw + 4 * px
+      end
+      if pr.word then
+        if #pr > 0 then x = x + wgap end
+        local t = P(pr.word)
+        ctx.text(x, ty, t, px, word_c, layer)
+        x = x + tw(t)
+      end
+    end
+  end
+  return x
 end
 
 -- A mod's error as text for the log. tostring alone can raise (an error object whose __tostring errors or doesn't
@@ -1391,9 +1479,22 @@ function M.install(ctx)
       local x, y = eng('Vector3.to_elements', v)
       return tonumber(x) or 0, tonumber(y) or 0
     end
-    nav.hold_take()
+    -- (the game showing its own cursor, its pause screen: the cursor axis is where the mouse really is, and the game
+    -- turns no camera with it; my cursor sits on it, and the mouse isn't held)
+    local win = eng('Window.get_main_window')
+    local shown = win ~= nil and eng('Window.show_cursor', win) == true
+    nav.game_cursor = shown                             -- (then the game's own cursor is the one drawn: not mine)
     local H = nav.hold
-    if H.on or H.other then
+    if not shown then nav.hold_take() end
+    if shown then
+      if H.on then nav.hold_give() end
+      local cx, cy = nav.cursor_at(w, h)
+      if cx then
+        nav.moved = cx ~= nav.mx or cy ~= nav.my
+        nav.mx, nav.my = cx, cy
+      end
+      H.px, H.py = nil, nil                             -- (held again later: from a fresh sample, no jump)
+    elseif H.on or H.other then
       -- (held, by me or another mod: the delta reads nothing now; the cursor axis's movement moves my cursor. The game
       -- puts its hidden cursor back in the middle of the window when it moves far, so a frame whose cursor lands in the
       -- middle, or jumps more than a third of the screen, moves nothing. Ten frames running with no usable cursor (out
@@ -1449,6 +1550,7 @@ function M.install(ctx)
   function nav.under()
     local x, y, H = nav.mx, nav.my, nav.hits
     if not (nav.mouse and x) then return nil end
+    if svc.util and svc.util.pm_over and svc.util.pm_over(x, y) then return nil end   -- (the monitor drawn over me)
     for j = nav.nhits, 1, -1 do
       local b = (j - 1) * 6
       if x >= H[b + 1] and x < H[b + 1] + H[b + 3] and y >= H[b + 2] and y < H[b + 2] + H[b + 4] then
@@ -1545,7 +1647,7 @@ function M.install(ctx)
   end
   -- the cursor: an arrow, ink edged
   function nav.draw_cursor(top, h)
-    if not (nav.mouse and nav.mx) then return end
+    if not (nav.mouse and nav.mx) or nav.game_cursor then return end
     local c = max(2, floor(h / 400 + 0.5))
     local x, y, col = floor(nav.mx), floor(nav.my), ctx.color
     local edge, fill = col(17, 17, 17, 255), col(255, 231, 16, 255)
@@ -1565,7 +1667,9 @@ function M.install(ctx)
     if sorted_cache.ver == ver.layout then return sorted_cache.gs end
     local gs = {}
     for _, g in ipairs(groups) do if #g.rows > 0 then gs[#gs + 1] = g end end
+    -- (mine first, under a divider; the mods in alphabetical order after it)
     table.sort(gs, function(a, b)
+      if (a.mod == loader_mod) ~= (b.mod == loader_mod) then return a.mod == loader_mod end
       local ta, tb = text_of(a.title):lower(), text_of(b.title):lower()
       if ta ~= tb then return ta < tb end
       return a.mod < b.mod
@@ -1701,8 +1805,9 @@ function M.install(ctx)
       end
     end
   end
-  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace takes one off, Enter keeps it, Escape
-  -- clears it (the typed text comes from Keyboard.keystrokes, through the utilities)
+  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace (or Delete) takes one off, Enter keeps
+  -- it (the list filtered by it), '/' again or Escape leaves it (the typed text comes from Keyboard.keystrokes,
+  -- through the utilities)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
@@ -1713,9 +1818,12 @@ function M.install(ctx)
     for ch in typed:gmatch('[%w ]') do
       if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
+    if pressed('delete') or pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
     if pressed('enter') then menu.typing = false end
-    if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
+    -- ('/' again or Escape leaves the search: the whole list back)
+    if typed:find('/', 1, true) or pressed('escape') then
+      menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1
+    end
     return true
   end
   -- a mod opened (from the list's line `back`): the cursor on its first row, past any heading
@@ -1884,6 +1992,10 @@ function M.install(ctx)
         local aw = tw('>', px)
         ctx.text(x0 + tx + 2 * px, ty, fit(P(text_of(l.text)), px, inner - 2 * px - aw - 4 * px), px, white, top + 2)
         ctx.text(x0 + pw - tx - aw, ty, '>', px, green, top + 2)
+        -- (a thin line under my own entry, between it and the mods)
+        if l.pick.mod == loader_mod and ls[i + 1] then
+          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+        end
       else
         local r = l.row
         -- the value first (at most 40% of the row), then the label in what's left
@@ -1904,12 +2016,15 @@ function M.install(ctx)
     -- the hints under a thin line
     ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
     local clash = clash_hint(ls[menu.sel], users)
-    local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
-      or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-      or (clash and clash_drawn(clash, P))
-      or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
-      or ('ARROWS  ENTER OPEN  / SEARCH  ' .. (svc.util and svc.util.key_label(menu_key.value) or menu_key.value) .. ' CLOSE')
-    ctx.text(x0 + tx, midy(y0 - ph + px, rh), fit(P(hint), px, inner), px, gray, top + 2)
+    local hy = y0 - ph + px
+    if clash and not menu.capture and not menu.typing then
+      ctx.text(x0 + tx, midy(hy, rh), fit(clash_drawn(clash, P), px, inner), px, yellow, top + 2)
+    else
+      local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
+        or (menu.typing and HINTS.typing) or ((menu.group or menu.search ~= '') and HINTS.group) or HINTS.list
+      hint_line(ctx, x0 + tx, hy, rh, px, x0 + tx + inner, segs,
+        svc.util and svc.util.key_label(menu_key.value) or menu_key.value, white, white, ink, top + 2, P)
+    end
     nav.draw_cursor(top, h)
   end
   -- The full screen look: an opaque terminal, the mods on the left, the open mod's options on the right (at the list
@@ -1980,6 +2095,8 @@ function M.install(ctx)
     end
     local users, gs = key_users(), sorted_groups()
     local listing = not menu.group and menu.search == ''       -- at the list of mods the lines are the mods
+    -- (the thin line under my own entry, between it and the mods)
+    local function divider(dx, dy, dw) ctx.rect(dx, dy, dw, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 4) end
     -- the left pane: the mods (at the list, the lines themselves; else every mod, the open one lit, a click opens another)
     pane(lx, lw, 'MODS', tostring(#gs))
     local y = py1 - rh - 4 * px - rh
@@ -1993,6 +2110,7 @@ function M.install(ctx)
         ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(l.text)), px, lw - 16 * px - nw), px, i == menu.sel and yellow or white, top + 4)
         ctx.text(lx + lw - 5 * px - nw, midy(y, rh), n, px, gray, top + 4)
         nav.hit(lx, y, lw, rh, 'line', i)
+        if l.pick.mod == loader_mod and ls[i + 1] then divider(lx + 4 * px, y, lw - 8 * px) end
         y = y - rh
       end
     else
@@ -2005,6 +2123,7 @@ function M.install(ctx)
         if on then lit(lx, lw, y) end
         ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(g.title)), px, lw - 12 * px), px, on and yellow or gray, top + 4)
         nav.hit(lx, y, lw, rh, 'group', i)
+        if g.mod == loader_mod and gs[i + 1] then divider(lx + 4 * px, y, lw - 8 * px) end
         y = y - rh
       end
     end
@@ -2101,20 +2220,25 @@ function M.install(ctx)
       for k = 1, 10 do
         local it = parts[k]
         if it and GLYPH_OF[it] then x = x + nav.glyph(it, x, gy, c, top + 3) + 2 * px
-        elseif it then x = x + (ctx.text(x, midy(hy, rh), P(it), px, gray, top + 2) or 0) + 6 * px end
+        elseif it then x = x + (ctx.text(x, midy(hy, rh), P(it), px, white, top + 2) or 0) + 6 * px end
       end
     else
-      local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
-        or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-        or (dev == 'mouse' and ('CLICK PICK  < > CHANGE  RIGHT CLICK BACK  WHEEL SCROLL  ' .. close_key .. ' CLOSE'))
-        or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK  ESC CLOSE')
-        or ('ARROWS  ENTER OPEN  / SEARCH  ' .. close_key .. ' CLOSE')
-      ctx.text(m, midy(hy, rh), fit(P(hint), px, w - 2 * m), px, gray, top + 2)
+      local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
+        or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
+        or ((menu.group or menu.search ~= '') and HINTS.group) or HINTS.list
+      hint_line(ctx, m, hy, rh, px, w - m, segs, close_key, white, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
   end
   -- where the menu's cursor is (menu pixels, y up; nil before the mouse was read)
   function svc.menu_cursor() return nav.mx, nav.my end
+  -- open now? (mods' key and mouse-button reads answer nothing while it is: sandbox.lua, runtime.lua, chef.typed)
+  function svc.menu_open() return menu.open == true end
+  -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
+  -- menu is open and has the mouse (nil otherwise)
+  function svc.menu_mouse()
+    if menu.open and nav.mouse and nav.mx and nav.on_ship() then return nav.mx, nav.my, nav.lmb == true end
+  end
   -- the layer my full screen menu covers from, while it's open (nil while it isn't)
   function svc.covering()
     if menu.open and look_row.value == 1 and nav.on_ship() then return ctx.TOP + 950 end
@@ -2180,14 +2304,17 @@ function M.install(ctx)
     local typing = not stepped and menu.capture == nil and search_input()
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
+    local g0, s0 = menu.group, menu.search
     if not typing and not stepped then menu_input(ls) end
     nav.nhits = 0
-    -- (the lines again: what was picked this frame may have opened a mod or gone back)
+    -- (the lines again when what was picked this frame opened a mod or went back: both looks draw the new screen in
+    -- this same frame, so the compact panel's size and hint line never trail it by a frame)
+    if menu.group ~= g0 or menu.search ~= s0 then ls = lines() end
     -- (the full screen look covers the game: on the ship only; in a mission the compact panel)
     if look_row.value == 1 and nav.on_ship() then
       -- (texts of the top world under it aren't drawn while it's open: the game's font would show through it)
       if ctx.cover then ctx.cover(ctx.TOP + 950) end
-      menu_draw_full(lines())
+      menu_draw_full(ls)
     else menu_draw(ls) end
   end
 
@@ -3541,7 +3668,7 @@ function M.data_name(owner, name)
   if type(owner) ~= 'string' or owner:sub(1, 5) ~= 'mods/' or #owner < 6 then return nil end
   return 'chef_data_' .. data_enc(owner:sub(6)) .. '__' .. data_enc(name) .. '.lua'
 end
--- An owner's name flattened the way file names before 1.0.1 had it: mods/a/b -> a_b. A nested name (more than two
+-- An owner's name flattened for a file name: mods/a/b -> a_b. A nested name (more than two
 -- parts) gets "_" and 8 hex digits of a hash of the whole name on top, so mods/a/b/c and mods/a/b_c never share a
 -- file (two-part names keep their old files). The hash: two 16-bit halves of a 32-bit one, since string.format's %x
 -- only goes to 2^31 on Windows.
@@ -3553,7 +3680,7 @@ function M.flat_owner(owner)
   for i = 1, #owner do h = (h * 31 + owner:byte(i)) % 4294967296 end
   return flat .. '_' .. fmt('%04x%04x', floor(h / 65536), h % 65536)
 end
--- the file name before 1.0.1 (not one to one: two pairs could share one), read once to move a table over
+-- the old flat file name (not one to one: two pairs could share one), read once to move a table over
 function M.old_data_name(owner, name)
   return 'chef_data_' .. M.flat_owner(owner) .. '_' .. name .. '.lua'
 end
@@ -4416,7 +4543,11 @@ function M.install(ctx, L)
     end
 
     -- 6 input
-    function chef.typed() return typed_now() end
+    -- (nothing while the loader's options menu is open: its search has the typing)
+    function chef.typed()
+      if util.menu_open and util.menu_open() then return '', NO_KEYS end
+      return typed_now()
+    end
     function chef.key_label(name) return key_label(name) end
 
     -- 7 tables saved between launches (one file per mod and name, next to the loader's log; M.data_name)
@@ -4648,17 +4779,31 @@ function M.install(ctx, L)
                       { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
   -- The layout is the panel's 5 rects and one text per column of a line ({ x, y, text, color index }); each frame I
   -- draw them through ctx.text, whose fast path takes a whole text through one pcall.
-  -- place: the "Monitor position" row (1 top right, 2 top left, 3 middle right, 4 middle left, 5 bottom right,
-  -- 6 bottom left); the game draws its HUD over anything of mine, so the player picks a spot it leaves free
-  local function pm_layout(ls, w, h, place)
+  -- place (the "Monitor position" row's choice through PM_PLACE): 1 top right, 2 top left, 3 middle right, 4 middle
+  -- left, 5 bottom right, 6 bottom left, 7 the middle of the screen, 8 Adjustable, where the player dragged it (fx, fy:
+  -- its left edge and top edge as shares of the screen, so a new resolution keeps the spot); the game draws its HUD
+  -- over anything of mine, so the player picks a spot it leaves free
+  -- the row's choices (Adjustable first) as my place numbers
+  local PM_PLACE = { 8, 1, 2, 3, 4, 5, 6, 7 }
+  local function pm_layout(ls, w, h, place, fx, fy)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
     local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
-    local right = place % 2 == 1
-    local x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
-    local y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
+    local x0, y1
+    if place == 7 then
+      x0, y1 = floor((w - pw) / 2), floor((h + ph) / 2)
+    elseif place == 8 then
+      -- (kept on the screen whole: a spot saved on a bigger screen, or a panel grown by more mods)
+      -- (never dragged yet: the middle)
+      x0 = max(0, min(w - pw, fx and floor(fx * w + 0.5) or floor((w - pw) / 2)))
+      y1 = max(min(ph, h), min(h, fy and floor(fy * h + 0.5) or floor((h + ph) / 2)))
+    else
+      local right = place % 2 == 1
+      x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
+      y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
+    end
     local b = max(1, floor(px * 0.75))
-    local out = { px = px, rects = {
+    local out = { px = px, x0 = x0, y1 = y1, pw = pw, ph = ph, bar = rh + 2 * px, rects = {
       { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
       { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
       { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
@@ -4688,10 +4833,69 @@ function M.install(ctx, L)
     end
     return out
   end
+  -- The pause screen is the one time the game shows its own mouse cursor (Window.show_cursor: its map, the chat and
+  -- the HUD never do; on the ship its menus that take the mouse do too). nil: no answer (no main window, an odd one).
+  local function game_cursor()
+    local win = api('Window.get_main_window')
+    if win == nil then return nil end
+    local v = api('Window.show_cursor', win)
+    if type(v) ~= 'boolean' then return nil end
+    return v
+  end
+  -- the game's cursor in screen pixels (from the bottom left, y up like the drawing) and whether the left button is
+  -- down, read only while that cursor shows: the axis and button indexes asked once (again every 2 s while missing),
+  -- the window's size once a second (the cursor counts the window's pixels, the drawing the screen GUI's)
+  local function pm_mouse(now, w, h)
+    local M = pm.mouse
+    if not M then M = { at = -100, res_at = -100 }; pm.mouse = M end
+    if M.cur == nil and now >= M.at then
+      M.at = now + 2
+      M.cur, M.left = api('Mouse.axis_index', 'cursor'), api('Mouse.button_index', 'left')
+      if M.cur == nil or M.left == nil then M.cur, M.left = nil, nil end
+    end
+    if M.cur == nil then return nil end
+    if now >= M.res_at then
+      local a, b = api('Application.resolution')
+      M.rw, M.rh, M.res_at = tonumber(a), tonumber(b), now + 1
+    end
+    local v = api('Mouse.axis', M.cur)
+    if v == nil then return nil end
+    local x, y = api('Vector3.to_elements', v)
+    x, y = tonumber(x), tonumber(y)
+    local rw, rh = M.rw, M.rh
+    if not (x and y and rw and rh and rw > 0 and rh > 0) then M.res_at = 0; return nil end
+    local b = api('Mouse.button', M.left)
+    return x * w / rw, y * h / rh, type(b) == 'number' and b > 0.5
+  end
+  -- the dragged spot kept in the loader's saved values (shares of the screen, 4 places)
+  local function pm_keep(lay, w, h)
+    pm.fx, pm.fy = lay.x0 / w, lay.y1 / h
+    if util.perf_put then
+      util.perf_put('perf_x', floor(pm.fx * 10000 + 0.5) / 10000)
+      util.perf_put('perf_y', floor(pm.fy * 10000 + 0.5) / 10000)
+    end
+  end
+  -- the options menu asks whether a point is the monitor's while it's drawn over the menu (or being dragged there):
+  -- the menu takes no hover or click there
+  function util.pm_over(x, y)
+    if not (pm.on and pm.over_menu and pm.rects and x) then return false end
+    if pm.drag then return true end
+    local l = pm.rects
+    return x >= l.x0 and x < l.x0 + l.pw and y <= l.y1 and y >= l.y1 - l.ph
+  end
+  -- the layout, made again only when something it depends on changed
+  local function pm_lay(w, h, native, place)
+    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place
+       or (place == 8 and (pm.lfx ~= pm.fx or pm.lfy ~= pm.fy)) then
+      pm.rects = pm_layout(pm.lines, w, h, place, pm.fx or nil, pm.fy or nil)
+      pm.w, pm.h, pm.native, pm.place = w, h, native, place
+      pm.lfx, pm.lfy = pm.fx, pm.fy
+    end
+  end
   function util.monitor_frame(now)
     local on = util.perf_row ~= nil and util.perf_row.value == true
     if on ~= pm.on then
-      pm.on, pm.lines, pm.rects = on, nil, nil
+      pm.on, pm.lines, pm.rects, pm.drag = on, nil, nil, nil
       if on then pm_reset(now) end
       log(on and 'performance monitor: on (each mod\'s average a frame, its share of the frame and its worst call; once a second)'
         or 'performance monitor: off')
@@ -4701,17 +4905,74 @@ function M.install(ctx, L)
     if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
     if not pm.lines then return end
     local t0 = L.clock()
+    -- "Missions: monitor on the pause screen only" (util.perf_pause): in a mission, drawn only while the game shows its
+    -- cursor (the numbers are still added up, so they're there the moment it opens); on the ship, as always. No
+    -- answer from the game: drawn all the time, said once. The game is asked only when its answer is used (that row
+    -- in a mission, or the Adjustable position).
+    local place = PM_PLACE[util.perf_place and tonumber(util.perf_place.value) or 2] or 1
+    local pause_only = util.perf_pause ~= nil and util.perf_pause.value == true and world.mission == true
+    local cursor
+    if pause_only or place == 8 then cursor = game_cursor() end
+    if pause_only and cursor ~= true then
+      if cursor == nil then
+        if not pm.said_pause then
+          pm.said_pause = true
+          log('performance monitor: the game does not say when its pause screen is up; the monitor shows all the time')
+        end
+      else
+        pm.drag, pm.was_down, pm.over_menu = nil, true, false
+        pm.self = pm.self + (L.clock() - t0) * 1000
+        return
+      end
+    end
     local w, h = ctx.screen()
-    -- (laid out again when the screen size or the font changes: the game's font measures differently)
+    if pm.fx == nil and util.perf_get then          -- (the dragged spot, read once)
+      pm.fx, pm.fy = tonumber(util.perf_get('perf_x')), tonumber(util.perf_get('perf_y'))
+      if not (pm.fx and pm.fy) then pm.fx, pm.fy = false, false end
+    end
+    -- (laid out again when the screen size, the font, the spot or the dragged place changes: the game's font measures
+    -- differently)
     local native = ctx.text_native and ctx.text_native() or false
-    local place = util.perf_place and tonumber(util.perf_place.value) or 1
-    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place then
-      pm.rects, pm.w, pm.h, pm.native, pm.place = pm_layout(pm.lines, w, h, place), w, h, native, place
+    pm_lay(w, h, native, place)
+    -- Position Adjustable (8): dragged by its title bar, with the game's cursor while that shows (the pause screen),
+    -- or on the ship with my options menu's cursor while the menu has the mouse (the panel is then drawn over the
+    -- menu, and the menu takes no hover or click on it: util.pm_over). Never in a mission without the pause screen
+    -- (the game shows no cursor there). A left press on the bar takes it, it follows the cursor while the button
+    -- stays down, and where it's let go is kept. A button already down as a cursor appears is no press.
+    local D = pm.drag
+    local mx, my, down, over_menu
+    if place == 8 then
+      if util.menu_mouse then
+        mx, my, down = util.menu_mouse()
+        over_menu = mx ~= nil
+      end
+      if not over_menu and cursor == true then mx, my, down = pm_mouse(now, w, h) end
+    end
+    pm.over_menu = over_menu == true
+    if mx then
+      local lay = pm.rects
+      if down and not pm.was_down and not D and mx >= lay.x0 and mx < lay.x0 + lay.pw
+         and my <= lay.y1 and my >= lay.y1 - lay.bar then
+        D = { dx = mx - lay.x0, dy = my - lay.y1 }
+        pm.drag = D
+      end
+      if D and down then
+        pm.fx, pm.fy = (mx - D.dx) / w, (my - D.dy) / h
+        pm_lay(w, h, native, place)
+      elseif D then
+        pm.drag = nil
+        pm_keep(pm.rects, w, h)
+      end
+      pm.was_down = down
+    else
+      if D then pm.drag = nil; pm_keep(pm.rects, w, h) end
+      pm.was_down = true
     end
     local cs = pm.cs or {}
     pm.cs = cs
     for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
-    local top = ctx.TOP + 940
+    -- (over the options menu while it can be dragged there: the full screen menu covers from 950, its cursor at 958)
+    local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects
     for _, r in ipairs(lay.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
     for _, t in ipairs(lay.texts) do ctx.text(t[1], t[2], t[3], lay.px, cs[t[4]], top + 2) end
@@ -4816,7 +5077,7 @@ services.sandbox = (function()
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.2.1' }
+local M = { version = '1.2.2' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -4862,12 +5123,13 @@ M.CALLS_OFF = {
   -- _owner / _is_type, objects_owned_by, other_peers, unit_synchronizer, is_ / has_ / get_ / num_), every write to what
   -- other players see is left out, and so is a call a game update adds. (Network.object_info, a game object type's
   -- field list, is a read too.) unit_synchronizer hands out the session's unit <-> game object map (UnitSynchronizer
-  -- below keeps only its lookups). game_object_field_batched is a read but stays out: it has crashed the game on
-  -- other players' objects.
+  -- below keeps only its lookups). game_object_field_batched (every field of an object at once) is a read too; it has
+  -- crashed the game on other players' objects, so each mod's copy is wrapped (sb.guard_engine): the object must
+  -- exist, and the loader learns from a crash in it (ctx.guard_read), so it can end the game once, not every launch.
   GameSession = function(f)
     f = s_lower(f)
     local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'unit_synchronizer'
-      or f == 'game_session_host' or f == 'game_object_field'
+      or f == 'game_session_host' or f == 'game_object_field' or f == 'game_object_field_batched'
       or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
@@ -4885,6 +5147,10 @@ M.CALLS_OFF = {
       or s_find(f, 'create', 1, true) or s_find(f, 'send', 1, true)) ~= nil
   end,
 }
+
+-- what a mod's key and mouse-button reads answer while the loader's options menu is open (sb.guard_engine)
+local QUIET_READS = { pressed = false, released = false, any_pressed = false, any_released = false, button = 0,
+                      keystrokes = true }
 
 local function copy(t)
   local c = {}
@@ -5405,6 +5671,51 @@ function M.install(ctx)
   end
 
   -- One mod's environment. owner: its name, for the log.
+  -- The engine reads mods may make that have ended the game in some cases, in this mod's own copy of their table:
+  -- GameSession.game_object_field_batched answers only for an object that exists (a whole number id), and goes
+  -- through the loader's guard (ctx.guard_read: skipped once it crashed a launch for this mod, learned from
+  -- otherwise). Without the guard it stays out.
+  -- (the game has GameSession only inside stingray, s3d being the same table; a capitalized global of that name, where
+  -- there is one, is the same copy)
+  function sb.guard_engine(owner, env)
+    local st = rawget(env, 'stingray')
+    local gs = (type(st) == 'table' and rawget(st, 'GameSession')) or rawget(env, 'GameSession')
+    local real = type(gs) == 'table' and rawget(gs, 'game_object_field_batched')
+    if type(real) == 'function' then
+      local guard = ctx.guard_read
+      if type(guard) ~= 'function' then rawset(gs, 'game_object_field_batched', nil)
+      else
+        local exists = rawget(gs, 'game_object_exists')
+        rawset(gs, 'game_object_field_batched', function(session, id, ...)
+          if type(id) ~= 'number' or id ~= id or id < 0 or id % 1 ~= 0 then return nil end
+          if type(exists) ~= 'function' then return nil end
+          local ok, e = pcall(exists, session, id)
+          if not ok or e ~= true then return nil end
+          return guard(owner, 'GameSession.game_object_field_batched', id, real, session, id, ...)
+        end)
+      end
+    end
+    -- While my options menu is open (ctx.menu_open), the keys and mouse buttons are the menu's: this mod's Keyboard
+    -- and Mouse reads of them answer nothing pressed (and no keystrokes), so typing a search or picking a row doesn't
+    -- fire a mod's hotkey. The axes (the cursor, the mouse's movement) answer as always.
+    local quiet = ctx.menu_open
+    if type(quiet) ~= 'function' or type(st) ~= 'table' then return end
+    for _, dev in ipairs({ 'Keyboard', 'Mouse' }) do
+      local t = rawget(st, dev)
+      if type(t) == 'table' then
+        for name, none in pairs(QUIET_READS) do
+          local f = rawget(t, name)
+          if type(f) == 'function' and (name ~= 'keystrokes' or dev == 'Keyboard') then
+            if name == 'keystrokes' then
+              rawset(t, name, function(...) if quiet() then return {} end return f(...) end)
+            else
+              rawset(t, name, function(...) if quiet() then return none end return f(...) end)
+            end
+          end
+        end
+      end
+    end
+  end
   function sb.env(owner)
     local env = setmetatable({}, env_mt)
     envs[env] = owner
@@ -5478,6 +5789,7 @@ function M.install(ctx)
       return c
     end
     for k, v in pairs(engine_names) do rawset(env, k, own(v)) end
+    sb.guard_engine(owner, env)
     -- the metatables of this mod's own newproxy(true) userdata: its own, handed back as they are
     local made, np = setmetatable({}, { __mode = 'k' }), G.newproxy
     if type(np) == 'function' then
@@ -6462,7 +6774,10 @@ function M.install(ctx)
       if not (finite(x, 1e12) and finite(y, 1e12) and finite(z, 1e12)) then return refuse(rec, 'Mouse.axis', 'unexpected answer') end
       return { x = x, y = y, z = z }
     end
+    -- (while the loader's options menu is open the keys and mouse buttons are its own: nothing pressed, no keystrokes)
+    local function quiet() return util ~= nil and util.menu_open ~= nil and util.menu_open() == true end
     function N.Mouse.button(i)
+      if quiet() then return 0 end
       local c = N.Mouse.num_buttons()
       if not c or not int(i, 0, c - 1) then return refuse(rec, 'Mouse.button', 'invalid button') end
       local v = once(rec, 'Mouse.button', i)
@@ -6494,6 +6809,7 @@ function M.install(ctx)
     end
     -- the keyboard: names only (the engine's key constants don't match its live indices)
     function N.Keyboard.keystrokes()
+      if quiet() then return {} end
       local b = 'Keyboard.keystrokes'
       local events = once(rec, b)
       if type(events) ~= 'table' or #events > 128 then return refuse(rec, b, 'unexpected answer') end
@@ -6513,6 +6829,7 @@ function M.install(ctx)
     function N.Keyboard.pressed(name)
       local b = 'Keyboard.pressed'
       if type(name) ~= 'string' or name == '' or #name > 40 then return refuse(rec, b, 'invalid button name') end
+      if quiet() then return false end
       local i = once(rec, 'Keyboard.button_index', name)
       if not int(i, 0, (once(rec, 'Keyboard.num_buttons') or 0) - 1) then return refuse(rec, b, 'unknown button') end
       return once(rec, b, i)
@@ -7991,6 +8308,35 @@ local function hold(key, on)
   if on and not held[key] then held[key] = floor(elapsed); crumb(fmt('>> %s @%d', key, held[key]))
   elseif not on and held[key] then held[key] = nil; crumb('<< ' .. key) end
 end
+-- An engine read mods may make that has ended the game in some cases (GameSession.game_object_field_batched, on other
+-- players' objects): skipped for a mod once it crashed a launch (and the mod off until it changes, as for any crash
+-- of its own); its first call on each object breadcrumbed like any first call (a game that ends in it blames it for
+-- sure), and each run of calls held as a job while it goes on (blamed if a second launch ends in it). The sandbox
+-- checks the object exists first (sandbox.lua, sb.guard_engine). tr.reads: key -> { at = the last call (s), ids = the
+-- objects already read in this world, n = how many (at most 4096 kept; emptied as a new world loads) }
+tr.reads = {}
+function tr.guard_read(owner, key, id, fn, ...)
+  local k = key_of(owner, key)
+  if skip[k] then return nil, 'skipped' end
+  local r = tr.reads[k]
+  if not r then r = { at = 0, ids = {}, n = 0 }; tr.reads[k] = r end
+  r.at = elapsed
+  hold(k, true)
+  if not r.ids[id] then
+    if r.n < 4096 then r.ids[id], r.n = true, r.n + 1 end
+    crumb('> ' .. k)
+    local a, b, c, d = pass(pcall(fn, ...))
+    crumb('< ' .. k)
+    return a, b, c, d
+  end
+  return pass(pcall(fn, ...))
+end
+-- (a run of calls ends 2 s after its last call: its hold is let go)
+function tr.guard_release()
+  for k, r in pairs(tr.reads) do
+    if held[k] and elapsed - r.at > 2 then hold(k, false) end
+  end
+end
 
 -- ------------------------------------------------------------------ discovery
 -- Patch archive layout (as my build tools write it and Arsenal deploys it): 72-byte header (0xF0000011, type
@@ -8258,6 +8604,9 @@ local function update_world()
     world.main, world.since, world.stable = main, elapsed, false
     world.checking, world.probing = false, false
     world.instance = world.instance + 1
+    -- (a new world, a new game session: its object ids start over, so a read's first call on each is breadcrumbed
+    -- again)
+    for _, r in pairs(tr.reads) do r.ids, r.n = {}, 0 end
     if was_stable then world_changed() end
   end
   if ask then world.time = type(t) == 'number' and t or -1 end
@@ -9873,9 +10222,26 @@ svc.util.budget_row = svc.loader_option('budget', { type = 'slider', label = 'Bu
 -- and the performance monitor (utilities: each mod's cost, drawn once a second's numbers are in)
 svc.util.perf_row = svc.loader_option('perf', { type = 'toggle', label = 'Performance monitor', default = false,
   section = 'monitor' })
--- (where the monitor sits: the player keeps it clear of what they want to see)
-svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label = 'Monitor position', default = 1,
-  choices = { 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left' }, section = 'monitor' })
+-- (where the monitor sits: the player keeps it clear of what they want to see; Adjustable is where they last let go
+-- of it, dragged on the pause screen or with the options menu's cursor on the ship, kept in my saved values as
+-- perf_x / perf_y)
+-- (Adjustable is the first choice: a position saved from the six-choice list (1 top right ... 6 bottom left) moves
+-- down one place once, and a saved 8 is Adjustable; perf_place_v marks it done. The default, Top right, is 2.)
+if svc.loader_get('perf_place_v') ~= 2 then
+  local old = tonumber(svc.loader_get('opt.perf_place'))
+  if old then svc.loader_put('opt.perf_place', old == 8 and 1 or old + 1) end
+  svc.loader_put('perf_place_v', 2)
+end
+svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label = 'Monitor position', default = 2,
+  choices = { 'Adjustable', 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left',
+    'Center' },
+  section = 'monitor' })
+-- (in a mission, shown only while the game's pause screen is up: nothing over the HUD while playing; on the ship as
+-- always)
+svc.util.perf_pause = svc.loader_option('perf_pause', { type = 'toggle',
+  label = 'Missions: monitor on pause screen only', default = false, section = 'monitor' })
+svc.util.perf_get, svc.util.perf_put, svc.util.menu_mouse = svc.loader_get, svc.loader_put, svc.menu_mouse
+svc.util.menu_open = svc.menu_open
 -- (the mods under their budget on one line, so the heavy ones stand out; the label names the Budget row's value)
 svc.util.perf_hide = svc.loader_option('perf_hide', { type = 'toggle', default = false, section = 'monitor',
   label = function() return fmt('Hide mods under %g ms', svc.util.budget_row and svc.util.budget_row.value or 1) end })
@@ -10469,6 +10835,7 @@ end
 local function frame(dt)
   frame_no = frame_no + 1
   if next(held) then tick() end
+  if next(tr.reads) then tr.guard_release() end
   update_world()
   if draw.nt.main or draw.nt.top or draw.nt.holding or draw.nt.dropped ~= nil or draw.nt.reclaim_frame then
     local ok, err = pcall(draw.nt_sweep, 1)
@@ -11185,7 +11552,8 @@ if not ok then log('the look-alikes failed: ' .. tr.why(err)) end
 -- through it); if it can't be set up, no loader mod starts
 do
   local bok, sb = pcall(services.sandbox.install, { G = G, io = io_, os = os_, debug = rawget(G, 'debug'), log = log,
-    DIR = DIR, GAME_DIR = services.GAME_DIR, OLD_DIR = services.OLD_DIR, FILES = FILES, LOADER = LOADER, overrides = overrides })
+    DIR = DIR, GAME_DIR = services.GAME_DIR, OLD_DIR = services.OLD_DIR, FILES = FILES, LOADER = LOADER,
+    overrides = overrides, guard_read = tr.guard_read, menu_open = function() return svc.menu_open() end })
   if bok and type(sb) == 'table' then
     svc.sandbox = sb
     log('mods run locked down: no programs, no native code or bytecode, files only in the game\'s folders (sandbox '
