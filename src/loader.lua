@@ -55,10 +55,10 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.2.2'
+local VERSION = '1.2.3'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
-local MISSION_UNITS = 5000               -- a main world bigger than this is a mission (ship ~3,600-3,800, missions 4,900-16,000)
+local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
 local PROBE_MIN = 1000                   -- a smaller world (title, loading) is never probed for mission loot
 local MISSION_LOOT = 3                   -- mission loot units that make a world a mission
 local PROBE_DROP = 0.15                  -- a mission whose units fall this far below its peak is probed (the ship?)
@@ -1356,12 +1356,14 @@ function M.install(ctx)
     end
   end
   -- On the ship (or the title screen), told by what I know, never guessed: a settled world, not being looked at again,
-  -- not a mission, and no bigger than the ship (about 3,800 units; the smallest missions are about 4,800). Anything
-  -- else counts as a mission: a world still loading, a small mission not recognized as one.
+  -- not a mission, and with a level count (the ship's few or none), else no bigger than the ship (about 3,800 units; the
+  -- smallest missions are about 4,800). Anything else counts as a mission: a world still loading, a small mission not
+  -- recognized as one.
   local SHIP_UNITS = 4300
   function nav.on_ship()
     local w = ctx.world
-    return w.stable == true and not w.checking and w.mission ~= true and (w.last_n or w.units or 0) <= SHIP_UNITS
+    return w.stable == true and not w.checking and w.mission ~= true
+      and (w.levels ~= nil or (w.last_n or w.units or 0) <= SHIP_UNITS)
   end
   function nav.mouse_on()
     local m = mouse_row.value
@@ -8519,11 +8521,13 @@ end
 -- world.id: a new one for every settled world, and when the same world's contents turn into another (the game loads
 -- the ship into the world the mission ran in). world.instance: a new one only for a new engine world; handles made in
 -- one instance (GUIs) can be kept across an id change, never across an instance change.
--- Is it a mission? A world over MISSION_UNITS always is. A smaller one is a mission when the loot probe finds mission
--- loot in it (kinds addons name with chef.mission_kinds: samples, medals and the like, which the ship never has);
--- missions under MISSION_UNITS exist (about 4,900 units, the ship about 3,600). Leaving: when a mission's unit count drops
--- PROBE_DROP below its peak I stop calling it a mission at once (no drawing on what may be the ship) and probe: loot
--- still there means it was only the mission thinning out, and it carries on as the same mission.
+-- Is it a mission? Its level count tells: hundreds of levels is a mission, one or two (the ship) or none (the title
+-- screen, loading) isn't, looked at again every 2 s. Only when the engine can't count levels do the units decide: a world
+-- over MISSION_UNITS always is a mission, a smaller one when the loot probe finds mission loot in it (kinds addons
+-- name with chef.mission_kinds: samples, medals and the like, which the ship never has). Leaving, by the units: when a
+-- mission's unit count drops PROBE_DROP below its peak I stop calling it a mission at once (no drawing on what may be
+-- the ship) and probe: loot still there means it was only the mission thinning out, and it carries on as the same
+-- mission.
 local world = { main = nil, since = 0, time = -1, time_at = 0, id = 0, instance = 0, stable = false, mission = false, units = 0,
                 busy = function() return true end }      -- busy: replaced further down (anything holding handles?)
 local mission_kinds, kinds_from = {}, {}     -- kinds_from: the addons that named them (probing stops when they're off)
@@ -8532,7 +8536,7 @@ local function world_changed()
   for _, fn in ipairs(new_world_hooks) do fn() end
 end
 local function can_probe()
-  if skip['loader|scan'] then return false end
+  if world.levels or skip['loader|scan'] then return false end       -- (the level count already tells)
   for _, a in ipairs(kinds_from) do if a.on then return true end end
   return false
 end
@@ -8577,6 +8581,19 @@ local function left_maybe(n)
     world_changed()
   end
 end
+-- The main world's level count: one or two on the ship (a second one comes and goes for a few seconds), none on the
+-- title screen or while loading, 600 to 1,100 in a mission, whatever their sizes (a mission of 4,400 units and a ship
+-- of 4,000 were seen); more than world.LEVELS is a mission. nil: the engine can't tell me (the call missing, failing
+-- or skipped after a crash in it), and the unit count and the loot probe decide instead.
+world.LEVELS = 10
+function world.levels_of(main)
+  local n, why = api('World.num_levels', main)
+  if type(n) == 'number' then return n end
+  if not world.no_levels then
+    world.no_levels = true
+    log('World.num_levels: ' .. tostring(why or ('answered ' .. type(n))) .. ' (missions told by their size and loot instead)')
+  end
+end
 local function update_world()
   local main, why = api('Application.main_world')
   if not main then
@@ -8616,21 +8633,36 @@ local function update_world()
     world_changed()
     local n = api('World.num_units', main)
     world.units = type(n) == 'number' and n or 0
-    world.mission = world.units > MISSION_UNITS
+    world.levels = world.levels_of(main)
+    if world.levels then world.mission = world.levels > world.LEVELS else world.mission = world.units > MISSION_UNITS end
     world.peak, world.probe_k, world.probe_last, world.probe_said, world.probe_done_t = world.units, 0, nil, false, nil
     world.last_n = world.units
     world.probe_at = (not world.mission and can_probe() and world.units >= PROBE_MIN) and elapsed or nil
     world.recheck, world.flip = elapsed + 2, 0
-    log(fmt('world %d: %s (%d units)', world.id, world.mission and 'mission' or
-      ((can_probe() and world.units >= PROBE_MIN) and 'not a mission yet' or 'not a mission'), world.units))
+    log(fmt('world %d: %s (%d units%s)', world.id, world.mission and 'mission' or
+      ((can_probe() and world.units >= PROBE_MIN) and 'not a mission yet' or 'not a mission'), world.units,
+      world.levels and fmt(', %d level%s', world.levels, world.levels == 1 and '' or 's') or ''))
   elseif world.stable and elapsed >= (world.recheck or 0) then
-    -- The game keeps the same main world after a mission (the ship is loaded into it), so I look at its size every
+    -- The game keeps the same main world after a mission (the ship is loaded into it), so I look at it again every
     -- 2 s; a change of verdict makes it a new world as far as addons are concerned (new id; the same instance).
     world.recheck = elapsed + 2
     local n = api('World.num_units', main)
     if type(n) ~= 'number' or world.probing then return end
     local before = world.last_n or n
     world.last_n = n
+    local lv = world.levels_of(main)
+    world.levels = lv
+    if lv then
+      -- the level count decides, the moment it changes (the ship loaded into the mission's world: one level again)
+      local m = lv > world.LEVELS
+      if m ~= (world.mission == true) then
+        world.id, world.units, world.mission, world.peak, world.checking, world.flip = world.id + 1, n, m, n, false, 0
+        log(fmt('world %d: %s (%d units, %d level%s; the same world, its contents changed)', world.id,
+          world.mission and 'mission' or 'not a mission', n, lv, lv == 1 and '' or 's'))
+        world_changed()
+      end
+      return
+    end
     if world.mission then
       if n > (world.peak or 0) then world.peak = n end
       if not world.checking and shrank(n, before) then
