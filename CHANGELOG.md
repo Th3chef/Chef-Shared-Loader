@@ -12,8 +12,7 @@
   jumps a frame late.
 - On the pause screen, the menu's mouse cursor follows the real mouse (it moved only with the mouse's movement
   there, so it drifted off the game's cursor).
-- Chef Shared Loader's own entry is always first in the list of mods, under a thin divider; the mods follow in
-  alphabetical order.
+- Chef Shared Loader's own entry is always first in the list of mods; the mods follow in alphabetical order.
 - Mods' hotkeys no longer fire while the menu is open: typing a search (an L, say) doesn't switch a mod's light on
   and off. Mods read no key presses, mouse clicks or typed text while it's open.
 - Search: the hints say ENTER SEARCH, BKSP ERASE and / ESC EXIT; `/` again leaves a search, like Escape. Delete
