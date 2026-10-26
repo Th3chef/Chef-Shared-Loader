@@ -55,7 +55,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.2.3'
+local VERSION = '1.2.4'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
@@ -1231,7 +1231,11 @@ function M.install(ctx)
     menu = true, section = 'menu' })
   -- (where the compact panel sits: the player keeps it clear of what they want to see)
   local menu_place = add_row('loader', loader_mod, ctx.LOADER, 'menu_place', { type = 'choice', label = 'Menu position (Compact look)',
-    choices = { 'Left', 'Center', 'Right' }, default = 1, section = 'menu' })
+    choices = { 'Left', 'Center', 'Right' }, default = 1, section = 'compact' })
+  -- (how see-through the compact panel is, text included: 100 is as it always was, 30 the least, so it's never lost;
+  -- the full screen look stays opaque)
+  local menu_alpha = add_row('loader', loader_mod, ctx.LOADER, 'menu_alpha', { type = 'slider',
+    label = 'Menu opacity % (Compact look)', min = 30, max = 100, step = 10, default = 100, section = 'compact' })
   local reload_key = nil
   -- more rows in the loader's own group (the frame budget)
   function svc.loader_option(id, spec)
@@ -1243,7 +1247,8 @@ function M.install(ctx)
   -- every text of my options menu (the mods' titles, the options' labels and choices, the headings), for a language
   -- to note the ones it has no entry for; and the version of that list (it changes with the menu's layout)
   function svc.option_texts()
-    local out = { 'MENU', 'PERFORMANCE', 'PERMISSIONS', 'MOD OPTIONS', 'ALL MODS', 'ALSO USED BY:' }
+    local out = { 'MENU', 'COMPACT LOOK', 'CONTROLS', 'PERFORMANCE', 'MONITOR LOOK', 'PERMISSIONS', 'MOD OPTIONS',
+                  'ALL MODS', 'ALSO USED BY:' }
     for _, g in ipairs(groups) do
       if #g.rows > 0 then
         out[#out + 1] = text_of(g.title)
@@ -1277,9 +1282,9 @@ function M.install(ctx)
   local look_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_look', { type = 'choice', label = 'Menu look',
     choices = { 'Full screen', 'Compact' }, default = 1, section = 'menu' })
   local mouse_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_mouse', { type = 'choice', label = 'Mouse in this menu',
-    choices = { 'On the ship', 'Always', 'Off' }, default = 1, section = 'menu' })
+    choices = { 'On the ship', 'Always', 'Off' }, default = 1, section = 'controls' })
   local pad_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_pad', { type = 'choice', label = 'Controller in this menu',
-    choices = { 'On, hold touchpad / View 2 s to open', 'On', 'Off' }, default = 1, section = 'menu' })
+    choices = { 'On, hold touchpad / View 2 s to open', 'On', 'Off' }, default = 1, section = 'controls' })
   local nav = { pad = nil, look_at = 0, ix = {}, held = {}, rep = {}, act = {}, ps = false,
                 mx = nil, my = nil, moved = false, wheel = 0, mouse = false, axes = nil, lmb = true, rmb = true,
                 click = false, rclick = false, hits = {}, nhits = 0, ltop = 1 }
@@ -1684,9 +1689,14 @@ function M.install(ctx)
   local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
   -- A group's rows as lines. My own rows carry a section: they're shown by section, each under its heading, in the
   -- order below (any other row of a section after those, in the order it was made).
-  local SECTIONS = { menu = { 1, 'MENU' }, monitor = { 2, 'PERFORMANCE' }, permissions = { 3, 'PERMISSIONS' } }
-  local ORDER = { menu_key = 1, menu_look = 2, menu_place = 3, menu_mouse = 4, menu_pad = 5, font = 6, lang = 7,
-                  perf = 1, perf_place = 2, budget = 3, perf_hide = 4 }
+  -- (three headings, two with small subheadings under them (sub): the menu, how its compact panel looks and how it's
+  -- driven; the monitor's numbers, then how the monitor looks; the permissions. A subheading is drawn indented and
+  -- dimmer, its rows indented with it)
+  local SECTIONS = { menu = { 1, 'MENU' }, compact = { 2, 'COMPACT LOOK', sub = true }, controls = { 3, 'CONTROLS', sub = true },
+                     monitor = { 4, 'PERFORMANCE' }, monitor_look = { 5, 'MONITOR LOOK', sub = true },
+                     permissions = { 6, 'PERMISSIONS' } }
+  local ORDER = { menu_key = 1, menu_look = 2, lang = 3, menu_place = 1, menu_alpha = 2, menu_mouse = 1,
+                  menu_pad = 2, perf = 1, budget = 2, perf_hide = 3, perf_place = 1, perf_alpha = 2, perf_pause = 3 }
   local function section_of(r) return r.owner == 'loader' and SECTIONS[r.spec.section] or nil end
   local function group_lines(g, out)
     local rows, any = {}, false
@@ -1706,9 +1716,9 @@ function M.install(ctx)
     local last = nil
     for _, r in ipairs(rows) do
       local sec = section_of(r)
-      if sec and sec ~= last then out[#out + 1] = { head = true, text = sec[2] } end
+      if sec and sec ~= last then out[#out + 1] = { head = true, text = sec[2], sub = sec.sub } end
       last = sec
-      out[#out + 1] = { row = r }
+      out[#out + 1] = { row = r, indent = sec ~= nil and sec.sub == true }
     end
     return out
   end
@@ -1932,6 +1942,10 @@ function M.install(ctx)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * ((s.step or 0) > 0 and s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and act('enter') then menu.capture = r end
   end
+  -- ("Menu opacity % (Compact look)": every color of the compact panel has its alpha scaled by it, menu_op set each
+  -- frame it's drawn; my cursor, drawn on its own, stays solid)
+  local menu_op = 1
+  local function menu_col(r, g, bl, a) return ctx.color(r, g, bl, floor(a * menu_op + 0.5)) end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
   -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
   local function menu_draw(ls)
@@ -1954,9 +1968,11 @@ function M.install(ctx)
     local hb = rh + 2 * px                     -- the title bar
     local ph = hb + shown * rh + 3 * px + rh + 2 * px
     local y0 = floor(h * 0.85)                 -- the panel's top edge (y grows upward)
-    local col = ctx.color
+    menu_op = (menu_alpha and tonumber(menu_alpha.value) or 100) / 100
+    local col = menu_col
     local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
     local white, green, gray = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255)
+    local subc = col(204, 186, 80, 255)        -- a subheading: a dimmer yellow
     local tx = 7 * px                          -- the text's left inset
     local function midy(y, hgt) return y + floor((hgt - 7 * px) / 2) end
     -- text cut to the room it has, measured (the game's font is proportional), in the font's characters
@@ -1986,7 +2002,9 @@ function M.install(ctx)
       end
       local ty = midy(y, rh)
       if not l.head then nav.hit(x0 + b, y, pw - 2 * b, rh, 'line', i) end
-      if l.head then
+      if l.head and l.sub then
+        ctx.text(x0 + tx + 4 * px, ty, fit(P(l.text), px, inner - 4 * px), px, subc, top + 2)
+      elseif l.head then
         ctx.text(x0 + tx, ty, fit(P(l.text), px, inner), px, yellow, top + 2)
       elseif l.back then
         ctx.text(x0 + tx + 2 * px, ty, fit(P(l.text), px, inner - 2 * px), px, yellow, top + 2)
@@ -2004,7 +2022,8 @@ function M.install(ctx)
         local v = fit(P(value_text(r, users)), px, floor(inner * 0.4))
         local vw = tw(v, px)
         local vx = x0 + pw - tx - vw
-        ctx.text(x0 + tx + 2 * px, ty, fit(P(text_of(r.spec.label or r.id)), px, vx - 6 * px - (x0 + tx + 2 * px)), px, white, top + 2)
+        local lx = x0 + tx + (l.indent and 6 or 2) * px   -- (a subheading's rows indented with it)
+        ctx.text(lx, ty, fit(P(text_of(r.spec.label or r.id)), px, vx - 6 * px - lx), px, white, top + 2)
         if r.spec.type == 'key' and menu.capture ~= r then
           -- a key: a light chip with the key's name in ink
           ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, white, top + 2)
@@ -2042,6 +2061,7 @@ function M.install(ctx)
     local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
     local white, green, gray, dim = col(232, 232, 226, 255), col(143, 224, 143, 255), col(125, 135, 127, 255), col(80, 88, 82, 255)
     local panel, line, glow = col(17, 21, 19, 255), col(255, 231, 16, 70), col(255, 231, 16, 42)
+    local subc = col(204, 186, 80, 255)        -- a subheading: a dimmer yellow
     local P = ctx.text_native and ctx.text_native() and caps or plain
     local fit, tw = ctx.text_fit or fit_cells, ctx.text_width
     local function midy(y, hgt, p) return y + floor((hgt - 7 * (p or px)) / 2) end
@@ -2154,8 +2174,10 @@ function M.install(ctx)
       local l = rows[i]
       local sel = not listing and i == menu.sel and not l.head
       if sel then lit(rx, rwid, y) end
-      local ty, x = midy(y, rh), rx + 6 * px
-      if l.head then
+      local ty, x = midy(y, rh), rx + (l.indent and 12 or 6) * px   -- (a subheading's rows indented with it)
+      if l.head and l.sub then
+        ctx.text(rx + 10 * px, ty, fit(P(text_of(l.text)), px, inner - 6 * px), px, subc, top + 4)
+      elseif l.head then
         ctx.text(rx + 4 * px, ty, fit(P(text_of(l.text)), px, inner), px, yellow, top + 4)
       elseif l.back then
         ctx.text(x, ty, fit(P(l.text), px, inner), px, yellow, top + 4)
@@ -4907,12 +4929,13 @@ function M.install(ctx, L)
     if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
     if not pm.lines then return end
     local t0 = L.clock()
-    -- "Missions: monitor on the pause screen only" (util.perf_pause): in a mission, drawn only while the game shows its
-    -- cursor (the numbers are still added up, so they're there the moment it opens); on the ship, as always. No
-    -- answer from the game: drawn all the time, said once. The game is asked only when its answer is used (that row
-    -- in a mission, or the Adjustable position).
+    -- "Monitor on pause screen only" (util.perf_pause: 1 Off, 2 Missions, 3 Always): drawn only while the game shows
+    -- its cursor (the numbers are still added up, so they're there the moment it opens), in a mission or everywhere;
+    -- Missions leaves the ship as always. No answer from the game: drawn all the time, said once. The game is asked
+    -- only when its answer is used (that row on, or the Adjustable position).
     local place = PM_PLACE[util.perf_place and tonumber(util.perf_place.value) or 2] or 1
-    local pause_only = util.perf_pause ~= nil and util.perf_pause.value == true and world.mission == true
+    local pp = util.perf_pause and tonumber(util.perf_pause.value) or 1
+    local pause_only = pp == 3 or (pp == 2 and world.mission == true)
     local cursor
     if pause_only or place == 8 then cursor = game_cursor() end
     if pause_only and cursor ~= true then
@@ -4972,7 +4995,9 @@ function M.install(ctx, L)
     end
     local cs = pm.cs or {}
     pm.cs = cs
-    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
+    -- ("Monitor opacity (%)": every color's alpha scaled by it, the panel and its text alike)
+    local op = (util.perf_alpha and tonumber(util.perf_alpha.value) or 100) / 100
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], floor(c[4] * op + 0.5)) end
     -- (over the options menu while it can be dragged there: the full screen menu covers from 950, its cursor at 958)
     local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects
@@ -9518,8 +9543,7 @@ end
 -- words, size, place or color change. Slots a frame didn't use are removed at the start of the next. Sizes and widths
 -- come from Gui.text_extents: the cap height of 'H' sets the size (the pixel font's 7 cells), each letter's advance is
 -- measured once. All caps, as the pixel font and the game's HUD. The pixel font stays for when none of these fonts is
--- loaded, text calls fail, a text call ended the game (skipped from the next launch on), or the player turns it off
--- (F9 > Chef Shared Loader > Game font).
+-- loaded, text calls fail, or a text call ended the game (skipped from the next launch on).
 do
   -- UTF-8: one character (ASCII, or a lead byte and its continuation bytes) and a multibyte one; utf8_clean keeps the
   -- well-formed characters and makes every other byte a '?'; utf8_floor: the last character boundary at or before a
@@ -9675,7 +9699,7 @@ do
   function draw.nt_on()
     if nt.frame == frame_no then return nt.on end
     nt.frame, nt.on = frame_no, false
-    if nt.dead or not world.stable or skipped() or (nt.row and nt.row.value == false) then return false end
+    if nt.dead or not world.stable or skipped() then return false end
     -- the font in use is asked about again every 2 s (and in every frame that makes or changes a text, draw.nt_loaded):
     -- one the game let go of (a package unloaded) is never drawn with
     if nt.font and elapsed >= nt.check_at + 2 then
@@ -9916,7 +9940,7 @@ do
     end
     -- while texts are up, the engine draws them with the font every frame: it's checked every frame they're there
     if when == 1 and nt.font and ((nt.main and nt.main.max > 0) or (nt.top and nt.top.max > 0)) then draw.nt_loaded() end
-    local off = nt.dead or (nt.row and nt.row.value == false) or skipped() or not nt.font
+    local off = nt.dead or skipped() or not nt.font
     for _, which in ipairs(nt.WHICH) do
       local t = nt[which]
       if t then
@@ -10267,18 +10291,25 @@ end
 svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label = 'Monitor position', default = 2,
   choices = { 'Adjustable', 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left',
     'Center' },
-  section = 'monitor' })
--- (in a mission, shown only while the game's pause screen is up: nothing over the HUD while playing; on the ship as
--- always)
-svc.util.perf_pause = svc.loader_option('perf_pause', { type = 'toggle',
-  label = 'Missions: monitor on pause screen only', default = false, section = 'monitor' })
+  section = 'monitor_look' })
+-- (how see-through the whole panel is, text included: 100 is as it always was)
+svc.util.perf_alpha = svc.loader_option('perf_alpha', { type = 'slider', label = 'Monitor opacity (%)', min = 10,
+  max = 100, step = 10, default = 100, section = 'monitor_look' })
+-- (shown only while the game's pause screen is up: nothing over the HUD while playing. Off; in missions (on the ship
+-- as always); or always, the ship too. It was an on/off row for missions: a saved on is Missions, a saved off is Off)
+do
+  local old = svc.loader_get('opt.perf_pause')
+  if type(old) == 'boolean' then svc.loader_put('opt.perf_pause', old and 2 or nil) end
+  -- (the Game font row is gone, the game's font always used when it can be: what it saved is cleared)
+  if svc.loader_get('opt.font') ~= nil then svc.loader_put('opt.font', nil) end
+end
+svc.util.perf_pause = svc.loader_option('perf_pause', { type = 'choice', label = 'Monitor on pause screen only',
+  choices = { 'Off', 'Missions', 'Always' }, default = 1, section = 'monitor_look' })
 svc.util.perf_get, svc.util.perf_put, svc.util.menu_mouse = svc.loader_get, svc.loader_put, svc.menu_mouse
 svc.util.menu_open = svc.menu_open
 -- (the mods under their budget on one line, so the heavy ones stand out; the label names the Budget row's value)
 svc.util.perf_hide = svc.loader_option('perf_hide', { type = 'toggle', default = false, section = 'monitor',
   label = function() return fmt('Hide mods under %g ms', svc.util.budget_row and svc.util.budget_row.value or 1) end })
--- and the font (on: the game's own, off: the pixel font)
-draw.nt.row = svc.loader_option('font', { type = 'toggle', label = 'Game font', default = true, section = 'menu' })
 -- the HD2Runtime look-alike (src/chef_loader/runtime.lua): its callbacks run through the mod's own hooks (a.rt)
 svc.runtime = services.runtime.install({ log = log, guarded = guarded, fn_of = fn_of, G = G, DIR = DIR,
   VERSION = VERSION, util = svc.util, frame = function() return frame_no end, now = function() return elapsed end,
