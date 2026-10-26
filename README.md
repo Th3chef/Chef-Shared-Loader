@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.2.2.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.2.3.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -18,7 +18,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.2.2
+- **Version:** 1.2.3
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -162,8 +162,9 @@ exactly one of these:
 - **Worlds:** engine handles (units, GUIs, cameras) are dropped whenever the main world changes, and nothing made in
   one world is used in the next.
   - **Settled:** a world counts as settled after 3 s.
-  - **Mission:** it counts as a mission above 5,000 units, or when mods' mission loot kinds are found in it. The ship
-    is about 3,600 to 3,800 units.
+  - **Mission:** it counts as a mission when it has more than 10 levels (the ship has one or two, a mission hundreds),
+    whatever its size. Only if the engine can't count levels: above 5,000 units, or when mods' mission loot kinds are
+    found in it.
   - **Unit scan:** spread over frames at 1,500 units a frame. It runs only while a mod watches unit kinds.
 
 ## Security model
@@ -367,7 +368,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.2.2 starting`
+- `==== Chef Shared Loader 1.2.3 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -425,7 +426,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.2 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.2.3 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build

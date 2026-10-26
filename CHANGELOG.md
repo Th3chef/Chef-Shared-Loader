@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3
+
+- Small missions count as missions: the loader now tells a mission from the ship by the world's level count (the ship
+  has one or two, a mission hundreds) instead of its size. Some missions (bots on Trivial, for example) are smaller than
+  a well-upgraded ship, so mods that only run in missions never started in them, unless a mod that names mission loot
+  (Treasure Radar) was installed too.
+- The F9 menu tells the ship the same way, so a big ship no longer counts as a mission for its mouse and full-screen
+  layout.
+- For mod authors: `chef.mission_kinds` is only used if the engine can't count levels.
+
 ## 1.2.2
 
 **The options menu**
