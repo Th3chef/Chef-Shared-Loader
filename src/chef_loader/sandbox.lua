@@ -24,7 +24,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.2.1' }
+local M = { version = '1.2.2' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -70,12 +70,13 @@ M.CALLS_OFF = {
   -- _owner / _is_type, objects_owned_by, other_peers, unit_synchronizer, is_ / has_ / get_ / num_), every write to what
   -- other players see is left out, and so is a call a game update adds. (Network.object_info, a game object type's
   -- field list, is a read too.) unit_synchronizer hands out the session's unit <-> game object map (UnitSynchronizer
-  -- below keeps only its lookups). game_object_field_batched is a read but stays out: it has crashed the game on
-  -- other players' objects.
+  -- below keeps only its lookups). game_object_field_batched (every field of an object at once) is a read too; it has
+  -- crashed the game on other players' objects, so each mod's copy is wrapped (sb.guard_engine): the object must
+  -- exist, and the loader learns from a crash in it (ctx.guard_read), so it can end the game once, not every launch.
   GameSession = function(f)
     f = s_lower(f)
     local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'unit_synchronizer'
-      or f == 'game_session_host' or f == 'game_object_field'
+      or f == 'game_session_host' or f == 'game_object_field' or f == 'game_object_field_batched'
       or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
     if not read then return true end
@@ -93,6 +94,10 @@ M.CALLS_OFF = {
       or s_find(f, 'create', 1, true) or s_find(f, 'send', 1, true)) ~= nil
   end,
 }
+
+-- what a mod's key and mouse-button reads answer while the loader's options menu is open (sb.guard_engine)
+local QUIET_READS = { pressed = false, released = false, any_pressed = false, any_released = false, button = 0,
+                      keystrokes = true }
 
 local function copy(t)
   local c = {}
@@ -613,6 +618,51 @@ function M.install(ctx)
   end
 
   -- One mod's environment. owner: its name, for the log.
+  -- The engine reads mods may make that have ended the game in some cases, in this mod's own copy of their table:
+  -- GameSession.game_object_field_batched answers only for an object that exists (a whole number id), and goes
+  -- through the loader's guard (ctx.guard_read: skipped once it crashed a launch for this mod, learned from
+  -- otherwise). Without the guard it stays out.
+  -- (the game has GameSession only inside stingray, s3d being the same table; a capitalized global of that name, where
+  -- there is one, is the same copy)
+  function sb.guard_engine(owner, env)
+    local st = rawget(env, 'stingray')
+    local gs = (type(st) == 'table' and rawget(st, 'GameSession')) or rawget(env, 'GameSession')
+    local real = type(gs) == 'table' and rawget(gs, 'game_object_field_batched')
+    if type(real) == 'function' then
+      local guard = ctx.guard_read
+      if type(guard) ~= 'function' then rawset(gs, 'game_object_field_batched', nil)
+      else
+        local exists = rawget(gs, 'game_object_exists')
+        rawset(gs, 'game_object_field_batched', function(session, id, ...)
+          if type(id) ~= 'number' or id ~= id or id < 0 or id % 1 ~= 0 then return nil end
+          if type(exists) ~= 'function' then return nil end
+          local ok, e = pcall(exists, session, id)
+          if not ok or e ~= true then return nil end
+          return guard(owner, 'GameSession.game_object_field_batched', id, real, session, id, ...)
+        end)
+      end
+    end
+    -- While my options menu is open (ctx.menu_open), the keys and mouse buttons are the menu's: this mod's Keyboard
+    -- and Mouse reads of them answer nothing pressed (and no keystrokes), so typing a search or picking a row doesn't
+    -- fire a mod's hotkey. The axes (the cursor, the mouse's movement) answer as always.
+    local quiet = ctx.menu_open
+    if type(quiet) ~= 'function' or type(st) ~= 'table' then return end
+    for _, dev in ipairs({ 'Keyboard', 'Mouse' }) do
+      local t = rawget(st, dev)
+      if type(t) == 'table' then
+        for name, none in pairs(QUIET_READS) do
+          local f = rawget(t, name)
+          if type(f) == 'function' and (name ~= 'keystrokes' or dev == 'Keyboard') then
+            if name == 'keystrokes' then
+              rawset(t, name, function(...) if quiet() then return {} end return f(...) end)
+            else
+              rawset(t, name, function(...) if quiet() then return none end return f(...) end)
+            end
+          end
+        end
+      end
+    end
+  end
   function sb.env(owner)
     local env = setmetatable({}, env_mt)
     envs[env] = owner
@@ -686,6 +736,7 @@ function M.install(ctx)
       return c
     end
     for k, v in pairs(engine_names) do rawset(env, k, own(v)) end
+    sb.guard_engine(owner, env)
     -- the metatables of this mod's own newproxy(true) userdata: its own, handed back as they are
     local made, np = setmetatable({}, { __mode = 'k' }), G.newproxy
     if type(np) == 'function' then

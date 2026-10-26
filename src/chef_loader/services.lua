@@ -77,6 +77,94 @@ local function fit_cells(s, px, maxw)
   return #s > n and s:sub(1, math.max(0, n)) or s
 end
 
+-- The menu's hint lines, made once, as pairs: the keys, each drawn as a light chip like the option rows' keys (false:
+-- the menu's own key, named when drawn), and what they do. A pair is drawn whole or not at all; opt: a pair left out
+-- when the whole line doesn't fit. Each key and word is translated on its own.
+local KEY_NOW = false
+local HINTS = {
+  capture_default = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'DEFAULT' } },
+  capture_none = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'NONE' } },
+  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ENTER', word = 'SEARCH' }, { 'BKSP', word = 'ERASE' },
+             { '/', 'ESC', word = 'EXIT' } },
+  group = { { 'ARROWS', word = 'MOVE', opt = true }, { 'ENTER', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
+            { 'BKSP', word = 'BACK' }, { 'ESC', word = 'CLOSE' } },
+  list = { { 'ARROWS', word = 'MOVE', opt = true }, { 'ENTER', word = 'OPEN' }, { '/', word = 'SEARCH' },
+           { KEY_NOW, word = 'CLOSE' } },
+  mouse = { { 'CLICK', word = 'PICK' }, { '<', '>', word = 'CHANGE' }, { 'RIGHT CLICK', word = 'BACK' },
+            { 'WHEEL', word = 'SCROLL' }, { KEY_NOW, word = 'CLOSE' } },
+}
+-- A hint line from x (y its row's bottom, rh its height) up to x_end: in a pair its keys a little apart and the word
+-- close after them, the next pair further off; a chip is at least as wide as a capital letter. When the whole line
+-- doesn't fit, the optional pairs go, then the gaps narrow (a pair's word still closer to its keys than the next
+-- pair); past that, the pairs that don't fit are left off the end.
+-- (each hint text's width, measured once per measure, font and size: the line is laid out every frame the menu is
+-- open)
+local HINT_W = setmetatable({}, { __mode = 'k' })
+local function hint_line(ctx, x, y, rh, px, x_end, pairs_, key, word_c, chip_c, ink, layer, P)
+  local by_fn = HINT_W[ctx.text_width]
+  if not by_fn then by_fn = {}; HINT_W[ctx.text_width] = by_fn end
+  local font = ctx.text_native and ctx.text_native() and 'native' or 'mine'
+  local by_font = by_fn[font]
+  if not by_font then by_font = {}; by_fn[font] = by_font end
+  local known = by_font[px]
+  if not known then known = {}; by_font[px] = known end
+  local function tw(t)
+    local w = known[t]
+    if not w then
+      w = ctx.text_width(t, px)
+      if type(w) == 'number' then known[t] = w end
+    end
+    return w
+  end
+  local ty = y + math.floor((rh - 7 * px) / 2)
+  local function chip_w(k) return math.max(tw(P(k or key or '')), 5 * px) + 4 * px end
+  local wgap = 6 * px                                -- (between a pair's keys and its word)
+  local function pair_w(pr)                          -- (its width, the gap after it not counted)
+    local w = 0
+    for k = 1, #pr do w = w + chip_w(pr[k]) + (k > 1 and 3 * px or 0) end
+    if pr.word then w = w + (#pr > 0 and wgap or 0) + tw(P(pr.word)) end
+    return w
+  end
+  local function line_w(with_opt, gap)
+    local w, any = 0, false
+    for _, pr in ipairs(pairs_) do
+      if with_opt or not pr.opt then w = w + (any and gap or 0) + pair_w(pr); any = true end
+    end
+    return w
+  end
+  local room = x_end - x
+  local with_opt, gap = true, 12 * px
+  if line_w(true, gap) > room then
+    with_opt = false
+    if line_w(false, gap) > room then gap, wgap = 8 * px, 4 * px end
+  end
+  local first = true
+  for _, pr in ipairs(pairs_) do
+    if with_opt or not pr.opt then
+      local pw = pair_w(pr)
+      if (first and 0 or gap) + pw > x_end - x then break end
+      if not first then x = x + gap end
+      first = false
+      for k = 1, #pr do
+        local t = P(pr[k] or key or '')
+        local w = tw(t)
+        local cw = math.max(w, 5 * px)
+        if k > 1 then x = x + 3 * px end
+        ctx.rect(x, y + 2 * px, cw + 4 * px, rh - 4 * px, chip_c, layer)
+        ctx.text(x + 2 * px + math.floor((cw - w) / 2), ty, t, px, ink, layer + 1)
+        x = x + cw + 4 * px
+      end
+      if pr.word then
+        if #pr > 0 then x = x + wgap end
+        local t = P(pr.word)
+        ctx.text(x, ty, t, px, word_c, layer)
+        x = x + tw(t)
+      end
+    end
+  end
+  return x
+end
+
 -- A mod's error as text for the log. tostring alone can raise (an error object whose __tostring errors or doesn't
 -- return a string), and that must never stop the other mods' callbacks.
 local function err_text(e)
@@ -817,9 +905,22 @@ function M.install(ctx)
       local x, y = eng('Vector3.to_elements', v)
       return tonumber(x) or 0, tonumber(y) or 0
     end
-    nav.hold_take()
+    -- (the game showing its own cursor, its pause screen: the cursor axis is where the mouse really is, and the game
+    -- turns no camera with it; my cursor sits on it, and the mouse isn't held)
+    local win = eng('Window.get_main_window')
+    local shown = win ~= nil and eng('Window.show_cursor', win) == true
+    nav.game_cursor = shown                             -- (then the game's own cursor is the one drawn: not mine)
     local H = nav.hold
-    if H.on or H.other then
+    if not shown then nav.hold_take() end
+    if shown then
+      if H.on then nav.hold_give() end
+      local cx, cy = nav.cursor_at(w, h)
+      if cx then
+        nav.moved = cx ~= nav.mx or cy ~= nav.my
+        nav.mx, nav.my = cx, cy
+      end
+      H.px, H.py = nil, nil                             -- (held again later: from a fresh sample, no jump)
+    elseif H.on or H.other then
       -- (held, by me or another mod: the delta reads nothing now; the cursor axis's movement moves my cursor. The game
       -- puts its hidden cursor back in the middle of the window when it moves far, so a frame whose cursor lands in the
       -- middle, or jumps more than a third of the screen, moves nothing. Ten frames running with no usable cursor (out
@@ -875,6 +976,7 @@ function M.install(ctx)
   function nav.under()
     local x, y, H = nav.mx, nav.my, nav.hits
     if not (nav.mouse and x) then return nil end
+    if svc.util and svc.util.pm_over and svc.util.pm_over(x, y) then return nil end   -- (the monitor drawn over me)
     for j = nav.nhits, 1, -1 do
       local b = (j - 1) * 6
       if x >= H[b + 1] and x < H[b + 1] + H[b + 3] and y >= H[b + 2] and y < H[b + 2] + H[b + 4] then
@@ -971,7 +1073,7 @@ function M.install(ctx)
   end
   -- the cursor: an arrow, ink edged
   function nav.draw_cursor(top, h)
-    if not (nav.mouse and nav.mx) then return end
+    if not (nav.mouse and nav.mx) or nav.game_cursor then return end
     local c = max(2, floor(h / 400 + 0.5))
     local x, y, col = floor(nav.mx), floor(nav.my), ctx.color
     local edge, fill = col(17, 17, 17, 255), col(255, 231, 16, 255)
@@ -991,7 +1093,9 @@ function M.install(ctx)
     if sorted_cache.ver == ver.layout then return sorted_cache.gs end
     local gs = {}
     for _, g in ipairs(groups) do if #g.rows > 0 then gs[#gs + 1] = g end end
+    -- (mine first, under a divider; the mods in alphabetical order after it)
     table.sort(gs, function(a, b)
+      if (a.mod == loader_mod) ~= (b.mod == loader_mod) then return a.mod == loader_mod end
       local ta, tb = text_of(a.title):lower(), text_of(b.title):lower()
       if ta ~= tb then return ta < tb end
       return a.mod < b.mod
@@ -1127,8 +1231,9 @@ function M.install(ctx)
       end
     end
   end
-  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace takes one off, Enter keeps it, Escape
-  -- clears it (the typed text comes from Keyboard.keystrokes, through the utilities)
+  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace (or Delete) takes one off, Enter keeps
+  -- it (the list filtered by it), '/' again or Escape leaves it (the typed text comes from Keyboard.keystrokes,
+  -- through the utilities)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
@@ -1139,9 +1244,12 @@ function M.install(ctx)
     for ch in typed:gmatch('[%w ]') do
       if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
+    if pressed('delete') or pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
     if pressed('enter') then menu.typing = false end
-    if pressed('escape') then menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1 end
+    -- ('/' again or Escape leaves the search: the whole list back)
+    if typed:find('/', 1, true) or pressed('escape') then
+      menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1
+    end
     return true
   end
   -- a mod opened (from the list's line `back`): the cursor on its first row, past any heading
@@ -1310,6 +1418,10 @@ function M.install(ctx)
         local aw = tw('>', px)
         ctx.text(x0 + tx + 2 * px, ty, fit(P(text_of(l.text)), px, inner - 2 * px - aw - 4 * px), px, white, top + 2)
         ctx.text(x0 + pw - tx - aw, ty, '>', px, green, top + 2)
+        -- (a thin line under my own entry, between it and the mods)
+        if l.pick.mod == loader_mod and ls[i + 1] then
+          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+        end
       else
         local r = l.row
         -- the value first (at most 40% of the row), then the label in what's left
@@ -1330,12 +1442,15 @@ function M.install(ctx)
     -- the hints under a thin line
     ctx.rect(x0 + b, y0 - ph + rh + 2 * px, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
     local clash = clash_hint(ls[menu.sel], users)
-    local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
-      or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-      or (clash and clash_drawn(clash, P))
-      or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK')
-      or ('ARROWS  ENTER OPEN  / SEARCH  ' .. (svc.util and svc.util.key_label(menu_key.value) or menu_key.value) .. ' CLOSE')
-    ctx.text(x0 + tx, midy(y0 - ph + px, rh), fit(P(hint), px, inner), px, gray, top + 2)
+    local hy = y0 - ph + px
+    if clash and not menu.capture and not menu.typing then
+      ctx.text(x0 + tx, midy(hy, rh), fit(clash_drawn(clash, P), px, inner), px, yellow, top + 2)
+    else
+      local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
+        or (menu.typing and HINTS.typing) or ((menu.group or menu.search ~= '') and HINTS.group) or HINTS.list
+      hint_line(ctx, x0 + tx, hy, rh, px, x0 + tx + inner, segs,
+        svc.util and svc.util.key_label(menu_key.value) or menu_key.value, white, white, ink, top + 2, P)
+    end
     nav.draw_cursor(top, h)
   end
   -- The full screen look: an opaque terminal, the mods on the left, the open mod's options on the right (at the list
@@ -1406,6 +1521,8 @@ function M.install(ctx)
     end
     local users, gs = key_users(), sorted_groups()
     local listing = not menu.group and menu.search == ''       -- at the list of mods the lines are the mods
+    -- (the thin line under my own entry, between it and the mods)
+    local function divider(dx, dy, dw) ctx.rect(dx, dy, dw, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 4) end
     -- the left pane: the mods (at the list, the lines themselves; else every mod, the open one lit, a click opens another)
     pane(lx, lw, 'MODS', tostring(#gs))
     local y = py1 - rh - 4 * px - rh
@@ -1419,6 +1536,7 @@ function M.install(ctx)
         ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(l.text)), px, lw - 16 * px - nw), px, i == menu.sel and yellow or white, top + 4)
         ctx.text(lx + lw - 5 * px - nw, midy(y, rh), n, px, gray, top + 4)
         nav.hit(lx, y, lw, rh, 'line', i)
+        if l.pick.mod == loader_mod and ls[i + 1] then divider(lx + 4 * px, y, lw - 8 * px) end
         y = y - rh
       end
     else
@@ -1431,6 +1549,7 @@ function M.install(ctx)
         if on then lit(lx, lw, y) end
         ctx.text(lx + 6 * px, midy(y, rh), fit(P(text_of(g.title)), px, lw - 12 * px), px, on and yellow or gray, top + 4)
         nav.hit(lx, y, lw, rh, 'group', i)
+        if g.mod == loader_mod and gs[i + 1] then divider(lx + 4 * px, y, lw - 8 * px) end
         y = y - rh
       end
     end
@@ -1527,20 +1646,25 @@ function M.install(ctx)
       for k = 1, 10 do
         local it = parts[k]
         if it and GLYPH_OF[it] then x = x + nav.glyph(it, x, gy, c, top + 3) + 2 * px
-        elseif it then x = x + (ctx.text(x, midy(hy, rh), P(it), px, gray, top + 2) or 0) + 6 * px end
+        elseif it then x = x + (ctx.text(x, midy(hy, rh), P(it), px, white, top + 2) or 0) + 6 * px end
       end
     else
-      local hint = menu.capture and (menu.capture.spec.menu and 'PRESS A KEY  ESC CANCEL  DEL DEFAULT' or 'PRESS A KEY  ESC CANCEL  DEL NONE')
-        or (menu.typing and 'TYPE TO SEARCH  ENTER KEEP  ESC CLEAR')
-        or (dev == 'mouse' and ('CLICK PICK  < > CHANGE  RIGHT CLICK BACK  WHEEL SCROLL  ' .. close_key .. ' CLOSE'))
-        or ((menu.group or menu.search ~= '') and 'ARROWS  ENTER  DEL DEFAULT  BKSP BACK  ESC CLOSE')
-        or ('ARROWS  ENTER OPEN  / SEARCH  ' .. close_key .. ' CLOSE')
-      ctx.text(m, midy(hy, rh), fit(P(hint), px, w - 2 * m), px, gray, top + 2)
+      local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
+        or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
+        or ((menu.group or menu.search ~= '') and HINTS.group) or HINTS.list
+      hint_line(ctx, m, hy, rh, px, w - m, segs, close_key, white, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
   end
   -- where the menu's cursor is (menu pixels, y up; nil before the mouse was read)
   function svc.menu_cursor() return nav.mx, nav.my end
+  -- open now? (mods' key and mouse-button reads answer nothing while it is: sandbox.lua, runtime.lua, chef.typed)
+  function svc.menu_open() return menu.open == true end
+  -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
+  -- menu is open and has the mouse (nil otherwise)
+  function svc.menu_mouse()
+    if menu.open and nav.mouse and nav.mx and nav.on_ship() then return nav.mx, nav.my, nav.lmb == true end
+  end
   -- the layer my full screen menu covers from, while it's open (nil while it isn't)
   function svc.covering()
     if menu.open and look_row.value == 1 and nav.on_ship() then return ctx.TOP + 950 end
@@ -1606,14 +1730,17 @@ function M.install(ctx)
     local typing = not stepped and menu.capture == nil and search_input()
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
+    local g0, s0 = menu.group, menu.search
     if not typing and not stepped then menu_input(ls) end
     nav.nhits = 0
-    -- (the lines again: what was picked this frame may have opened a mod or gone back)
+    -- (the lines again when what was picked this frame opened a mod or went back: both looks draw the new screen in
+    -- this same frame, so the compact panel's size and hint line never trail it by a frame)
+    if menu.group ~= g0 or menu.search ~= s0 then ls = lines() end
     -- (the full screen look covers the game: on the ship only; in a mission the compact panel)
     if look_row.value == 1 and nav.on_ship() then
       -- (texts of the top world under it aren't drawn while it's open: the game's font would show through it)
       if ctx.cover then ctx.cover(ctx.TOP + 950) end
-      menu_draw_full(lines())
+      menu_draw_full(ls)
     else menu_draw(ls) end
   end
 

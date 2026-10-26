@@ -659,7 +659,10 @@ function M.install(ctx)
       if not (finite(x, 1e12) and finite(y, 1e12) and finite(z, 1e12)) then return refuse(rec, 'Mouse.axis', 'unexpected answer') end
       return { x = x, y = y, z = z }
     end
+    -- (while the loader's options menu is open the keys and mouse buttons are its own: nothing pressed, no keystrokes)
+    local function quiet() return util ~= nil and util.menu_open ~= nil and util.menu_open() == true end
     function N.Mouse.button(i)
+      if quiet() then return 0 end
       local c = N.Mouse.num_buttons()
       if not c or not int(i, 0, c - 1) then return refuse(rec, 'Mouse.button', 'invalid button') end
       local v = once(rec, 'Mouse.button', i)
@@ -691,6 +694,7 @@ function M.install(ctx)
     end
     -- the keyboard: names only (the engine's key constants don't match its live indices)
     function N.Keyboard.keystrokes()
+      if quiet() then return {} end
       local b = 'Keyboard.keystrokes'
       local events = once(rec, b)
       if type(events) ~= 'table' or #events > 128 then return refuse(rec, b, 'unexpected answer') end
@@ -710,6 +714,7 @@ function M.install(ctx)
     function N.Keyboard.pressed(name)
       local b = 'Keyboard.pressed'
       if type(name) ~= 'string' or name == '' or #name > 40 then return refuse(rec, b, 'invalid button name') end
+      if quiet() then return false end
       local i = once(rec, 'Keyboard.button_index', name)
       if not int(i, 0, (once(rec, 'Keyboard.num_buttons') or 0) - 1) then return refuse(rec, b, 'unknown button') end
       return once(rec, b, i)

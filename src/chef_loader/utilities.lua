@@ -494,7 +494,7 @@ function M.data_name(owner, name)
   if type(owner) ~= 'string' or owner:sub(1, 5) ~= 'mods/' or #owner < 6 then return nil end
   return 'chef_data_' .. data_enc(owner:sub(6)) .. '__' .. data_enc(name) .. '.lua'
 end
--- An owner's name flattened the way file names before 1.0.1 had it: mods/a/b -> a_b. A nested name (more than two
+-- An owner's name flattened for a file name: mods/a/b -> a_b. A nested name (more than two
 -- parts) gets "_" and 8 hex digits of a hash of the whole name on top, so mods/a/b/c and mods/a/b_c never share a
 -- file (two-part names keep their old files). The hash: two 16-bit halves of a 32-bit one, since string.format's %x
 -- only goes to 2^31 on Windows.
@@ -506,7 +506,7 @@ function M.flat_owner(owner)
   for i = 1, #owner do h = (h * 31 + owner:byte(i)) % 4294967296 end
   return flat .. '_' .. fmt('%04x%04x', floor(h / 65536), h % 65536)
 end
--- the file name before 1.0.1 (not one to one: two pairs could share one), read once to move a table over
+-- the old flat file name (not one to one: two pairs could share one), read once to move a table over
 function M.old_data_name(owner, name)
   return 'chef_data_' .. M.flat_owner(owner) .. '_' .. name .. '.lua'
 end
@@ -1369,7 +1369,11 @@ function M.install(ctx, L)
     end
 
     -- 6 input
-    function chef.typed() return typed_now() end
+    -- (nothing while the loader's options menu is open: its search has the typing)
+    function chef.typed()
+      if util.menu_open and util.menu_open() then return '', NO_KEYS end
+      return typed_now()
+    end
     function chef.key_label(name) return key_label(name) end
 
     -- 7 tables saved between launches (one file per mod and name, next to the loader's log; M.data_name)
@@ -1601,17 +1605,31 @@ function M.install(ctx, L)
                       { 255, 150, 90, 255 }, { 125, 135, 127, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
   -- The layout is the panel's 5 rects and one text per column of a line ({ x, y, text, color index }); each frame I
   -- draw them through ctx.text, whose fast path takes a whole text through one pcall.
-  -- place: the "Monitor position" row (1 top right, 2 top left, 3 middle right, 4 middle left, 5 bottom right,
-  -- 6 bottom left); the game draws its HUD over anything of mine, so the player picks a spot it leaves free
-  local function pm_layout(ls, w, h, place)
+  -- place (the "Monitor position" row's choice through PM_PLACE): 1 top right, 2 top left, 3 middle right, 4 middle
+  -- left, 5 bottom right, 6 bottom left, 7 the middle of the screen, 8 Adjustable, where the player dragged it (fx, fy:
+  -- its left edge and top edge as shares of the screen, so a new resolution keeps the spot); the game draws its HUD
+  -- over anything of mine, so the player picks a spot it leaves free
+  -- the row's choices (Adjustable first) as my place numbers
+  local PM_PLACE = { 8, 1, 2, 3, 4, 5, 6, 7 }
+  local function pm_layout(ls, w, h, place, fx, fy)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
     local pw, ph = (cols * 6 + 10) * px, (#ls + 1) * rh + 5 * px
-    local right = place % 2 == 1
-    local x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
-    local y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
+    local x0, y1
+    if place == 7 then
+      x0, y1 = floor((w - pw) / 2), floor((h + ph) / 2)
+    elseif place == 8 then
+      -- (kept on the screen whole: a spot saved on a bigger screen, or a panel grown by more mods)
+      -- (never dragged yet: the middle)
+      x0 = max(0, min(w - pw, fx and floor(fx * w + 0.5) or floor((w - pw) / 2)))
+      y1 = max(min(ph, h), min(h, fy and floor(fy * h + 0.5) or floor((h + ph) / 2)))
+    else
+      local right = place % 2 == 1
+      x0 = right and (w - pw - floor(w * 0.02)) or floor(w * 0.02)
+      y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
+    end
     local b = max(1, floor(px * 0.75))
-    local out = { px = px, rects = {
+    local out = { px = px, x0 = x0, y1 = y1, pw = pw, ph = ph, bar = rh + 2 * px, rects = {
       { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
       { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
       { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
@@ -1641,10 +1659,69 @@ function M.install(ctx, L)
     end
     return out
   end
+  -- The pause screen is the one time the game shows its own mouse cursor (Window.show_cursor: its map, the chat and
+  -- the HUD never do; on the ship its menus that take the mouse do too). nil: no answer (no main window, an odd one).
+  local function game_cursor()
+    local win = api('Window.get_main_window')
+    if win == nil then return nil end
+    local v = api('Window.show_cursor', win)
+    if type(v) ~= 'boolean' then return nil end
+    return v
+  end
+  -- the game's cursor in screen pixels (from the bottom left, y up like the drawing) and whether the left button is
+  -- down, read only while that cursor shows: the axis and button indexes asked once (again every 2 s while missing),
+  -- the window's size once a second (the cursor counts the window's pixels, the drawing the screen GUI's)
+  local function pm_mouse(now, w, h)
+    local M = pm.mouse
+    if not M then M = { at = -100, res_at = -100 }; pm.mouse = M end
+    if M.cur == nil and now >= M.at then
+      M.at = now + 2
+      M.cur, M.left = api('Mouse.axis_index', 'cursor'), api('Mouse.button_index', 'left')
+      if M.cur == nil or M.left == nil then M.cur, M.left = nil, nil end
+    end
+    if M.cur == nil then return nil end
+    if now >= M.res_at then
+      local a, b = api('Application.resolution')
+      M.rw, M.rh, M.res_at = tonumber(a), tonumber(b), now + 1
+    end
+    local v = api('Mouse.axis', M.cur)
+    if v == nil then return nil end
+    local x, y = api('Vector3.to_elements', v)
+    x, y = tonumber(x), tonumber(y)
+    local rw, rh = M.rw, M.rh
+    if not (x and y and rw and rh and rw > 0 and rh > 0) then M.res_at = 0; return nil end
+    local b = api('Mouse.button', M.left)
+    return x * w / rw, y * h / rh, type(b) == 'number' and b > 0.5
+  end
+  -- the dragged spot kept in the loader's saved values (shares of the screen, 4 places)
+  local function pm_keep(lay, w, h)
+    pm.fx, pm.fy = lay.x0 / w, lay.y1 / h
+    if util.perf_put then
+      util.perf_put('perf_x', floor(pm.fx * 10000 + 0.5) / 10000)
+      util.perf_put('perf_y', floor(pm.fy * 10000 + 0.5) / 10000)
+    end
+  end
+  -- the options menu asks whether a point is the monitor's while it's drawn over the menu (or being dragged there):
+  -- the menu takes no hover or click there
+  function util.pm_over(x, y)
+    if not (pm.on and pm.over_menu and pm.rects and x) then return false end
+    if pm.drag then return true end
+    local l = pm.rects
+    return x >= l.x0 and x < l.x0 + l.pw and y <= l.y1 and y >= l.y1 - l.ph
+  end
+  -- the layout, made again only when something it depends on changed
+  local function pm_lay(w, h, native, place)
+    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place
+       or (place == 8 and (pm.lfx ~= pm.fx or pm.lfy ~= pm.fy)) then
+      pm.rects = pm_layout(pm.lines, w, h, place, pm.fx or nil, pm.fy or nil)
+      pm.w, pm.h, pm.native, pm.place = w, h, native, place
+      pm.lfx, pm.lfy = pm.fx, pm.fy
+    end
+  end
   function util.monitor_frame(now)
     local on = util.perf_row ~= nil and util.perf_row.value == true
     if on ~= pm.on then
-      pm.on, pm.lines, pm.rects = on, nil, nil
+      pm.on, pm.lines, pm.rects, pm.drag = on, nil, nil, nil
       if on then pm_reset(now) end
       log(on and 'performance monitor: on (each mod\'s average a frame, its share of the frame and its worst call; once a second)'
         or 'performance monitor: off')
@@ -1654,17 +1731,74 @@ function M.install(ctx, L)
     if now >= pm.at and pm.frames > 0 then pm.lines, pm.rects = pm_lines(now), nil; pm_reset(now) end
     if not pm.lines then return end
     local t0 = L.clock()
+    -- "Missions: monitor on the pause screen only" (util.perf_pause): in a mission, drawn only while the game shows its
+    -- cursor (the numbers are still added up, so they're there the moment it opens); on the ship, as always. No
+    -- answer from the game: drawn all the time, said once. The game is asked only when its answer is used (that row
+    -- in a mission, or the Adjustable position).
+    local place = PM_PLACE[util.perf_place and tonumber(util.perf_place.value) or 2] or 1
+    local pause_only = util.perf_pause ~= nil and util.perf_pause.value == true and world.mission == true
+    local cursor
+    if pause_only or place == 8 then cursor = game_cursor() end
+    if pause_only and cursor ~= true then
+      if cursor == nil then
+        if not pm.said_pause then
+          pm.said_pause = true
+          log('performance monitor: the game does not say when its pause screen is up; the monitor shows all the time')
+        end
+      else
+        pm.drag, pm.was_down, pm.over_menu = nil, true, false
+        pm.self = pm.self + (L.clock() - t0) * 1000
+        return
+      end
+    end
     local w, h = ctx.screen()
-    -- (laid out again when the screen size or the font changes: the game's font measures differently)
+    if pm.fx == nil and util.perf_get then          -- (the dragged spot, read once)
+      pm.fx, pm.fy = tonumber(util.perf_get('perf_x')), tonumber(util.perf_get('perf_y'))
+      if not (pm.fx and pm.fy) then pm.fx, pm.fy = false, false end
+    end
+    -- (laid out again when the screen size, the font, the spot or the dragged place changes: the game's font measures
+    -- differently)
     local native = ctx.text_native and ctx.text_native() or false
-    local place = util.perf_place and tonumber(util.perf_place.value) or 1
-    if not pm.rects or pm.w ~= w or pm.h ~= h or pm.native ~= native or pm.place ~= place then
-      pm.rects, pm.w, pm.h, pm.native, pm.place = pm_layout(pm.lines, w, h, place), w, h, native, place
+    pm_lay(w, h, native, place)
+    -- Position Adjustable (8): dragged by its title bar, with the game's cursor while that shows (the pause screen),
+    -- or on the ship with my options menu's cursor while the menu has the mouse (the panel is then drawn over the
+    -- menu, and the menu takes no hover or click on it: util.pm_over). Never in a mission without the pause screen
+    -- (the game shows no cursor there). A left press on the bar takes it, it follows the cursor while the button
+    -- stays down, and where it's let go is kept. A button already down as a cursor appears is no press.
+    local D = pm.drag
+    local mx, my, down, over_menu
+    if place == 8 then
+      if util.menu_mouse then
+        mx, my, down = util.menu_mouse()
+        over_menu = mx ~= nil
+      end
+      if not over_menu and cursor == true then mx, my, down = pm_mouse(now, w, h) end
+    end
+    pm.over_menu = over_menu == true
+    if mx then
+      local lay = pm.rects
+      if down and not pm.was_down and not D and mx >= lay.x0 and mx < lay.x0 + lay.pw
+         and my <= lay.y1 and my >= lay.y1 - lay.bar then
+        D = { dx = mx - lay.x0, dy = my - lay.y1 }
+        pm.drag = D
+      end
+      if D and down then
+        pm.fx, pm.fy = (mx - D.dx) / w, (my - D.dy) / h
+        pm_lay(w, h, native, place)
+      elseif D then
+        pm.drag = nil
+        pm_keep(pm.rects, w, h)
+      end
+      pm.was_down = down
+    else
+      if D then pm.drag = nil; pm_keep(pm.rects, w, h) end
+      pm.was_down = true
     end
     local cs = pm.cs or {}
     pm.cs = cs
     for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], c[4]) end
-    local top = ctx.TOP + 940
+    -- (over the options menu while it can be dragged there: the full screen menu covers from 950, its cursor at 958)
+    local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects
     for _, r in ipairs(lay.rects) do ctx.rect(r[1], r[2], r[3], r[4], cs[r[5]], r[5] == 7 and top or top + 2) end
     for _, t in ipairs(lay.texts) do ctx.text(t[1], t[2], t[3], lay.px, cs[t[4]], top + 2) end
