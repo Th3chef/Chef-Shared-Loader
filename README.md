@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.3.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.3.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -18,7 +18,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.3.0
+- **Version:** 1.3.1
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -144,6 +144,16 @@ exactly one of these:
   - **Controller:** the D-pad moves, cross/A picks, circle/B goes back (and closes at the list of mods), square/X
     puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens it.
     A button already down when the menu opens does nothing until it's let go. Row: "Controller in this menu".
+  - **If F9 does nothing:** something else has the key before the game sees it. On many laptops the F row does
+    volume, brightness and the like unless Fn is held (or Fn-lock is on), so try Fn+F9; an app with a global F9
+    hotkey takes it too. The log says which key opens the menu at every start (`options menu: F9 ...`), and the status
+    lines repeat it until the menu has opened once that launch. To pick another key without the menu, close the game
+    and put this line (tabs between the four parts) in `%APPDATA%\Arrowhead\Helldivers2\chef_loader_settings.txt`
+    (make the file if it isn't there), replacing an `opt.menu_key` line if there is one: `_loader	opt.menu_key	s	f8`.
+    Type the tabs with the Tab key; a copy from this page turns them into spaces. The key is its name in the game in
+    lower case (`f7`, `f8`, ...); Escape, Enter (either one), Backspace, Delete, the arrows and Page Up/Down are the
+    menu's own keys and give F9 back. A controller opens it too (the touchpad / View held two seconds on the ship).
+    Once it's open, the row is Chef Shared Loader > Open this menu: Enter, then the new key.
   - **Mouse:** hover, click, right click to go back, the wheel (one row a notch), and dragging a slider. On the ship
     by default. While the menu has the mouse the camera stays still: the mouse's delta axis gets a dead zone no
     movement reaches (the one it had is put back when the menu closes, and at shutdown), and the menu's cursor follows
@@ -265,6 +275,8 @@ Some engine calls end the game with a native fault (a null read on a stale handl
     its own hooks count too (`<mod>|start`, `|update`, `|render`, `|shutdown`, `|options`), so a mod whose own code
     ends the game is blamed.
   - `>> owner|job @<s>` / `<< owner|job`: a per-frame job starting and ending.
+  - `f <mod> <fingerprint>`: the file of each mod (and boot script) this launch runs, so a crash is counted against
+    that file.
   - `#### clean shutdown`: written when the game reaches `shutdown()`.
 - **Next launch (rule 3):**
   - **A first call that never returned** is certain: it is skipped from then on. The mod that made it stays on until
@@ -286,10 +298,11 @@ Some engine calls end the game with a native fault (a null read on a stale handl
 - **Coming back on:** a mod turned off comes back on by itself when its source changes (an update: the fingerprint
   differs), and the calls of its that crashed are tried again. `-- HD2-Keep-On-Crash: yes` in a mod's first lines
   keeps it on, with only the crashing call skipped. It keeps its skipped calls, and they're tried again when it's
-  updated.
-- **Trying a mod again by hand:** delete `chef_loader_state.txt` (and `chef_loader_state.txt.tmp` if it's there).
-  Use it if a mod's fixed update was installed after the crash but before the next launch: that launch takes the new
-  file as the one that crashed, so it stays off until the next update.
+  updated. The crash is counted against the file that was running (the trace names each mod's fingerprint), so an
+  update installed after the crash but before the next launch counts as a change too.
+- **Trying a mod again by hand:** delete `chef_loader_state.txt` (and `chef_loader_state.txt.tmp` if it's there)
+  with the game closed. It clears every mod's skipped calls and crash counts. Use it if the last launch before 1.3.1
+  crashed and a fixed update of the mod was installed before relaunching (that launch's trace names no files).
 - **Shared with every mod:** a call on one kind of unit that took only the unit (`chef.call_kind(call, kind, unit)`,
   or `chef.lights`) and ended the game is refused for every mod, not only the one that found it
   (`skip: shared|Unit.<call>:<unit kind>`). Other mods get `nil, 'skipped'` for that same call on that kind and stay
@@ -335,7 +348,11 @@ The `chef` table each mod receives, by api level. The full list with signatures 
 | 2 | `after_startup`, read-only `capabilities` / `has`, saved settings, shared values and events, `chef.require` with `-- HD2-Requires:` version checks, the in-game options menu (F9), key bindings, the `CowboyBingusModLoader` (also `HD2ModLoader`) / `ModOptionsMenu` / `ModBindingsMenu` / `BingusRuntime` / `HD2Runtime` look-alikes (`ffi` and `jit` read as `false`), dev mode (F11 reload; test builds only). |
 | 3 | Safe unit access (`units_near` over the shared scan), spawning, linking, particles and lights cleaned up at world changes, timers and work spread over frames with a frame budget per mod, the game's settings file, host and player count, shapes (triangles, circles, rings, arcs), sprite sheets, on-screen messages, typed text, key labels, `save_table`/`load_table`, the mod list (with each mod's state and why, also in `chef_loader_health.txt`), the index (which mod's copy of each resource the game loads, `HD2-Exclusive` / `HD2-Fallback`). |
 
-**Colors below native Render Scale:** the loader draws in the UI world, which shows colors differently from the
+**Below native:** when the game renders smaller than its window (a Render Scale below native, or in Borderless a
+Resolution below the monitor's), the game's world shows only the top-left part of the window, so the loader draws in
+the UI world, which covers all of it.
+
+**Colors below native:** the loader draws in the UI world, which shows colors differently from the
 game's world. Every color a mod hands it is converted with per-channel curves measured in game
 (stored = U⁻¹(N(c))). A see-through color gets the alpha and color that fit best over three backgrounds.
 
@@ -385,7 +402,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.3.0 starting`
+- `==== Chef Shared Loader 1.3.1 starting`
 - `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
@@ -397,6 +414,8 @@ The old place keeps a trace:
   - `start-up: running as the game's boot script (...)`: a mod with the loader built in, or the simulator.
 - `boot scripts of mine, not run: <patch>: my start-up stub, <patch>: a full copy of Chef Shared Loader 1.1.0 ...`
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
+- `options menu: F9, or the controller's touchpad / View held 2 s on the ship (to change the key without the menu: ...)`
+  (the controller part only while "Controller in this menu" is on its first choice).
 - `mods run locked down: ... (sandbox 1.2.2)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`.
 
@@ -418,7 +437,8 @@ The old place keeps a trace:
 - `<mod> wants to write game patch files: turn on "Game patch files: <title>" ...`
 - `<mod> placed a checked game patch file: ...`
 
-**When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`
+**When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`,
+ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the menu has opened once that launch.
 
 **Crash guard:**
 - `the last launch crashed in: <owner|call> (that call is skipped from now on)`
@@ -443,7 +463,7 @@ The old place keeps a trace:
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.3.0 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.3.1 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build

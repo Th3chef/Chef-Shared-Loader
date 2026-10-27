@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.1
+
+**Fixes**
+- Mods were cut off when the game ran below the monitor's resolution in Borderless (Resolution 1920x1080 on a
+  2560x1440 monitor, say): the loader took it for native and drew in the game's world, which shows only the top-left
+  1920x1080 of the window. It now compares the render size with the window's and draws in the UI world, as for a
+  Render Scale below native.
+- A mod's update installed after it crashed the game but before the next launch was blamed for that crash, so a fixed
+  build could stay off (or keep its call skipped, or not be started). The crash is now counted against the file that
+  was running: the trace names each mod's fingerprint, and an update installed before relaunching counts as a change
+  (for crashes from 1.3.1 on).
+
+**Changes**
+- The log names the options menu's key at every start, with how to change it without the menu, and the status lines
+  repeat it until the menu has opened once that launch. A key the PC keeps for itself (a laptop's F row without Fn) left no trace
+  in the log before. The README says how to pick another key in `chef_loader_settings.txt`.
+
 ## 1.3.0
 
 **Crash safety**
