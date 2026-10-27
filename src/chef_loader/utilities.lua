@@ -1822,12 +1822,13 @@ function M.install(ctx, L)
     for _, m in ipairs(L.addons) do
       -- (another mod's version read raw: its table can't raise into this call)
       local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-      local req = {}
+      local req, lacks = {}, {}
       for i, q in ipairs(m.requires or {}) do req[i] = q end
+      for i, q in ipairs(m.missing or {}) do lacks[i] = q end
       out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
                         version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
                         state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
-                        requires = req }
+                        requires = req, missing = lacks }
     end
     for _, b in ipairs(L.boots()) do
       local r = b.a or b
@@ -1847,10 +1848,11 @@ function M.install(ctx, L)
   end
   local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
   function util.health_text()
-    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile' }
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile\tmissing' }
     for _, m in ipairs(util.mod_list()) do
       out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
-        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file) }, '\t')
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file),
+        field(m.missing and concat(m.missing, ' ') or '') }, '\t')
     end
     return concat(out, '\n') .. '\n'
   end

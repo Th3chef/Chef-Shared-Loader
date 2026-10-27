@@ -284,6 +284,16 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
 - **`HD2Runtime.mod(spec)`:** `spec.id` (letters, digits, `_ . -`), `api` (1 or nil), `name`, `lobby_key` and `bones`
   (16-hex unit resources). It returns a handle: `id`, `engine`, `raw` (your own `stingray`, as locked down as the rest), `on(event, fn)` (`update`,
   `render`, `shutdown`, and `stop`: see below), `log(...)`, `state()`, `switch_off(why)`.
+- **Saying what you need:** `spec.needs` lists the engine calls (`'Material.set_texture'`) and the grants (`'lobby'`,
+  `'files'`, `'patches'`; see Trusted mods) your mod can't do without, 64 at most. The loader checks them when you call
+  `mod()`: whatever it lacks is in `handle.missing()` (a new list, empty when everything is there), in the log, in a
+  notice for the player and in `chef.mods()` / `chef_loader_health.txt` (`missing`). The mod still starts, so it can
+  carry on without those parts and say so itself.
+- **Asking for access:** `handle.request(what, why)` with `'lobby'`, `'files'` or `'patches'` and a short reason, before
+  the work that needs it. It answers `'granted'`; `'asked'` (the player has to turn on its row in the options menu and
+  has been told, with your reason in the log; ask again later); or `nil, 'not given to this mod'` (the loader doesn't
+  give it to your mod: the log and a notice say so once, so the player knows what to report). Asking first means a
+  mod never does a long job only to have its result refused.
 - **The callbacks** run with the mod's own hooks, each in its own `pcall`. A file may return `true` (or nothing).
 - **`handle.engine`** has that runtime's calls in its own shapes:
   - `Gui.rect` and `Gui.rects` take plain numbers; `Gui.text` takes a font from its list;
@@ -319,7 +329,7 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
 A short list in the loader (`TRUSTED` in `src/loader.lua`) names mods that get more than the locked-down space,
 each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
 - **The Steam lobby** through the HD2 Lua Runtime look-alike.
-- **Its own files in `%LOCALAPPDATA%`.**
+- **Its own files in `%LOCALAPPDATA%`** (the 1.0 and 1.1 saves, and the shared-look files).
 - **Game patch files**, only once the player turns on "Game patch files: HD2 Transmog" in the options menu (a notice
   says so the first time the mod asks):
   - its scratch file in `data\`, and patches carrying its marker;
@@ -568,7 +578,8 @@ jobs made inside a timer or job start on the next frame.
 ### The mod list
 
 `chef.mods()` gives every mod the loader found: `{ name, kind = 'addon' | 'boot', on, dev, file, version, state,
-why, errors, ms_avg, ms_max, requires }`. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
+why, errors, ms_avg, ms_max, requires, missing }`. `missing` lists what a HD2 Lua Runtime mod said it needs
+(`spec.needs`) and the loader doesn't have. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
 (a requirement, a compile error ...; `why` says which), `stopped` (too many errors), `started elsewhere` (another
 loader started it first; `why` names it) or, for a boot entry, `handed off` (the loader that handed the game to this
 one). `ms_avg` / `ms_max` are its time

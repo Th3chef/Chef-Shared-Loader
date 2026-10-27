@@ -84,7 +84,10 @@ local CAMERA_RETRY = 1                   -- seconds between searches for the cam
 --   level); it gets none of the others
 local TRUSTED = {
   ['mods/hd2tm/transmog'] = { title = 'HD2 Transmog', network = true, lobby_key = 'hd2tm',
-    files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' } },
+    -- (1.1 keeps its saves under new names, so a 1.0 release still reads its own; shared looks go flat beside them)
+    files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' },
+              { dir = '', name = 'hd2transmog-1.1' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.1' },
+              { dir = '', name = 'hd2transmog-outfit-' } },
     patches = { scratch = 'hd2tm-wardrobe.tmp', marker = '-- HD2 Transmog wardrobe' },
     -- the shared globals it takes, each from the one mod named: the notification library its package carries (its
     -- notices: the wardrobe built, a problem to report)
@@ -5020,12 +5023,13 @@ function M.install(ctx, L)
     for _, m in ipairs(L.addons) do
       -- (another mod's version read raw: its table can't raise into this call)
       local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-      local req = {}
+      local req, lacks = {}, {}
       for i, q in ipairs(m.requires or {}) do req[i] = q end
+      for i, q in ipairs(m.missing or {}) do lacks[i] = q end
       out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
                         version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
                         state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
-                        requires = req }
+                        requires = req, missing = lacks }
     end
     for _, b in ipairs(L.boots()) do
       local r = b.a or b
@@ -5045,10 +5049,11 @@ function M.install(ctx, L)
   end
   local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
   function util.health_text()
-    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile' }
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile\tmissing' }
     for _, m in ipairs(util.mod_list()) do
       out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
-        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file) }, '\t')
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file),
+        field(m.missing and concat(m.missing, ' ') or '') }, '\t')
     end
     return concat(out, '\n') .. '\n'
   end
@@ -6143,8 +6148,11 @@ services.runtime = (function()
 -- Chef Shared Loader: the HD2Runtime look-alike
 -- Mods written for the HD2Runtime API (another loader's boot script, version 0.1.0) find what it gives them:
 --   * the HD2Runtime global and require('hd2rt'): version, api (1), mod(spec), status(), frame()
---   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off }; spec: id (letters, digits, _ . -), api
---     (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources)
+--   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off, missing, request }; spec: id (letters,
+--     digits, _ . -), api (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources),
+--     needs (engine calls and grants it can't do without: what of them I lack is logged, shown and in handle.missing())
+--   * handle.request('lobby' | 'files' | 'patches', why): mine; asks for a grant before the work that needs it
+--     ('granted', 'asked': the player was told to say yes in my options menu, or nil, why: not on my list)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
 --     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
 --     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
@@ -6188,6 +6196,8 @@ local function int(v, lo, hi) return type(v) == 'number' and v == floor(v) and v
 local function finite(v, limit) return type(v) == 'number' and v == v and abs(v) <= limit end
 local function hex16(s) return type(s) == 'string' and #s == 16 and s:match('^%x+$') ~= nil end
 local EVENTS = { update = true, render = true, shutdown = true, stop = true }
+-- what a mod may ask for (spec.needs, handle.request), as the log names it
+local GRANTS = { lobby = 'the Steam lobby', files = 'its own files', patches = 'game patch files' }
 -- the fonts a GUI's text may use: the ones the game makes a material for itself (another name ends the game), each
 -- with that material; a locale's own UI font by its 16-hex id
 local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
@@ -6200,7 +6210,8 @@ local CAN_GET = { unit = true, material = true, texture = true, font = true, run
 -- ctx: log(line), mod_log(owner, text), guarded(owner, key, fn, ...), fn_of(name), G (the game's globals),
 -- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
 -- trusted(owner) -> its TRUSTED entry or nil, attach(owner, hooks) (the hooks the loader calls with the mod's own),
--- now() -> seconds
+-- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list),
+-- access(owner) -> its patches grant { consent() -> boolean, asked(why) } or nil
 function M.install(ctx)
   local rt = {}
   local log, guarded, fn_of, util = ctx.log, ctx.guarded, ctx.fn_of, ctx.util
@@ -7115,6 +7126,22 @@ function M.install(ctx)
     end
     return o
   end
+  -- what a mod has of a grant: 'granted', 'asked' (its list entry gives it once the player says yes; with why, the
+  -- player is told now), or nil (its entry doesn't give it, or it has none)
+  local function grant_state(owner, what, why)
+    local t = ctx.trusted(owner)
+    if not t then return nil end
+    if what == 'lobby' then return t.network and 'granted' or nil end
+    if what == 'files' then return t.files and 'granted' or nil end
+    if what == 'patches' then
+      local p = t.patches and ctx.access and ctx.access(owner)
+      if not p then return nil end
+      if p.consent() then return 'granted' end
+      if why then p.asked(why) end
+      return 'asked'
+    end
+    return nil
+  end
   local function new_mod(o, spec)
     if type(spec) ~= 'table' or type(spec.id) ~= 'string' or not spec.id:match('^[%w_%.%-]+$') or #spec.id > 64 then
       return nil, 'a mod needs an id of letters, digits, _ . -'
@@ -7128,6 +7155,20 @@ function M.install(ctx)
     for _, h in ipairs(type(spec.bones) == 'table' and spec.bones or {}) do
       if not hex16(h) then return nil, 'bones lists 16-hex unit resources' end
       bones[h:lower()] = true
+    end
+    -- what the mod says it needs (spec.needs): engine calls by name ('Material.set_texture') and what my list may give
+    -- a trusted mod ('lobby', 'files', 'patches'). I check them here, once, so a mod made for a newer runtime or one
+    -- that isn't on my list hears what's missing (handle.missing) and the player sees it, instead of a mod that starts
+    -- and half works
+    local needs = {}
+    if spec.needs ~= nil then
+      if type(spec.needs) ~= 'table' or #spec.needs > 64 then return nil, 'needs lists at most 64 names' end
+      for _, n in ipairs(spec.needs) do
+        if type(n) ~= 'string' or #n > 64 or not (n:match('^%a[%w_]*%.%a[%w_]*$') or GRANTS[n]) then
+          return nil, 'needs lists engine calls (Namespace.call) and lobby, files or patches'
+        end
+        needs[#needs + 1] = n
+      end
     end
     if #o.order >= 8 then return nil, 'eight mods per file at most' end
     local rec = { owner = o.name, short = o.short, id = spec.id, name = type(spec.name) == 'string' and spec.name or spec.id,
@@ -7154,6 +7195,36 @@ function M.install(ctx)
     end
     function handle.state() return rec.state end
     function handle.switch_off(why) return switch_off(rec, 'by itself: ' .. tostring(why)) end
+    -- what of spec.needs I can't give, as a new list (empty when everything is there)
+    rec.missing = {}
+    for _, n in ipairs(needs) do
+      local ns, call = n:match('^(%a[%w_]*)%.(%a[%w_]*)$')
+      local have
+      if ns then have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
+      else have = grant_state(o.name, n) ~= nil end
+      if not have then rec.missing[#rec.missing + 1] = n end
+    end
+    function handle.missing()
+      local out = {}
+      for i, n in ipairs(rec.missing) do out[i] = n end
+      return out
+    end
+    -- handle.request(what, why): ask for 'lobby', 'files' or 'patches' before doing the work that needs it.
+    -- -> 'granted' | 'asked' (the player has to say yes in my options menu; they've been told, ask again later) |
+    -- nil, why (I don't give it to this mod; the log and a notice say so once, so the player knows what to report)
+    function handle.request(what, why)
+      if not GRANTS[what] then return nil, 'unknown request ' .. tostring(what) end
+      if rec.state ~= 'active' then return nil, rec.state end
+      local state = grant_state(o.name, what, type(why) == 'string' and why:sub(1, 200) or nil)
+      if state then return state end
+      if not rec.said['request ' .. what] then
+        rec.said['request ' .. what] = true
+        log(fmt('[%s] %s asks for %s%s: I give that only to the mods on my list (TRUSTED); to ask for a place, open an issue on GitHub',
+          o.name, rec.name, GRANTS[what], type(why) == 'string' and ' (' .. why:sub(1, 200) .. ')' or ''))
+        if ctx.notify then ctx.notify({ text = rec.name:upper():sub(1, 32) .. ' NEEDS ACCESS THIS LOADER DOESN\'T GIVE (SEE LOG)', dur = 20 }) end
+      end
+      return nil, 'not given to this mod'
+    end
     rec.handle = handle
     o.mods[rec.id] = rec
     o.order[#o.order + 1] = rec
@@ -7192,6 +7263,12 @@ function M.install(ctx)
       for k, v in pairs(own) do if shared_by[k] == nil or trusted then rt.on_global(o.env, k, v) end end
     end
     log(fmt('[%s] HD2 Lua Runtime look-alike: mod %s%s', o.name, rec.id, rec.lobby_key and ' (lobby key ' .. rec.lobby_key .. ')' or ''))
+    if #rec.missing > 0 then
+      log(fmt('[%s] %s needs what this loader (%s) doesn\'t have: %s', o.name, rec.name, tostring(ctx.VERSION),
+        concat(rec.missing, ', ')))
+      if ctx.notify then ctx.notify({ text = rec.name:upper():sub(1, 32) .. ' NEEDS MORE THAN THIS LOADER HAS (SEE LOG)', dur = 20 }) end
+    end
+    if ctx.missing then ctx.missing(o.name, rec.missing) end
     return handle
   end
   local function public_for(owner, env)
@@ -10315,6 +10392,10 @@ svc.runtime = services.runtime.install({ log = log, guarded = guarded, fn_of = f
   VERSION = VERSION, util = svc.util, frame = function() return frame_no end, now = function() return elapsed end,
   instance = function() return world.instance end,
   trusted = function(owner) return TRUSTED[owner] end,
+  -- (a mod's spec.needs and handle.request: what it lacks goes on the mod list, its patches grant answers requests)
+  notify = function(n) notices[#notices + 1] = n end,
+  missing = function(owner, list) local a = svc.ctx.addon(owner); if a then a.missing = list end end,
+  access = function(owner) return svc.access and svc.access[owner] end,
   -- the view names: only their trusted mod's value is ever shared under them
   reserved = (function()
     local r = {}
@@ -11034,6 +11115,7 @@ end
 -- until the player turns it on), and a notice the first time it waits for it
 function starter.trust(sb)
   local found = {}
+  svc.access = {}
   for _, r in ipairs(found_addons) do found[r.name] = true end
   for _, r in ipairs(found_named) do found[r.name] = true end
   for name, t in pairs(TRUSTED) do
@@ -11045,15 +11127,16 @@ function starter.trust(sb)
         local asked = false
         g.patches = { scratch = t.patches.scratch, marker = t.patches.marker,
           consent = function() return row ~= nil and row.value == true end,
-          asked = function()
+          asked = function(why)
             if asked then return end
             asked = true
-            log(fmt('%s wants to write game patch files: turn on "Game patch files: %s" in my options menu (F9) to allow it',
-              name, t.title))
+            log(fmt('%s wants to write game patch files%s: turn on "Game patch files: %s" in my options menu (F9) to allow it',
+              name, type(why) == 'string' and ' (' .. why .. ')' or '', t.title))
             notices[#notices + 1] = { text = t.title:upper() .. ' WANTS TO WRITE GAME FILES: F9 > ' .. LOADER:upper(), dur = 20 }
           end }
       end
       sb.grant(name, g)
+      svc.access[name] = g.patches
       local what = {}
       if t.network then what[#what + 1] = 'the Steam lobby' end
       if t.files then what[#what + 1] = 'its own files' end
