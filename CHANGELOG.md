@@ -43,7 +43,6 @@
 **Trusted mods**
 - A trusted mod gets the other trusted mods' read-only views whichever starts first (before, only when it started
   first).
-- Helmet Color-Match (`mods/libra/match_your_colors`) is on the list: the Steam lobby, under its own key only.
 - A trusted mod can have more than one view, each its own global.
 
 **For language file makers**
