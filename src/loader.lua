@@ -55,7 +55,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.3.0'
+local VERSION = '1.3.1'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
@@ -2261,6 +2261,20 @@ function M.install(ctx)
   function svc.menu_cursor() return nav.mx, nav.my end
   -- open now? (mods' key and mouse-button reads answer nothing while it is: sandbox.lua, runtime.lua, chef.typed)
   function svc.menu_open() return menu.open == true end
+  -- How my menu opens, for my log: at start-up (with how to change the key without the menu) and on the status lines
+  -- until it has opened once. A key the PC keeps for itself (a laptop's F row without Fn) or another app takes never
+  -- reaches the game: the menu just doesn't open, and nothing else in my log would say which key I wait for.
+  function svc.menu_how()
+    local k = menu_key.value
+    local s = svc.util and svc.util.key_label(k) or k
+    if pad_row.value == 1 then s = s .. ', or the controller\'s touchpad / View held 2 s on the ship' end
+    return s
+  end
+  function svc.menu_ever() return menu.ever == true end
+  function svc.menu_key_note()
+    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt, see the README)',
+      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES))
+  end
   -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
   -- menu is open and has the mouse (nil otherwise)
   function svc.menu_mouse()
@@ -2287,6 +2301,7 @@ function M.install(ctx)
       menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
       nav.drag = nil
       nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed = true, true, 'pad', 0, true
+      menu.ever = true
       log('options menu opened (controller)')
     end
     if not combo then nav.combo = false end
@@ -2321,6 +2336,7 @@ function M.install(ctx)
         nav.drag = nil
         -- (a mouse button or pad button already down when it opens is no press; no old boxes)
         nav.lmb, nav.rmb, nav.nhits, nav.seed = true, true, 0, true
+        menu.ever = true
         if not menu.said then menu.said = true; log('options menu opened') end
       else
         return
@@ -4150,7 +4166,9 @@ function M.install(ctx, L)
       local s = ix and api('Keyboard.button_locale_name', ix)
       if type(s) ~= 'string' or s == '' then s = ix and api('Keyboard.button_name', ix) end
       l = (type(s) == 'string' and s ~= '') and s or name
-      labels[name] = l
+      -- (kept only once the key resolved: before the keyboard answers, the raw name is shown and asked again later;
+      -- key_index itself asks the engine at most every 2 s)
+      if ix then labels[name] = l end
     end
     return l
   end
@@ -8746,15 +8764,16 @@ end
 -- "strikes: <addon> <n> <fingerprint>": launches in a row it ended the game; at tr.CRASH_STRIKES it's turned off. A
 -- launch it didn't end (a clean one, or another's crash) starts the count over; the line stays (at 0) while it has
 -- skipped calls other than a language file's, so a change of its file tries them again, as for a mod I turned off.
--- One still 'pending' at 0 (its mod not found since it crashed, or a boot script's, whose key carries its
--- fingerprint) has no file to compare: it goes (starter.unfound).
+-- I record the fingerprint of the file that crashed when the trace names it (its "f" line); without one (a trace
+-- without them, or a boot script, whose key carries its fingerprint) it's 'pending' until a file is found. One
+-- still 'pending' at 0 has no file to compare: a mod's I mark 'gone', a boot script's goes (starter.unfound).
 local RULE = '3'
 local skip, off, dropped, suspect = {}, {}, {}, {}
 -- The crash trace's state (below) and the crash learning's: tr.shared (the refusals shared with every mod), tr.strikes
 -- (name -> { n, fp }) and tr.CRASH_STRIKES, the launches in a row a mod ends the game before it's turned off (its call
 -- is skipped from the first). (Fields, not locals: the loader is near Lua 5.1's 200 locals.)
 local tr = { bytes = 0, firsts = {}, singles = {}, last_tick = -1, cap = 200 * 1024, said = false,
-  shared = { n = 0, of = {}, said = {} }, strikes = {}, CRASH_STRIKES = 3 }
+  shared = { n = 0, of = {}, said = {} }, strikes = {}, CRASH_STRIKES = 3, fps = {}, crash_fps = {} }
 -- v1.fp: 1.0.0's fingerprint (every 7th byte). An entry 1.0.0 wrote for a mod or boot script is matched by it and
 -- saved under the new fingerprint, whichever launch that source is next seen in.
 local v1 = {}
@@ -8863,6 +8882,8 @@ end
 -- "#### clean shutdown" = the game called shutdown(): nothing to blame.
 -- "= owner|call" = that first call (a chef.call_kind one) took only the unit: a crash in it is the engine's answer for
 -- that kind of unit, so it's shared with every mod (tr.shared.single); a call with arguments of the mod's own isn't.
+-- "f <mod> <fingerprint>" = the file of that mod the launch that wrote it ran (tr.crash_fps): I count the crash
+-- against that file, not against whatever is installed by now (an update put in before relaunching is a change).
 local blamed, blamed_job = nil, false
 do
   local f = open(TRACE_FILE, 'r')
@@ -8872,6 +8893,8 @@ do
       if line:match('^#### clean shutdown') then clean = true end
       local one = line:match('^= (.+)$')
       if one then singles[one] = true end
+      local fo, fp = line:match('^f (%S+) (%x+)$')
+      if fo then tr.crash_fps[fo] = fp end
       local t = line:match('^t (%d+)$')
       if t then last_t = tonumber(t) end
       local o, at = line:match('^>> (.-) @(%d+)$')
@@ -8917,7 +8940,8 @@ end
 local held = {}                          -- the per-frame jobs open now: key -> the second it opened
 -- The trace only has to tell the next launch what was open when the game died. When it passes 200 KB I write it
 -- again with only that: the last time stamp, the jobs held (">> key @s") and the first calls that haven't returned,
--- each with its "=" line when it took only the unit (tr.singles: key -> true from its "=" until it returns).
+-- each with its "=" line when it took only the unit (tr.singles: key -> true from its "=" until it returns), after
+-- the mods' "f" lines (tr.fps).
 local function crumb(line)
   -- one breadcrumb is one line: a mod's text in a key (chef.call_kind's kind) can't add lines of its own and make the
   -- next launch blame another mod or a loader job
@@ -8930,6 +8954,9 @@ local function crumb(line)
     tr.singles[k] = nil
     for i = #tr.firsts, 1, -1 do if tr.firsts[i] == k then table.remove(tr.firsts, i); break end end
   elseif c2 == '= ' then tr.singles[sub(line, 3)] = true
+  elseif c2 == 'f ' then
+    local o, p = line:match('^f (%S+) (%x+)$')
+    if o then tr.fps[o] = p end
   end
   tr.bytes = tr.bytes + #line + 1
   if tr.bytes > tr.cap then
@@ -8937,6 +8964,7 @@ local function crumb(line)
     trace = open(TRACE_FILE, 'w')
     if not trace then tr.failed(); return end
     local out = {}
+    for o, p in pairs(tr.fps) do out[#out + 1] = 'f ' .. o .. ' ' .. p end
     if tr.last_tick >= 0 then out[#out + 1] = 't ' .. tr.last_tick end
     for k, at in pairs(held) do out[#out + 1] = fmt('>> %s @%d', k, at) end
     for _, k in ipairs(tr.firsts) do
@@ -8947,8 +8975,9 @@ local function crumb(line)
     tr.bytes = #text
     local okw, w = pcall(trace.write, trace, text)
     if not (okw and w) then tr.failed() end
-    -- a first call is already in the list I just wrote (twice would leave it open for the next launch)
-    if c2 == '> ' then pcall(trace.flush, trace); return end
+    -- a first call or an "f" line is already in what I just wrote (a first call twice would leave it open for the
+    -- next launch)
+    if c2 == '> ' or c2 == 'f ' then pcall(trace.flush, trace); return end
     tr.bytes = tr.bytes + #line + 1
   end
   local okw, w = pcall(trace.write, trace, line .. '\n')
@@ -9921,10 +9950,13 @@ end
 -- The settings file (about 8 KB): one cache for the Render Scale here and chef.setting, read again on a world change
 -- or a new screen size, else at most every 30 s (a file that can't be read waits as long). cfg.n counts the texts
 -- read, so a reader only parses a new one. A file that doesn't parse (the game may be writing it) keeps the last answer.
+-- cfg.again: one more read 3 s after this one (a new screen size: the game may write its new file only after the
+-- window changed).
 local cfg = { text = nil, n = 0, at = -100, scale = nil, scale_n = 0 }
 local function cfg_text()
   if elapsed < cfg.at + 30 then return cfg.text, cfg.n end
   cfg.at = elapsed
+  if cfg.again then cfg.again, cfg.at = nil, elapsed - 27 end
   if type(os_) ~= 'table' then return cfg.text, cfg.n end
   local ok, appdata = pcall(os_.getenv, 'APPDATA')
   if not (ok and type(appdata) == 'string' and appdata ~= '') then return cfg.text, cfg.n end
@@ -9936,17 +9968,26 @@ local function cfg_text()
   return cfg.text, cfg.n
 end
 new_world_hooks[#new_world_hooks + 1] = function() cfg.at = -100 end
-local function file_scale()
+-- I compare the render size with the window's (w, h: the back buffer), not with the settings' screen_resolution: in
+-- Borderless with a Resolution below the monitor's, both say 1920x1080 while the window is the monitor's 2560x1440,
+-- and the game's world shows only its top-left 1920x1080 of it, the same as a Render Scale below native. Smaller in
+-- either direction (another aspect too) is below native. -> the scale (nil at native), and the render size it came
+-- from. An answer is kept for that text and window size only once the text parsed. A text that doesn't parse (a
+-- half-written file) keeps the last answer, isn't parsed again, and has the file read again in 3 s, not 30.
+local function file_scale(w, h)
   local text, n = cfg_text()
-  if n == cfg.scale_n then return cfg.scale end
-  cfg.scale_n = n
+  if n == cfg.scale_n and w == cfg.scale_w and h == cfg.scale_h then return cfg.scale, cfg.rw, cfg.rh end
+  if not (text and w and h and w > 0 and h > 0) or n == cfg.bad_n then return cfg.scale, cfg.rw, cfg.rh end
   local rw, rh = text:match('[%s{]render_resolution%s*=%s*%[%s*(%d+)%s+(%d+)%s*%]')
-  local sw, sh = text:match('\nscreen_resolution%s*=%s*%[%s*(%d+)%s+(%d+)%s*%]')
-  rw, rh, sw, sh = tonumber(rw), tonumber(rh), tonumber(sw), tonumber(sh)
-  if not (rw and rh and sw and sh and sw > 0 and sh > 0 and rw > 0 and rh > 0) then return cfg.scale end
-  local s = rh / sh
-  cfg.scale = (s > 0.2 and s < 0.98 and math.abs(rw / rh - sw / sh) < 0.03 * (sw / sh)) and s or nil
-  return cfg.scale
+  rw, rh = tonumber(rw), tonumber(rh)
+  if not (rw and rh and rw > 0 and rh > 0) then
+    cfg.bad_n, cfg.at = n, elapsed - 27
+    return cfg.scale, cfg.rw, cfg.rh
+  end
+  cfg.scale_n, cfg.scale_w, cfg.scale_h, cfg.rw, cfg.rh = n, w, h, rw, rh
+  local s = rw / w < rh / h and rw / w or rh / h
+  cfg.scale = (s > 0.2 and s < 0.98) and s or nil
+  return cfg.scale, rw, rh
 end
 -- In the UI world my layer L is drawn at UI_BASE + L - 900 (880-960 at -120 to -40: under whatever the
 -- game itself draws there with GUI layers)
@@ -9987,12 +10028,13 @@ local function draw_world_reset()
     draw.size_at = elapsed
     local w, h = api('Application.back_buffer_size')
     if type(w) == 'number' and type(h) == 'number' and w > 0 and h > 0 then
-      if w ~= draw.w or h ~= draw.h then cfg.at = -100 end
-      local s = file_scale()
+      if w ~= draw.w or h ~= draw.h then cfg.at, cfg.again = -100, true end
+      local s, rw, rh = file_scale(w, h)
       local ui = s ~= nil
-      if w ~= draw.w or h ~= draw.h or ui ~= draw.ui or not draw.said then
-        draw.w, draw.h, draw.ui, draw.said = w, h, ui, true
-        log(fmt('screen %dx%d, render scale %s: drawing in %s', w, h, s and fmt('%.3f', s) or 'native',
+      -- (said again when the render size alone changed too: Ultra Quality to Quality stays in the UI world)
+      if w ~= draw.w or h ~= draw.h or ui ~= draw.ui or s ~= draw.s or not draw.said then
+        draw.w, draw.h, draw.ui, draw.s, draw.said = w, h, ui, s, true
+        log(fmt('screen %dx%d, rendering at %s: drawing in %s', w, h, s and fmt('%dx%d (%.3f)', rw, rh, s) or 'native',
           ui and fmt('the UI world (layers from %d)', draw.ui_base - 20) or "the game's world"))
       end
     end
@@ -11525,9 +11567,10 @@ function starter.stays(name, keep)
     log(fmt('%s stays on: %d of the %d crashes in a row that turn it off', name, s.n, tr.CRASH_STRIKES))
   end
 end
--- once the addons have their fingerprints: a strikes line at 0 still 'pending' belongs to a mod not found since it
--- crashed (a boot script's never resolves: its key carries its fingerprint, so its line goes; its skips stay). A mod's
--- line stays, marked 'gone': whatever file of it comes back is a change, and its skipped calls are tried again.
+-- once the addons have their fingerprints: a strikes line at 0 still 'pending' (a crash from a trace without "f"
+-- lines) belongs to a mod not found since it crashed (a boot script's never resolves: its key carries its fingerprint,
+-- so its line goes; its skips stay). A mod's line stays, marked 'gone': whatever file of it comes back is a change, and
+-- I try its skipped calls again. A line that names the crashed file needs none of this.
 function starter.unfound()
   local named, gone = {}, {}
   for _, r in ipairs(found_named) do named[r.name] = true end
@@ -11543,6 +11586,7 @@ function starter.addon(r)
   local a = { name = r.name, short = r.name:match('([^/]+)$'), file = r.file, fp = fingerprint(r.src),
               on = true, errors = 0, ms = 0, max_ms = 0, dev = r.dev, requires = {} }
   addons[#addons + 1] = a
+  crumb('f ' .. a.name .. ' ' .. a.fp)
   for _, q in ipairs(services.requirements(r.src)) do a.requires[#a.requires + 1] = q.name end
   v1.off(a.name, r.src, a.fp)
   starter.changed_since_crash(a.name, a.fp)
@@ -11776,6 +11820,8 @@ local function frame(dt)
           res.full_n, res.full_n > 0 and res.full_ms / res.full_n or 0)
         res.n, res.ms, res.full_n, res.full_ms = 0, 0, 0, 0
       end
+      -- (my menu not opened yet after the first 3 minutes: which key opens it, so a log sent to me answers that too)
+      if elapsed >= 180 and not svc.menu_ever() then scans = scans .. ' | options menu not opened yet: ' .. svc.menu_how() end
       log(fmt('status: loader avg %.3f ms max %.2f ms | %s%s', frames > 0 and st.ms / frames or 0, st.max,
         #parts > 0 and concat(parts, ' | ') or 'no addons', scans))
     end
@@ -11948,6 +11994,7 @@ end
 function starter.named_one(r)
   local fp = fingerprint(r.src)
   local short = r.name:match('([^/]+)$')
+  crumb('f ' .. r.name .. ' ' .. fp)
   v1.off(r.name, r.src, fp)
   local was = off[r.name]
   if was and was.fp == 'pending' then was.fp = fp; save_state() end
@@ -12365,12 +12412,13 @@ if blamed then
   -- (a language file's key carries its own fingerprint: skipping it is enough, no mod is turned off for it)
   if owner and owner ~= 'loader' and not blamed:match('^[^|]+|lang:%x+$') then
     -- the mod stays on (its call skipped) until it has ended tr.CRASH_STRIKES launches in a row; then it's turned off
-    local s = tr.strikes[owner] or { n = 0 }
-    s.n, s.fp = s.n + 1, 'pending'
+    -- (I count it against the file that crashed, from its "f" line; without one, the next file found takes it)
+    local s, cfp = tr.strikes[owner] or { n = 0 }, tr.crash_fps[owner] or 'pending'
+    s.n, s.fp = s.n + 1, cfp
     tr.shared.struck, tr.shared.counted = owner, true
     if s.n >= tr.CRASH_STRIKES then
       tr.strikes[owner] = nil
-      off[owner] = { fp = 'pending', why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') .. ' (' .. s.n .. ' launches in a row)' }
+      off[owner] = { fp = cfp, why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') .. ' (' .. s.n .. ' launches in a row)' }
     else
       tr.strikes[owner] = s
       -- (a mod's count is said once its file is read, in starter.stays; a boot script never asks to stay on)
@@ -12439,6 +12487,8 @@ if #scan.langs > 0 then
 end
 ok, err = pcall(starter.started_how)
 if not ok then log('telling how I started failed: ' .. tr.why(err)) end
+ok, err = pcall(svc.menu_key_note)
+if not ok then log('telling my menu key failed: ' .. tr.why(err)) end
 -- the line my start-up stub writes when it found my core but couldn't start it: said once here, then the file goes
 if services.GAME_DIR then
   local p = services.GAME_DIR .. 'chef_loader_stub.txt'
