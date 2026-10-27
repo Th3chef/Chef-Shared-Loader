@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.3.0
+
+**Crash safety**
+- A mod that crashes the game is no longer turned off at once: the call that crashed is skipped and the mod stays on.
+  Only when it ends 3 launches in a row is it turned off. A launch it doesn't end starts the count over, and an update
+  of the mod tries its skipped calls again. `chef_loader_state.txt` has a new line for it, `strikes:`. A mod whose own
+  start code ends the game is still not started from the next launch on, until it's updated.
+- A mod turned off after a crash still comes back on when it's updated, and now the calls of its that crashed are
+  tried again too (they stayed skipped for good). So are those of a mod kept on with `-- HD2-Keep-On-Crash: yes`.
+- A call on one kind of unit (`chef.call_kind` or the `chef.unit_*` helpers) that ended the game, made with only the
+  unit, is now refused for every mod on that kind: the other mods get `nil, 'skipped'`. A call with arguments of the
+  mod's own isn't shared, and neither is a crash from before an update of the loader or of the game. A shared refusal
+  is tried again after an update of the loader or of the game.
+
+**Game patch files**
+- A trusted mod's built patch over 262,144 rows was refused as "not a patch file", so a big build failed. The cap is
+  now 2,097,152 rows; the other checks are the same.
+- A patch file over 200,000 rows still isn't read for mods, and the log now says why ("too big to hold a mod")
+  instead of counting it among the files "not laid out the way I read them".
+- `chef.index()` covers patches up to 2,097,152 rows (it left out those over 200,000).
+
+**Mods made for the HD2 Lua Runtime**
+- A mod can list what it needs (`spec.needs`: engine calls, and `lobby`, `files` or `patches`). What the loader lacks
+  is in `handle.missing()`, the log, a notice, `chef.mods()` (`missing`) and a new last column of
+  `chef_loader_health.txt`, `missing`. The mod still starts.
+- A mod can ask for access before the work that needs it: `handle.request(what, why)` answers `'granted'`, `'asked'`
+  (the player has to turn on its row in F9; when the mod gives a reason, the player is told so, with the reason in the
+  log) or `nil, 'not given to this mod'` (the log and a notice say so once).
+- Live palette materials: that runtime's private-material calls (`Material.private_aliases`,
+  `Material.set_private_texture`, `Material.reinitialize_shader`, `Mesh.refresh_instance_hash`,
+  `Unit.paint_private_cape` and `Unit.restore_private_cape`), so a mod recolors its own copies, and the game's medium
+  cape, during play without a restart. Each call is checked before it reaches the engine, and a painted cape is put
+  back when the mod stops.
+- Inboxes: a trusted mod's place on the list can name a view that takes data. Any mod, a runtime mod or not, hands it
+  one table of plain data a call, copied all the way down. With the trusted mod installed, every mod that isn't trusted
+  has the inbox from the start: a call made before the trusted mod is up, or before it has filled in that call, is held
+  (16 at most per mod and call) and made once it has. Another trusted mod gets the inbox once the trusted mod is up. A
+  trusted mod that won't start (kept off after a crash, stopped, or not started) holds nothing: the call answers
+  `nil, 'not running'`.
+
+**Trusted mods**
+- A trusted mod gets the other trusted mods' read-only views whichever starts first (before, only when it started
+  first).
+- Helmet Color-Match (`mods/libra/match_your_colors`) is on the list: the Steam lobby, under its own key only.
+- A trusted mod can have more than one view, each its own global.
+
+**For language file makers**
+- Two new notices start with a mod's name, so a pattern translates them: `... NEEDS MORE THAN THIS LOADER HAS (SEE
+  LOG)` and `... NEEDS ACCESS THIS LOADER DOESN'T GIVE (SEE LOG)`.
+
+**Credits**
+- RatInPlat: what an HD2 Lua Runtime mod needs and asks for (`spec.needs`, `handle.missing()`, `handle.request`),
+  the live palette material calls and the trusted mods' inbox views (pull request #8).
+
 ## 1.2.4
 
 - New row "Monitor opacity (%)": the performance monitor, text included, from fully solid (100, the default) down to
