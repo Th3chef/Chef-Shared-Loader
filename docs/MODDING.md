@@ -394,13 +394,6 @@ each only what its entry gives. What an entry can give:
   another mod sets that name first, the trusted mod goes without it and the log says so. Another trusted mod's views
   reach it like everyone, whichever starts first.
 
-The list today:
-
-| Mod | Its entry gives |
-|---|---|
-| HD2 Transmog (`mods/hd2tm/transmog`) | the lobby, its own files, game patch files; views `TransmogUI` and `TransmogPalettes` (an inbox); takes `NativeNotification` |
-| Helmet Color-Match (`mods/libra/match_your_colors`) | the lobby |
-
 A name isn't proof of who made a mod, which is why writing game files also waits for the player. To ask for a place
 on the list, open an issue on GitHub with what the mod needs and why.
 
