@@ -5,7 +5,7 @@ Anti-Cheat), for any mod author. Your mod ships a Lua file with a one-line heade
 
 - finds it in the installed mods and runs it;
 - keeps it apart from every other mod;
-- guards its engine calls, so a call that crashes the game is skipped from then on;
+- guards its engine calls, so a call that crashes the game the first time it's made is skipped from then on;
 - merges its Arsenal options;
 - hands it helpers for units, the camera, keys and drawing.
 
@@ -30,7 +30,8 @@ A mod that must ship a `boot` can ship the loader's start-up stub as it (see [Ca
 
 Both run in their own locked-down environment (see [What your mod can reach](#what-your-mod-can-reach)). Globals you
 define stay yours, `_G` is your environment, and the engine's script API (`stingray`, `Unit`, `World` ...) works as
-usual. Both are crash-guarded and stay off after a crash until the mod is updated.
+usual. Both are crash-guarded: a call that crashed the game is skipped and the mod stays on, until it ends 3 launches
+in a row (see [Rules that keep the game alive](#rules-that-keep-the-game-alive)).
 
 ### Porting a boot-replacing mod
 
@@ -284,6 +285,16 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
 - **`HD2Runtime.mod(spec)`:** `spec.id` (letters, digits, `_ . -`), `api` (1 or nil), `name`, `lobby_key` and `bones`
   (16-hex unit resources). It returns a handle: `id`, `engine`, `raw` (your own `stingray`, as locked down as the rest), `on(event, fn)` (`update`,
   `render`, `shutdown`, and `stop`: see below), `log(...)`, `state()`, `switch_off(why)`.
+- **Saying what you need:** `spec.needs` lists the engine calls (`'Material.set_texture'`) and the grants (`'lobby'`,
+  `'files'`, `'patches'`; see Trusted mods) your mod can't do without, 64 at most. The loader checks them when you call
+  `mod()`: whatever it lacks is in `handle.missing()` (a new list, empty when everything is there), in the log, in a
+  notice for the player and in `chef.mods()` / `chef_loader_health.txt` (`missing`). The mod still starts, so it can
+  carry on without those parts and say so itself.
+- **Asking for access:** `handle.request(what, why)` with `'lobby'`, `'files'` or `'patches'` and a short reason, before
+  the work that needs it. It answers `'granted'`; `'asked'` (the player has to turn on its row in the options menu;
+  when you pass a reason, the player is told so and your reason is in the log; ask again later); or `nil, 'not given to this mod'` (the loader doesn't
+  give it to your mod: the log and a notice say so once, so the player knows what to report). Asking first means a
+  mod never does a long job only to have its result refused.
 - **The callbacks** run with the mod's own hooks, each in its own `pcall`. A file may return `true` (or nothing).
 - **`handle.engine`** has that runtime's calls in its own shapes:
   - `Gui.rect` and `Gui.rects` take plain numbers; `Gui.text` takes a font from its list;
@@ -298,16 +309,38 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   - its first call is breadcrumbed for it;
   - a unit is checked before it's asked anything (with the loader's unit rules);
   - a refused call returns `nil, why`.
-- **What it made is undone when it stops:** its units, its GUIs, the units it hid, the materials it swapped on the
-  game's units and the mouse dead zones it changed. Textures it set with `Material.set_texture` can't be: the engine
+- **Live palette materials** (that runtime's private-material calls, with its rules and refusals, word for word): a
+  mod recolors its own copies during play, without a restart.
+  - `Material.private_aliases(list)` declares the mod's private materials, `{ { id = '<16 lower-case hex>', slots =
+    { 'material_lut', ... } }, ... }` (slot names letters, digits and `_`, 64 at most). It replaces the mod's last
+    declaration and writes nothing.
+  - `Material.set_private_texture(mat, variable, texture)`, `Material.reinitialize_shader(mat)` and
+    `Mesh.refresh_instance_hash(mesh)` work only on a material (or a mesh with one) that is declared, of a unit the mod
+    spawned **in this frame**, read in this frame. Anything else is refused before it reaches the engine: the game's
+    own materials (shared by every unit that wears them), a copy from an earlier frame, an undeclared slot, a texture
+    that isn't loaded. The recipe that works is the order above: every slot's texture, then the shader, then the
+    mesh. Each call is protected and its answers checked (`'unobserved return shape'` if the engine answers otherwise).
+  - `Unit.paint_private_cape(u, alias, fields)` paints the game's own medium cape (the one cape whose layout is known)
+    with a declared private material: `fields` gives all five of `material_lut`, `cape_lut`, `cape_gradient`,
+    `decal_sheet` and `cape_scalar_fields` (16-hex loaded textures). The loader binds the material by the cape's slot
+    first and reads only the new private instance; `Unit.restore_private_cape(u)` binds the game's material back by
+    that slot without reading the painted meshes. A painted cape is one mod's at a time (another's paint or restore is
+    refused), and once painted it can't be read or swapped through `Unit.mesh` / `Unit.set_material_at` again
+    (`'native cape reads require a fresh private transaction'`): paint it again instead.
+  - A call the game build lacks the engine functions for isn't there (`handle.missing()` names it, with
+    `spec.needs`).
+- **What it made is undone when it stops:** the game's capes it painted (put back by their slot first, before anything
+  else), its units, its GUIs, the units it hid, the materials it swapped on the game's units and the mouse dead zones
+  it changed. Textures it set with `Material.set_texture` can't be: the engine
   can't tell what a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
   once when it stops your mod (errors, a failed start, a dev reload), before it undoes anything, while your engine
   calls still work. (`stop` is Chef Shared Loader's own; the HD2 Lua Runtime itself never calls it.) A mod that
   switches itself off (`handle.switch_off`) gets no `stop` afterwards: put things back before you call it.
-- **Shared globals:** a capitalized global one runtime mod sets (`NativeNotification`, say) reaches the other runtime
+- **Shared globals:** a capitalized global one runtime mod sets (`MyLibrary`, say) reaches the other runtime
   mods, as in that runtime, where they share one `_G` (one set before `HD2Runtime.mod()` too). A name the game
-  already has never does. A trusted mod's globals stay its own, except the one its place on the list names as its
-  view (below), and it takes only the shared globals its place on the list names, each from one named mod. When a
+  already has never does. A trusted mod's globals stay its own, except the ones its place on the list names as its
+  views (below), and it takes only the shared globals its place on the list names, each from one named mod (another
+  trusted mod's views reach it like everyone, whichever starts first). When a
   mod stops, what it shared isn't handed to mods that start later; mods that have it keep their copy. A stopped mod's `HD2Runtime.mod()` is refused.
 - **The Steam lobby** (`Steam.user_id`, `Friends.playing_game`, `Network.join_steam_lobby`, `SteamLobby.*`) is only
   for mods the loader trusts with it (below): the lobby the game reports this player in (`Friends.playing_game` takes only the player's own id), the mod's own
@@ -317,10 +350,10 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
 ### Trusted mods
 
 A short list in the loader (`TRUSTED` in `src/loader.lua`) names mods that get more than the locked-down space,
-each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
-- **The Steam lobby** through the HD2 Lua Runtime look-alike.
-- **Its own files in `%LOCALAPPDATA%`.**
-- **Game patch files**, only once the player turns on "Game patch files: HD2 Transmog" in the options menu (a notice
+each only what its entry gives. What an entry can give:
+- **The Steam lobby** through the HD2 Lua Runtime look-alike, under the one `lobby_key` the entry names.
+- **Its own files in `%LOCALAPPDATA%`:** names starting with the prefixes the entry lists.
+- **Game patch files**, only once the player turns on "Game patch files: <the mod>" in the options menu (a notice
   says so the first time the mod asks):
   - its scratch file in `data\`, and patches carrying its marker;
   - a file only takes a patch's name by being renamed to it, and it's checked first: its table of contents must be
@@ -328,26 +361,45 @@ each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
     and every Lua resource in it must be comment lines only, the size the row gives, with no stream or GPU data;
   - a file still open for writing is never renamed or removed: close it first (a handle you drop is closed for you
     when it's collected).
-- **A read-only view for the other runtime mods:** its `TransmogUI` global, with only `version`, `snapshot()` (just
-  `api_version`, `revision`, `context`, `applied`, `capabilities` and `health`; not its catalog), `worn(group)` (the
-  native pieces it wears in `'armor'`, `'helmet'` or `'cape'`, and its avatar) and `report()` (what its last apply
-  spawned, with the materials it swapped). Nothing that applies, saves, builds or opens anything.
+- **Read-only views for the other runtime mods:** globals of its own the entry names, each with only the fields and
+  calls the entry lists (what they answer is that mod's own business: see its docs). Nothing reaches the mod but
+  those calls.
   - Each answer is a copy: tables are new tables (functions left out, units as they are, 8 deep and 4,000 values at
-    most), so changing one changes nothing in HD2 Transmog.
+    most), so changing one changes nothing in the trusted mod.
   - Arguments are plain values only (nil, booleans, numbers, strings up to 256 characters).
-  - Each call is guarded under the reading mod's own crash key (`TransmogUI.worn`, say): one that ends the game is
+  - Each call is guarded under the reading mod's own crash key (`<Global>.<call>`): one that ends the game is
     skipped for that mod from then on.
-  - When HD2 Transmog stops, the calls answer `nil, 'not running'`; when it starts again (a dev-mode reload), the same
-    view reaches it again, so keeping `TransmogUI` in a local is fine.
-  - Each call costs what HD2 Transmog takes to answer plus the copy: call them a few times a second at most, not
+  - When the trusted mod stops, the calls answer `nil, 'not running'`; when it starts again (a dev-mode reload), the
+    same view reaches it again, so keeping a view in a local is fine.
+  - Each call costs what the trusted mod takes to answer plus the copy: call them a few times a second at most, not
     every frame.
-  - No other mod's value is ever shared under the name `TransmogUI`. Its module (what it returns) isn't handed to other
-    mods through `package.loaded` either.
-- **What a trusted mod takes from the others:** only the shared globals its place on the list names, each from one
-  named mod, as its own copy (made when that mod sets it, so a change another mod makes to the shared table never
-  reaches it). HD2 Transmog takes only `NativeNotification`, from the Native Notification its package carries
-  (`mods/native_notification/core`). If another mod sets that name first, HD2 Transmog goes without it and the log
-  says so.
+  - No other mod's value is ever shared under a view's name. The trusted mod's module (what it returns) isn't handed
+    to other mods through `package.loaded` either.
+- **Inboxes:** a view whose calls take data. Any mod (a runtime mod or not) hands the trusted mod one table of plain
+  data per call.
+  - The trusted mod gets a copy made all the way down: keys strings, numbers or booleans; values those (strings up to
+    256 characters) or tables of them, 8 deep and 16,000 values at most. A function, a userdata or a table inside
+    itself refuses the whole call (`nil, why`, and the log says why once). Nothing the trusted mod gets leads back into
+    your mod, and your table stays yours.
+  - When the trusted mod is installed, every mod that isn't trusted has the inbox from the start. Another trusted mod
+    gets it once the trusted mod is up. A call made before the trusted mod has set it up answers `'held'`: it's kept
+    (16 per mod and call, 128 in all for that inbox) and made, in order, as soon as it has, with the answers in the
+    log. After that a call answers what the trusted mod answers (`true`, or `nil, why`). Held calls that can't be
+    made are dropped, with a line in the log: the trusted mod hasn't set its global by the end of its first update,
+    hasn't filled in the call in 300 of its updates, or stops. From then on a call answers `nil, 'not running'` or
+    `nil, 'not there'` until the trusted mod sets it up. If your mod stops, its held calls are dropped and never made.
+  - Each call is guarded under your mod's own crash key (`<Global>.<call>`); 64 calls per mod and call.
+- **What a trusted mod takes from the others:** only the shared globals its entry names, each from one named mod, as
+  its own copy (made when that mod sets it, so a change another mod makes to the shared table never reaches it). If
+  another mod sets that name first, the trusted mod goes without it and the log says so. Another trusted mod's views
+  reach it like everyone, whichever starts first.
+
+The list today:
+
+| Mod | Its entry gives |
+|---|---|
+| HD2 Transmog (`mods/hd2tm/transmog`) | the lobby, its own files, game patch files; views `TransmogUI` and `TransmogPalettes` (an inbox); takes `NativeNotification` |
+| Helmet Color-Match (`mods/libra/match_your_colors`) | the lobby |
 
 A name isn't proof of who made a mod, which is why writing game files also waits for the player. To ask for a place
 on the list, open an issue on GitHub with what the mod needs and why.
@@ -568,7 +620,8 @@ jobs made inside a timer or job start on the next frame.
 ### The mod list
 
 `chef.mods()` gives every mod the loader found: `{ name, kind = 'addon' | 'boot', on, dev, file, version, state,
-why, errors, ms_avg, ms_max, requires }`. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
+why, errors, ms_avg, ms_max, requires, missing }`. `missing` lists what a HD2 Lua Runtime mod said it needs
+(`spec.needs`) and the loader doesn't have. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
 (a requirement, a compile error ...; `why` says which), `stopped` (too many errors), `started elsewhere` (another
 loader started it first; `why` names it) or, for a boot entry, `handed off` (the loader that handed the game to this
 one). `ms_avg` / `ms_max` are its time
@@ -645,9 +698,16 @@ drawn indented and in a dimmer yellow, its rows indented with it.
   game when given the wrong thing (a destroyed unit, a unit kind without a state machine, a value of the wrong type);
   Lua can't catch that.
   - Chef Shared Loader writes a breadcrumb before each guarded call's first use. After a crash, the next launch skips that
-    call and turns your mod off, with a notice on screen and in the log.
-  - Updating the mod turns it back on.
+    call for your mod (it gets `nil, 'skipped'`) and your mod stays on. If it ends 3 launches in a row, it's turned
+    off, with a notice on screen and in the log; a launch it doesn't end starts the count over.
+  - A crash in your mod's start code (the file running before it returns) is different: your mod isn't started from
+    the next launch on, until its file changes.
+  - Updating the mod turns it back on, and the calls that crashed are tried again.
+  - A call on one kind of unit (`chef.call_kind`) made with only the unit, that crashed, is refused for every mod on
+    that kind: yours gets `nil, 'skipped'` and stays on. It is tried again after a loader or game update. (A call with
+    arguments of your own, a node index say, is only skipped for your mod.)
   - Testers can add `-- HD2-Keep-On-Crash: yes` in the file's first lines to stay on (only the crashing call is skipped).
+    The skipped calls stay skipped until the mod is updated; then they're tried again.
 - **Engine values live one frame.** `Color`, `Vector3` and the like only last the frame they're made in: make them
   in the frame that uses them.
 - **Handles belong to one world.** Units, GUIs and cameras belong to the world they came from. When
@@ -711,8 +771,9 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
     `has_*`, `get_*`, `num_*`, and since 1.2.2 `game_object_field_batched`): no writes to what other players see.
     `game_object_field_batched` has crashed the game on other players' objects, so it answers only for an object that
     exists (a whole number id, else nil), and the loader learns from a crash in it: its first call on each object is
-    breadcrumbed, so a game that ends there skips that call for your mod and keeps the mod off until it changes (one
-    crash, not one every launch);
+    breadcrumbed, so a game that ends there skips that call for your mod from then on (one crash, not one every
+    launch; the mod itself stays on, as after any crash of its own, and is turned off only after it ends 3 launches
+    in a row);
   - all of UnitSynchronizer but its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`,
     `get_*`, `num_*`): no spawns or destroys every player sees;
   - the same through an engine object's metatable (`getmetatable` gives the trimmed table).
