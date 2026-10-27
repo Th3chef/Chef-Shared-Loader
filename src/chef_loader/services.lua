@@ -1684,6 +1684,20 @@ function M.install(ctx)
   function svc.menu_cursor() return nav.mx, nav.my end
   -- open now? (mods' key and mouse-button reads answer nothing while it is: sandbox.lua, runtime.lua, chef.typed)
   function svc.menu_open() return menu.open == true end
+  -- How my menu opens, for my log: at start-up (with how to change the key without the menu) and on the status lines
+  -- until it has opened once. A key the PC keeps for itself (a laptop's F row without Fn) or another app takes never
+  -- reaches the game: the menu just doesn't open, and nothing else in my log would say which key I wait for.
+  function svc.menu_how()
+    local k = menu_key.value
+    local s = svc.util and svc.util.key_label(k) or k
+    if pad_row.value == 1 then s = s .. ', or the controller\'s touchpad / View held 2 s on the ship' end
+    return s
+  end
+  function svc.menu_ever() return menu.ever == true end
+  function svc.menu_key_note()
+    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt, see the README)',
+      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES))
+  end
   -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
   -- menu is open and has the mouse (nil otherwise)
   function svc.menu_mouse()
@@ -1710,6 +1724,7 @@ function M.install(ctx)
       menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
       nav.drag = nil
       nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed = true, true, 'pad', 0, true
+      menu.ever = true
       log('options menu opened (controller)')
     end
     if not combo then nav.combo = false end
@@ -1744,6 +1759,7 @@ function M.install(ctx)
         nav.drag = nil
         -- (a mouse button or pad button already down when it opens is no press; no old boxes)
         nav.lmb, nav.rmb, nav.nhits, nav.seed = true, true, 0, true
+        menu.ever = true
         if not menu.said then menu.said = true; log('options menu opened') end
       else
         return

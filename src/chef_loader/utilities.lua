@@ -949,7 +949,9 @@ function M.install(ctx, L)
       local s = ix and api('Keyboard.button_locale_name', ix)
       if type(s) ~= 'string' or s == '' then s = ix and api('Keyboard.button_name', ix) end
       l = (type(s) == 'string' and s ~= '') and s or name
-      labels[name] = l
+      -- (kept only once the key resolved: before the keyboard answers, the raw name is shown and asked again later;
+      -- key_index itself asks the engine at most every 2 s)
+      if ix then labels[name] = l end
     end
     return l
   end
