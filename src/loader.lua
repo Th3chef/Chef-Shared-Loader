@@ -78,8 +78,11 @@ local CAMERA_RETRY = 1                   -- seconds between searches for the cam
 --   files: its own files in %LOCALAPPDATA% (below dir, names starting with name)
 --   patches: game patch files in data\ (its scratch file, and patches carrying its marker; sandbox.lua checks a file
 --   before it takes a patch's name)
---   view: the one global of its own the other runtime mods may read, as a read-only view (runtime.lua): the calls
---   listed (a list of keys keeps only those of the first answer), every answer copied as plain values
+--   view: a global of its own the other runtime mods may read, as a read-only view (runtime.lua): the calls
+--   listed (a list of keys keeps only those of the first answer), every answer copied as plain values; or a list of
+--   such views, each its own global. A view with takes calls is an inbox: every mod gets it, and each of those calls
+--   hands the trusted mod one table of plain data, copied (one made before the trusted mod set its global is held
+--   and made once it has)
 --   accepts: the other runtime mods' shared globals it takes, each from the one mod named (its own copy of the top
 --   level); it gets none of the others
 local TRUSTED = {
@@ -94,9 +97,12 @@ local TRUSTED = {
     accepts = { NativeNotification = 'mods/native_notification/core' },
     -- what it has on (snapshot without its catalog), the native pieces it wears and its own avatar (worn), and what its
     -- last apply spawned (report): reads only, nothing that applies, saves, builds or opens anything
-    view = { global = 'TransmogUI', fields = { 'version' },
-             calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
-                       worn = true, report = true } } },
+    view = { { global = 'TransmogUI', fields = { 'version' },
+               calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
+                         worn = true, report = true } },
+             -- palette libraries other mods hand it (names and sRGB colours: data only, sdk/PALETTES.md of HD2
+             -- Transmog); it checks each one and uses it only once the player turns it on in its Settings
+             { global = 'TransmogPalettes', fields = { 'api' }, takes = { register = true } } } },
 }
 
 local G = _G
@@ -6173,6 +6179,8 @@ services.runtime = (function()
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
 -- _G; never a name the game already has. A trusted mod's globals stay its own, but its TRUSTED entry may name one
 -- (view) the others get as a read-only view: only the calls listed, plain arguments in, copies of plain values out.
+-- A view whose calls take data (takes) is an inbox: every mod has it, and a call hands the trusted mod one plain table,
+-- copied; one made before the trusted mod set its global is held and made once it has.
 -- Of the others' globals, a trusted mod takes only the ones its entry accepts, each from the one mod named.
 -- Plain Lua 5.1.
 
@@ -6237,6 +6245,9 @@ function M.install(ctx)
   -- a trusted mod's read-only view: global name -> { by, real, spec, on }; view.made: the views handed out (weak)
   local view = { by_name = {}, made = setmetatable({}, { __mode = 'k' }), LIMIT = 4000, DEPTH = 8,
                   reserved = ctx.reserved or {} }   -- view name -> its trusted mod (no one else shares under it)
+  -- what a view's takes calls hand in: 16,000 values a call (a full palette library is about 4,000), 64 calls per mod
+  -- and call, and 64 calls held for a trusted mod that hasn't set its global yet: name -> list, false once it has
+  view.TAKE, view.TAKES, view.HELD, view.pending, view.took, view.told = 16000, 64, 64, {}, {}, {}
   -- the engine values a view passes on as they are (others, file handles say, are left out)
   view.PASS = { Unit = true, IdString64 = true, Vector3 = true, Quaternion = true }
 
@@ -7416,6 +7427,8 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
   local function dispatch(o, event, ...)
+    -- (a trusted mod that set its view's global with rawset, which I'm not told of: found before its first update)
+    if event == 'update' and not o.looked then o.looked = true; view.look(o) end
     local first
     for _, rec in ipairs(o.order) do
       if rec.state == 'active' then
@@ -7609,7 +7622,39 @@ function M.install(ctx)
     rawset(env, 'HD2Runtime', pub)
     local pkg = rawget(env, 'package')
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
+    view.inboxes(env, owner)
     return true
+  end
+  -- the view spec of global k in a TRUSTED entry (its view is one spec, or a list of them, each its own global)
+  function view.spec_of(t, k)
+    local v = type(t) == 'table' and t.view or nil
+    if type(v) ~= 'table' then return nil end
+    if v.global ~= nil then return v.global == k and v or nil end
+    for _, x in ipairs(v) do if type(x) == 'table' and x.global == k then return x end end
+    return nil
+  end
+  -- a view with takes calls is an inbox: every mod gets it from the start, runtime mod or not (a palette library is
+  -- a few lines of data, not a runtime mod), and before its trusted mod has set it, if that mod is installed, so a
+  -- mod that starts first doesn't have to wait for it; what it hands in then is held and handed over once it has
+  function view.inboxes(env, owner)
+    if ctx.trusted(owner) then return end                      -- (a trusted mod's environment: only its own globals)
+    for k, by in pairs(view.reserved) do
+      local spec = by ~= owner and view.spec_of(ctx.trusted(by), k)
+      if spec and type(spec.takes) == 'table' and rawget(env, k) == nil then
+        local vw = view.by_name[k]
+        if not (vw and vw.on) and view.pending[k] == nil and ctx.present and ctx.present(by) then view.pending[k] = {} end
+        if (vw and vw.on) or view.pending[k] then rawset(env, k, view.make(k, vw or { spec = spec }, owner)) end
+      end
+    end
+  end
+  function view.look(o)
+    if not o.env or not ctx.trusted(o.name) then return end
+    for k, by in pairs(view.reserved) do
+      if by == o.name and not view.by_name[k] then
+        local v = rawget(o.env, k)
+        if type(v) == 'table' then rt.on_global(o.env, k, v) end
+      end
+    end
   end
   -- a shared global a trusted mod takes: its TRUSTED entry's accepts names the global and the one mod it takes it from
   -- (a library its own package carries, say)
@@ -7680,6 +7725,46 @@ function M.install(ctx)
     end
     return true
   end
+  -- the one table a takes call hands in, copied all the way down before the trusted mod sees it, so nothing it gets
+  -- runs code or leads back into the caller: keys strings, numbers or booleans, values those (strings up to 256
+  -- characters, no NaN) or tables of them, 8 deep and view.TAKE values at most; a function, a userdata or a table
+  -- inside itself refuses the whole call. Read raw: a metatable on it never runs. -> the copy, or nil, why
+  function view.data(v)
+    local budget, seen = view.TAKE, {}
+    local function copy(t, depth)
+      if depth > view.DEPTH then error('more than ' .. view.DEPTH .. ' tables deep', 0) end
+      if seen[t] then error('a table inside itself', 0) end
+      seen[t] = true
+      local out = {}
+      for k, x in next, t do
+        budget = budget - 1
+        if budget < 0 then error('more than ' .. view.TAKE .. ' values', 0) end
+        local tk, tx = type(k), type(x)
+        if not (tk == 'string' or (tk == 'number' and k == k) or tk == 'boolean') or (tk == 'string' and #k > 256) then
+          error('a key that isn\'t a short string or a number', 0)
+        end
+        if tx == 'table' then out[k] = copy(x, depth + 1)
+        elseif tx == 'boolean' or (tx == 'number' and x == x) or (tx == 'string' and #x <= 256) then out[k] = x
+        else error('a value that isn\'t plain data (' .. tx .. ')', 0) end
+      end
+      seen[t] = nil
+      return out
+    end
+    local ok, c = pcall(copy, v, 1)
+    if not ok then return nil, tostring(c) end
+    return c
+  end
+  -- a takes call made (now, or for a held one when the trusted mod set its global): under the caller's own crash key,
+  -- the answers copied as a call's are
+  function view.hand(cur, reader, key, name, data)
+    local fn = rawget(cur.real, name)
+    if type(fn) ~= 'function' then return nil, 'not there' end
+    local r, why = guarded(reader, key, packed, fn, data)
+    if type(r) ~= 'table' then return nil, why end
+    local budget, out = { n = view.LIMIT }, { n = r.n }
+    for i = 1, r.n do out[i] = view.copy(r[i], nil, 1, budget, {}) end
+    return unpack(out, 1, out.n)
+  end
   -- one reader's view: each call guarded under the reader's own crash key (<global>.<call>), so a call that ends the
   -- game is skipped for that reader from then on, not for the trusted mod
   function view.make(k, vw, reader)
@@ -7702,6 +7787,30 @@ function M.install(ctx)
         local budget, out = { n = view.LIMIT }, { n = r.n }
         for i = 1, r.n do out[i] = view.copy(r[i], i == 1 and keys or nil, 1, budget, {}) end
         return unpack(out, 1, out.n)
+      end
+    end
+    -- takes calls: one table of plain data in (copied, view.data), held while the trusted mod hasn't set its global yet
+    for name in pairs(type(vw.spec.takes) == 'table' and vw.spec.takes or {}) do
+      local key = k .. '.' .. name
+      pub[name] = function(...)
+        local tell = function(why)
+          local said = reader .. '|' .. key .. '|' .. why
+          if not view.told[said] then view.told[said] = true; log(fmt('[%s] %s refused: %s', reader, key, why)) end
+          return nil, why
+        end
+        if select('#', ...) ~= 1 or type((...)) ~= 'table' then return tell('it takes one table of plain data') end
+        local count = reader .. '|' .. key
+        if (view.took[count] or 0) >= view.TAKES then return tell(view.TAKES .. ' calls at most') end
+        local data, why = view.data((...))
+        if data == nil then return tell(why) end
+        view.took[count] = (view.took[count] or 0) + 1
+        local cur = view.by_name[k]
+        if cur and cur.on then return view.hand(cur, reader, key, name, data) end
+        local held = view.pending[k]
+        if not held then return nil, 'not running' end
+        if #held >= view.HELD then return tell(view.HELD .. ' held calls at most') end
+        held[#held + 1] = { reader = reader, key = key, name = name, data = data }
+        return 'held'
       end
     end
     -- (fields read when asked: the trusted mod may fill its table after making it; plain values only)
@@ -7740,8 +7849,21 @@ function M.install(ctx)
     shared[k], shared_by[k] = nil, nil
     local calls = {}
     for name in pairs(type(spec.calls) == 'table' and spec.calls or {}) do calls[#calls + 1] = name end
+    for name in pairs(type(spec.takes) == 'table' and spec.takes or {}) do calls[#calls + 1] = name .. ' (takes data)' end
     table.sort(calls)
-    log(fmt('[%s] %s: a read-only view for the other runtime mods (%s)', o.name, k, concat(calls, ', ')))
+    log(fmt('[%s] %s: a read-only view for the other %s (%s)', o.name, k,
+      type(spec.takes) == 'table' and 'mods' or 'runtime mods', concat(calls, ', ')))
+    -- what other mods handed in before it set its global, handed over now, in their order
+    local held = view.pending[k]
+    view.pending[k] = false
+    if held and #held > 0 then
+      local who = {}
+      for _, h in ipairs(held) do
+        local ok, a, b = pcall(view.hand, vw, h.reader, h.key, h.name, h.data)
+        who[#who + 1] = h.reader .. ' ' .. h.name .. ': ' .. (ok and (a ~= nil and tostring(a) or 'nil, ' .. tostring(b)) or tostring(a))
+      end
+      log(fmt('[%s] %s: the %d calls held for it, made now (%s)', o.name, k, #held, concat(who, '; ')))
+    end
   end
   function rt.on_global(env, k, v)
     local o = envs[env]
@@ -7749,8 +7871,8 @@ function M.install(ctx)
     if v == nil then return end
     local trust = ctx.trusted(o.name)
     if trust then
-      local spec = type(trust) == 'table' and trust.view
-      if type(spec) == 'table' and spec.global == k and type(v) == 'table' then view.publish(o, env, k, v, spec) end
+      local spec = view.spec_of(trust, k)
+      if spec and type(v) == 'table' then view.publish(o, env, k, v, spec) end
       return
     end
     if view.by_name[k] or view.reserved[k] then return end            -- a view's name: this copy is its own
@@ -10708,12 +10830,15 @@ svc.runtime = services.runtime.install({ log = log, guarded = guarded, fn_of = f
   -- (a mod's spec.needs and handle.request: what it lacks goes on the mod list, its patches grant answers requests)
   notify = function(n) notices[#notices + 1] = n end,
   missing = function(owner, list) local a = svc.ctx.addon(owner); if a then a.missing = list end end,
-  access = function(owner) return svc.access and svc.access[owner] end,
+  access = function(owner) return svc.access and svc.access[owner] or nil end,
+  -- (a trusted mod that's installed: other mods' calls to its inbox are held for it until it starts)
+  present = function(owner) return svc.access ~= nil and svc.access[owner] ~= nil end,
   -- the view names: only their trusted mod's value is ever shared under them
   reserved = (function()
     local r = {}
     for owner, t in pairs(TRUSTED) do
-      if type(t.view) == 'table' and type(t.view.global) == 'string' then r[t.view.global] = owner end
+      local list = type(t.view) == 'table' and (t.view.global ~= nil and { t.view } or t.view) or {}
+      for _, v in ipairs(list) do if type(v) == 'table' and type(v.global) == 'string' then r[v.global] = owner end end
     end
     return r
   end)(),
@@ -11449,7 +11574,7 @@ function starter.trust(sb)
           end }
       end
       sb.grant(name, g)
-      svc.access[name] = g.patches
+      svc.access[name] = g.patches or false
       local what = {}
       if t.network then what[#what + 1] = 'the Steam lobby' end
       if t.files then what[#what + 1] = 'its own files' end

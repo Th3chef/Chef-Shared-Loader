@@ -337,8 +337,8 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   switches itself off (`handle.switch_off`) gets no `stop` afterwards: put things back before you call it.
 - **Shared globals:** a capitalized global one runtime mod sets (`NativeNotification`, say) reaches the other runtime
   mods, as in that runtime, where they share one `_G` (one set before `HD2Runtime.mod()` too). A name the game
-  already has never does. A trusted mod's globals stay its own, except the one its place on the list names as its
-  view (below), and it takes only the shared globals its place on the list names, each from one named mod. When a
+  already has never does. A trusted mod's globals stay its own, except the ones its place on the list names as its
+  views (below), and it takes only the shared globals its place on the list names, each from one named mod. When a
   mod stops, what it shared isn't handed to mods that start later; mods that have it keep their copy. A stopped mod's `HD2Runtime.mod()` is refused.
 - **The Steam lobby** (`Steam.user_id`, `Friends.playing_game`, `Network.join_steam_lobby`, `SteamLobby.*`) is only
   for mods the loader trusts with it (below): the lobby the game reports this player in (`Friends.playing_game` takes only the player's own id), the mod's own
@@ -362,7 +362,8 @@ each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
 - **A read-only view for the other runtime mods:** its `TransmogUI` global, with only `version`, `snapshot()` (just
   `api_version`, `revision`, `context`, `applied`, `capabilities` and `health`; not its catalog), `worn(group)` (the
   native pieces it wears in `'armor'`, `'helmet'` or `'cape'`, and its avatar) and `report()` (what its last apply
-  spawned, with the materials it swapped). Nothing that applies, saves, builds or opens anything.
+  spawned, with the materials it swapped). Nothing that applies, saves, builds or opens anything. (A trusted mod's place
+  on the list may name several such globals, each a view of its own; one with calls that take data is an inbox, below.)
   - Each answer is a copy: tables are new tables (functions left out, units as they are, 8 deep and 4,000 values at
     most), so changing one changes nothing in HD2 Transmog.
   - Arguments are plain values only (nil, booleans, numbers, strings up to 256 characters).
@@ -374,6 +375,24 @@ each only what it needs. Today it's HD2 Transmog (`mods/hd2tm/transmog`):
     every frame.
   - No other mod's value is ever shared under the name `TransmogUI`. Its module (what it returns) isn't handed to other
     mods through `package.loaded` either.
+- **An inbox for palette libraries:** its `TransmogPalettes` global, with `api` and `register(spec)`: any mod (a
+  runtime mod or not; a palette library is a few lines of data) hands HD2 Transmog a palette library this way
+  (HD2 Transmog's `sdk/PALETTES.md` has the format). Its usual lines work as they are:
+
+  ```lua
+  if TransmogPalettes then TransmogPalettes.register(spec)
+  else TransmogPalettesQueue = TransmogPalettesQueue or {} table.insert(TransmogPalettesQueue, spec) end
+  ```
+
+  - `register` takes one table of plain data and HD2 Transmog gets a copy made all the way down: keys strings, numbers
+    or booleans; values those (strings up to 256 characters) or tables of them, 8 deep and 16,000 values at most. A
+    function, a userdata or a table inside itself refuses the whole call (`nil, why`, and the log says why once).
+    Nothing HD2 Transmog gets leads back into your mod, and your table stays yours.
+  - When HD2 Transmog is installed, every mod has `TransmogPalettes` from the start. A call made before HD2 Transmog
+    has set it up answers `'held'`: it's kept (64 calls at most) and made, in order, as soon as HD2 Transmog has, with
+    the answers in the log. After that a call answers what HD2 Transmog answers (`true`, or `nil, why`).
+  - Each call is guarded under your mod's own crash key (`TransmogPalettes.register`); 64 calls per mod.
+  - HD2 Transmog checks every library and uses it only once the player turns it on in its own Settings.
 - **What a trusted mod takes from the others:** only the shared globals its place on the list names, each from one
   named mod, as its own copy (made when that mod sets it, so a change another mod makes to the shared table never
   reaches it). HD2 Transmog takes only `NativeNotification`, from the Native Notification its package carries
