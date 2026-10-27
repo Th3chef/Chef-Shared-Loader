@@ -708,7 +708,7 @@ drawn indented and in a dimmer yellow, its rows indented with it.
 - **Keep `update` cheap, and idle when there's nothing to do.** The log's `status:` line shows each mod's average
   and worst milliseconds a frame (written when the numbers move, else every 10 minutes). A mod that raises 20 Lua
   errors is turned off for the session: its timers, watches, listeners and spawned things go with it.
-- **Below native Render Scale,** the loader draws your screen drawing where the whole screen is reachable and
+- **Below native (a Render Scale below native, or Borderless at a Resolution below the monitor's),** the loader draws your screen drawing where the whole screen is reachable and
   converts your colors, so you don't need to do anything. If you ship textures, `chef.ui_textures` lets you hand it
   pre-converted copies. Layers stay under the game's menus there, so layers 999 and up all draw at one layer: keep
   plain layers at 998 or lower (`chef.TOP` layers aren't affected).
