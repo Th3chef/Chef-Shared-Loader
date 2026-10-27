@@ -55,7 +55,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.2.4'
+local VERSION = '1.3.0'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
@@ -78,22 +78,25 @@ local CAMERA_RETRY = 1                   -- seconds between searches for the cam
 --   files: its own files in %LOCALAPPDATA% (below dir, names starting with name)
 --   patches: game patch files in data\ (its scratch file, and patches carrying its marker; sandbox.lua checks a file
 --   before it takes a patch's name)
---   view: the one global of its own the other runtime mods may read, as a read-only view (runtime.lua): the calls
---   listed (a list of keys keeps only those of the first answer), every answer copied as plain values
+--   view: a global of its own the other runtime mods may read, as a read-only view (runtime.lua): the calls
+--   listed (a list of keys keeps only those of the first answer), every answer copied as plain values; or a list of
+--   such views, each its own global. A view with takes calls is an inbox: every mod gets it, and each of those calls
+--   hands the trusted mod one table of plain data, copied (one made before the trusted mod set its global is held
+--   and made once it has)
 --   accepts: the other runtime mods' shared globals it takes, each from the one mod named (its own copy of the top
 --   level); it gets none of the others
 local TRUSTED = {
+  ['mods/libra/match_your_colors'] = { title = 'Helmet Color-Match', network = true, lobby_key = 'hd2myc' },
   ['mods/hd2tm/transmog'] = { title = 'HD2 Transmog', network = true, lobby_key = 'hd2tm',
-    files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' } },
+    files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' },
+              { dir = '', name = 'hd2transmog-1.1' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.1' },
+              { dir = '', name = 'hd2transmog-outfit-' } },
     patches = { scratch = 'hd2tm-wardrobe.tmp', marker = '-- HD2 Transmog wardrobe' },
-    -- the shared globals it takes, each from the one mod named: the notification library its package carries (its
-    -- notices: the wardrobe built, a problem to report)
     accepts = { NativeNotification = 'mods/native_notification/core' },
-    -- what it has on (snapshot without its catalog), the native pieces it wears and its own avatar (worn), and what its
-    -- last apply spawned (report): reads only, nothing that applies, saves, builds or opens anything
-    view = { global = 'TransmogUI', fields = { 'version' },
-             calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
-                       worn = true, report = true } } },
+    view = { { global = 'TransmogUI', fields = { 'version' },
+               calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
+                         worn = true, report = true } },
+             { global = 'TransmogPalettes', fields = { 'api' }, takes = { register = true } } } },
 }
 
 local G = _G
@@ -3299,12 +3302,14 @@ function M.index(ctx, P)
   local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
               compared = 0, read = 0, excl = 0 }
   -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index *
-  -- 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
-  -- table by up to 200,000, and each doubling of it is one step of tens of ms no pause can split. The number is the
-  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits go
-  -- with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits
-  -- are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's
-  -- low byte into 256, so no single table grows to 200,000 keys (one rehash of that is tens of ms too).
+  -- 2^21 + entry (a patch up to 2,097,152 rows, the most the sandbox lets a mod place). The key is a number, not the
+  -- row's 16 bytes as a string: a string per row would grow Lua's string table by hundreds of thousands, and each
+  -- doubling of it is one step of tens of ms no pause can split. The number is the id's low 45 bits * 256 + the type's
+  -- index (types are a few strings, seen again and again); the id's top 19 bits go with the code in the value
+  -- (top * 2^34 + code: up to 8191 patches, below 2^53, so a double holds it exactly), so two ids that share the low
+  -- bits are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the
+  -- id's low byte into 256, so no single table grows to hundreds of thousands of keys (one rehash of that is tens of
+  -- ms too).
   local wins, shads, wins_s, shads_s, tix, ntypes = {}, {}, {}, {}, {}, 0
   for b = 0, 255 do wins[b], shads[b] = {}, {} end
   local list = P.patches()
@@ -3328,7 +3333,7 @@ function M.index(ctx, P)
         local head = f:read(72) or ''
         if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
         local t_, e_ = u32(head, 5), u32(head, 9)
-        if t_ > 4096 or e_ > 200000 then return end
+        if t_ > 4096 or e_ > 2097152 then return end
         if t_ > 0 and #(f:read(t_ * 32) or '') < t_ * 32 then return end
         nt, ne = t_, e_
       end)
@@ -3347,20 +3352,20 @@ function M.index(ctx, P)
             if not ti then ntypes = ntypes + 1; ti = ntypes; tix[ts] = ti end
             local lo, hi = u32(s, at), u32(s, at + 4)
             local b, top = lo % 256, floor(hi / 8192)
-            local code = pi * 262144 + e
+            local code = pi * 2097152 + e
             local wt, st, k = wins[b], shads[b], ((hi % 8192) * 4294967296 + lo) * 256 + ti
             local v = ti < 256 and wt[k] or nil
-            local was = v and floor(v / 2147483648) == top and v % 2147483648 or nil
+            local was = v and floor(v / 17179869184) == top and v % 17179869184 or nil
             if ti >= 256 or (v and not was) then                 -- (by its 16 bytes)
               wt, st, k = wins_s, shads_s, s_sub(s, at, at + 15)
               was = wt[k]
             end
-            if was and floor(was / 262144) ~= pi then          -- (a resource listed twice in one patch: once)
+            if was and floor(was / 2097152) ~= pi then         -- (a resource listed twice in one patch: once)
               local sh = st[k]
               if not sh then sh = {}; st[k] = sh end
               table.insert(sh, 1, was)
             end
-            wt[k] = wt == wins_s and code or top * 2147483648 + code
+            wt[k] = wt == wins_s and code or top * 17179869184 + code
           end
           e0 = e0 + n
           pause()
@@ -3373,7 +3378,7 @@ function M.index(ctx, P)
     pause()
   end
   local function row(code)
-    local pi, e = floor(code / 262144), code % 262144
+    local pi, e = floor(code / 2097152), code % 2097152
     local blocks = tocs[pi]
     local b = floor(e / 512)
     return list[pi], blocks and blocks[b + 1] or '', (e - b * 512) * 80 + 1
@@ -3422,7 +3427,7 @@ function M.index(ctx, P)
     for key, list_of in pairs(st) do            -- (nothing is added while this walks it: yielding is fine)
       steps = steps + 1
       if steps % 256 == 0 then pause() end
-      local wp, wtoc, wat = row(wt[key] % 2147483648)
+      local wp, wtoc, wat = row(wt[key] % 17179869184)
       for _, code in ipairs(list_of) do
         local lp, ltoc, lat = row(code)
         if label(wp) ~= label(lp) then
@@ -3485,14 +3490,14 @@ function M.index(ctx, P)
     local k = ti and ti < 256 and ((hi % 8192) * 4294967296 + lo) * 256 + ti
     local v = k and wins[b][k]
     local w, sh
-    if v and floor(v / 2147483648) == floor(hi / 8192) then w, sh = v % 2147483648, shads[b][k]
+    if v and floor(v / 17179869184) == floor(hi / 8192) then w, sh = v % 17179869184, shads[b][k]
     else w, sh = wins_s[key], shads_s[key] end
     if not w then return nil end
     local out = {}
-    local pi = floor(w / 262144)
+    local pi = floor(w / 2097152)
     out[1] = { patch = list[pi].n, file = list[pi].file, mods = mods_of(list[pi]) }
     for _, code in ipairs(sh or {}) do
-      local p = list[floor(code / 262144)]
+      local p = list[floor(code / 2097152)]
       out[#out + 1] = { patch = p.n, file = p.file, mods = mods_of(p) }
     end
     return out
@@ -5020,12 +5025,13 @@ function M.install(ctx, L)
     for _, m in ipairs(L.addons) do
       -- (another mod's version read raw: its table can't raise into this call)
       local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-      local req = {}
+      local req, lacks = {}, {}
       for i, q in ipairs(m.requires or {}) do req[i] = q end
+      for i, q in ipairs(m.missing or {}) do lacks[i] = q end
       out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
                         version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
                         state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
-                        requires = req }
+                        requires = req, missing = lacks }
     end
     for _, b in ipairs(L.boots()) do
       local r = b.a or b
@@ -5045,10 +5051,11 @@ function M.install(ctx, L)
   end
   local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
   function util.health_text()
-    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile' }
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile\tmissing' }
     for _, m in ipairs(util.mod_list()) do
       out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
-        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file) }, '\t')
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file),
+        field(m.missing and concat(m.missing, ' ') or '') }, '\t')
     end
     return concat(out, '\n') .. '\n'
   end
@@ -5548,7 +5555,8 @@ function M.install(ctx)
     local h = f:read(72)
     if type(h) ~= 'string' or #h < 72 or u32(h, 1) ~= 0xF0000011 then return nil, 'not a patch file' end
     local types, count = u32(h, 5), u32(h, 9)
-    if types > 4096 or count > 262144 then return nil, 'not a patch file' end
+    -- (a mod's built patch can pass 375,000 rows; the rows are read 4096 at a time, so the cap only bounds the time)
+    if types > 4096 or count > 2097152 then return nil, 'not a patch file' end
     local tt = types > 0 and f:read(32 * types) or ''
     if #tt ~= 32 * types then return nil, 'a cut-off patch file' end
     -- The layout must be the one I read: the type table's counts (u64 at +16) add up to the row count and every row's
@@ -6143,8 +6151,11 @@ services.runtime = (function()
 -- Chef Shared Loader: the HD2Runtime look-alike
 -- Mods written for the HD2Runtime API (another loader's boot script, version 0.1.0) find what it gives them:
 --   * the HD2Runtime global and require('hd2rt'): version, api (1), mod(spec), status(), frame()
---   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off }; spec: id (letters, digits, _ . -), api
---     (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources)
+--   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off, missing, request }; spec: id (letters,
+--     digits, _ . -), api (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources),
+--     needs (engine calls and grants it can't do without: what of them I lack is logged, shown and in handle.missing())
+--   * handle.request('lobby' | 'files' | 'patches', why): mine; asks for a grant before the work that needs it
+--     ('granted', 'asked': the player was told to say yes in my options menu, or nil, why: not on my list)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
 --     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
 --     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
@@ -6153,13 +6164,20 @@ services.runtime = (function()
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
 --     a world that's gone, or a runtime-built one, is refused), and a refused call returns nil and why
---   * what a mod made is undone when it stops: its units destroyed, its GUIs destroyed, units it hid shown, materials
---     it swapped on units it didn't make put back, mouse dead zones it changed put back
+--   * live palette materials, as that runtime has them: Material.private_aliases (declared private ids and slots),
+--     Material.set_private_texture, Material.reinitialize_shader and Mesh.refresh_instance_hash on a declared material
+--     of a copy the mod spawned in this frame, and Unit.paint_private_cape / restore_private_cape (the game's medium
+--     cape, bound by its slot, put back by it without a read); each only where the engine has what it calls
+--   * what a mod made is undone when it stops: the game's capes it painted put back (first), its units destroyed, its
+--     GUIs destroyed, units it hid shown, materials it swapped on units it didn't make put back, mouse dead zones it
+--     changed put back
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
 -- _G; never a name the game already has. A trusted mod's globals stay its own, but its TRUSTED entry may name one
 -- (view) the others get as a read-only view: only the calls listed, plain arguments in, copies of plain values out.
+-- A view whose calls take data (takes) is an inbox: every mod has it, and a call hands the trusted mod one plain table,
+-- copied; one made before the trusted mod set its global is held and made once it has.
 -- Of the others' globals, a trusted mod takes only the ones its entry accepts, each from the one mod named.
 -- Plain Lua 5.1.
 
@@ -6188,6 +6206,8 @@ local function int(v, lo, hi) return type(v) == 'number' and v == floor(v) and v
 local function finite(v, limit) return type(v) == 'number' and v == v and abs(v) <= limit end
 local function hex16(s) return type(s) == 'string' and #s == 16 and s:match('^%x+$') ~= nil end
 local EVENTS = { update = true, render = true, shutdown = true, stop = true }
+-- what a mod may ask for (spec.needs, handle.request), as the log names it
+local GRANTS = { lobby = 'the Steam lobby', files = 'its own files', patches = 'game patch files' }
 -- the fonts a GUI's text may use: the ones the game makes a material for itself (another name ends the game), each
 -- with that material; a locale's own UI font by its 16-hex id
 local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
@@ -6196,11 +6216,21 @@ local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
 local GUIS_PER_MOD, PRIMITIVES, SETS_PER_SECOND = 6, 12000, 10
 -- the resource types Application.can_get answers for (another string goes to the engine as a type name)
 local CAN_GET = { unit = true, material = true, texture = true, font = true, runtime_font = true, package = true }
+-- the private palette ids and the native cape's resources: lower-case 16 hex, as the HD2 Lua Runtime takes them
+local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
+-- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
+-- slot, the material the game gives it and how many mesh positions carry that slot (the medium cape, build 26088801),
+-- and the texture variables a paint sets, every one of them each time
+local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 } }
+local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
+local CAPE_FIELD = {}
+for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
 
 -- ctx: log(line), mod_log(owner, text), guarded(owner, key, fn, ...), fn_of(name), G (the game's globals),
 -- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
 -- trusted(owner) -> its TRUSTED entry or nil, attach(owner, hooks) (the hooks the loader calls with the mod's own),
--- now() -> seconds
+-- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list),
+-- access(owner) -> its patches grant { consent() -> boolean, asked(why) } or nil
 function M.install(ctx)
   local rt = {}
   local log, guarded, fn_of, util = ctx.log, ctx.guarded, ctx.fn_of, ctx.util
@@ -6212,6 +6242,17 @@ function M.install(ctx)
   -- a trusted mod's read-only view: global name -> { by, real, spec, on }; view.made: the views handed out (weak)
   local view = { by_name = {}, made = setmetatable({}, { __mode = 'k' }), LIMIT = 4000, DEPTH = 8,
                   reserved = ctx.reserved or {} }   -- view name -> its trusted mod (no one else shares under it)
+  -- what a view's takes calls hand in: 16,000 values a call (room for a large table of data), 64 calls per mod
+  -- and call, and 128 calls held for a trusted mod that hasn't set its global or call yet: name -> list, false once it
+  -- has
+  view.TAKE, view.TAKES, view.HELD, view.pending, view.took, view.told = 16000, 64, 128, {}, {}, {}
+  -- and 16 of the held ones a mod and call (so one mod can't fill the queue for the others): held_by, reader|call ->
+  -- how many it has held; held_n, how many are held in all
+  view.HELD_EACH, view.held_by, view.held_n = 16, {}, 0
+  -- an inbox whose held calls can never be made: shut, name -> true (nothing more is held for it until the trusted mod
+  -- sets its global again), and waits, name -> how many of the trusted mod's updates its held calls have waited
+  -- through for their call (view.WAIT at most)
+  view.shut, view.waits, view.WAIT = {}, {}, 300
   -- the engine values a view passes on as they are (others, file handles say, are left out)
   view.PASS = { Unit = true, IdString64 = true, Vector3 = true, Quaternion = true }
 
@@ -6226,6 +6267,21 @@ function M.install(ctx)
     if not (t == nil and why == 'skipped') then rec.seen[name] = true end
     if type(t) ~= 'table' then return nil, why end
     return unpack(t, 1, t.n)
+  end
+  -- a call whose answers are checked (the palette calls): protected every time, every answer packed ({ n = ... });
+  -- its first call for this mod breadcrumbed through guarded, as once() does. -> the answers, or nil, why
+  local function checked(rec, name, ...)
+    local fn = fn_of(name)
+    if fn == nil then return nil, name .. ' is not in this game build' end
+    if rec.seen[name] then
+      local ok, t = pcall(packed, fn, ...)
+      if ok then return t end
+      return nil, tostring(t)
+    end
+    local t, why = guarded(rec.owner, name, packed, fn, ...)
+    if not (t == nil and why == 'skipped') then rec.seen[name] = true end
+    if type(t) ~= 'table' then return nil, why end
+    return t
   end
   -- a refusal: nil, why; the first of each kind (binding and why, 30 a mod at most) goes to the log
   local function refuse(rec, binding, why)
@@ -6347,13 +6403,183 @@ function M.install(ctx)
   local meshes = setmetatable({}, { __mode = 'k' })
   local materials = setmetatable({}, { __mode = 'k' })
   local versions = setmetatable({}, { __mode = 'k' })   -- unit -> how many times its materials were swapped
+  -- the frame a mod spawned each of its units in: the palette writes are for a copy in that frame only
+  local spawned = setmetatable({}, { __mode = 'k' })
+  -- the game's capes a mod painted with its private material (Unit.paint_private_cape): unit -> the mod that has it
+  -- painted, and unit -> its seed (slot, source and positions, as hex and numbers). A cape with a seed is never read
+  -- again outside a fresh paint: its meshes are a private instance's then, and reading those back is what faulted
+  local cape_owners = setmetatable({}, { __mode = 'k' })
+  local cape_seeds = setmetatable({}, { __mode = 'k' })
   local function mesh_ok(rec, m)
     local e = meshes[m]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit)
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
   end
   local function material_ok(rec, mat)
     local e = materials[mat]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and e.version == (versions[e.unit] or 0)
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
+      and e.version == (versions[e.unit] or 0)
+  end
+
+  -- ---------------------------------------------------------------- the game's cape, painted live
+  -- (the HD2 Lua Runtime's cape_palette.lua, ported to my bookkeeping.) One mod's paints of the game's own medium cape
+  -- with its private material: the binding is replaced by the cape's stable slot before any mesh or material is read
+  -- (so what's read is the private instance, never the game's shared one), and put back by that slot without reading
+  -- the painted meshes. No engine value outlives a call: a record keeps hex strings and numbers.
+  local function cape_for(rec)
+    local self, records = {}, setmetatable({}, { __mode = 'k' })
+    -- inside a paint: an engine call that fails, or a read with no answer, raises (and the paint puts the cape back)
+    local function call(name, ...)
+      local r, why = checked(rec, name, ...)
+      if not r then error(tostring(why), 0) end
+      return r
+    end
+    local function get(name, ...)
+      local v = call(name, ...)[1]
+      if v == nil then error(name .. ' gave no answer', 0) end
+      return v
+    end
+    -- a write, with the answers it was seen to give: a binding the material it replaced, a mesh refresh the mesh,
+    -- the setters nothing
+    local function write(name, ...)
+      local r = call(name, ...)
+      if name == 'Unit.set_material' then
+        if not (r.n == 1 and kind(r[1]) == 'IdString64') then error('unexpected material binding return', 0) end
+        return get('IdString64.to_hex', r[1])
+      elseif name == 'Mesh.refresh_instance_hash' then
+        if not (r.n == 1 and kind(r[1]) == 'MeshObject') then error('unexpected mesh refresh return', 0) end
+      elseif r.n ~= 0 then error('unexpected private cape setter return', 0) end
+    end
+    local function loaded(what, hex) return hex16_lower(hex) and resource(rec, what, hex) ~= nil end
+    -- (the material handles anyone holds of this cape are stale from now on)
+    local function bind(u, r, id)
+      versions[u] = (versions[u] or 0) + 1
+      return write('Unit.set_material', u, get('IdString32.from_hex', r.slot), get('IdString64.from_hex', id))
+    end
+    local function snapshot(u, spec)
+      local positions = {}
+      for i = 1, get('Unit.num_meshes', u) do
+        local mesh = get('Unit.mesh', u, i)
+        for j = 1, get('Mesh.num_materials', mesh) do
+          if get('IdString32.to_hex', get('Mesh.material_slot_id', mesh, j)) == spec.slot then
+            if get('IdString64.to_hex', get('Material.id64', get('Mesh.material', mesh, j))) ~= spec.source then
+              error('cape source was replaced by another mod', 0)
+            end
+            positions[#positions + 1] = { i, j }
+          end
+        end
+      end
+      if #positions ~= spec.positions then error('cape material layout changed', 0) end
+      return { slot = spec.slot, source = spec.source, positions = positions }
+    end
+    -- a cape is this mod's to paint: the game's (not one the mod spawned), in a live world, not another mod's painted
+    -- one, and one my unit rules let a mod read
+    local function allowed(u)
+      if rec.owned[u] or (cape_owners[u] and cape_owners[u] ~= rec) or unit_ask(rec, 'Unit.mesh', u) then return false end
+      return listed(once(rec, 'Unit.world', u))
+    end
+    local function restored(u)
+      cape_seeds[u] = self.seed(u)
+      if cape_owners[u] == rec then cape_owners[u] = nil end
+    end
+    function self.restore(u)
+      local r = records[u]
+      if not r then return true end
+      if not r.active then restored(u); return true end
+      if alive(rec, u) then
+        local ok, why = pcall(bind, u, r, r.source)
+        if not ok then return nil, tostring(why) end
+      end
+      r.active = false
+      restored(u)
+      return true
+    end
+    function self.apply(u, alias, fields)
+      if not alive(rec, u) or not allowed(u) then return nil, 'Cape unit is unavailable' end
+      local name = once(rec, 'Unit.resource_name', u)
+      local spec = name ~= nil and CAPES[once(rec, 'IdString64.to_hex', name) or ''] or nil
+      if not spec then return nil, 'This cape geometry has no live-paint contract' end
+      local declared = rec.palette_aliases and rec.palette_aliases[alias]
+      if not declared or not loaded('material', alias) or alias == spec.source then return nil, 'Private cape material is unavailable' end
+      if type(fields) ~= 'table' then return nil, 'Invalid cape texture tuple' end
+      local wanted = {}
+      for field, value in pairs(fields) do
+        if not CAPE_FIELD[field] or not declared[field] then return nil, 'Undeclared cape texture slot' end
+        if not loaded('texture', value) then return nil, 'Cape texture is not loaded' end
+        wanted[field] = value
+      end
+      for _, field in ipairs(CAPE_FIELDS) do if not wanted[field] then return nil, 'Incomplete cape texture tuple' end end
+      local r = records[u]
+      if not r then
+        -- (a cape another mod painted before: its seed, so the painted meshes aren't read again)
+        local prior = cape_seeds[u]
+        if prior then
+          if prior.slot ~= spec.slot or prior.source ~= spec.source or #prior.positions ~= spec.positions then
+            return nil, 'Stored cape layout does not match this geometry'
+          end
+          r = { slot = prior.slot, source = prior.source, positions = {} }
+          for i, p in ipairs(prior.positions) do r.positions[i] = { p[1], p[2] } end
+        else
+          local ok, result = pcall(snapshot, u, spec)
+          if not ok then return nil, tostring(result) end
+          r = result
+        end
+        records[u] = r
+      end
+      local function transaction()
+        -- (the private instance painted before is retired without being read, the same alias again too)
+        if r.active then bind(u, r, r.source); r.active = false end
+        r.active = true
+        bind(u, r, alias)
+        local function material(pos)
+          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
+          local mesh = get('Unit.mesh', u, pos[1])
+          if pos[2] > get('Mesh.num_materials', mesh) then error('cape slot count changed', 0) end
+          local mat = get('Mesh.material', mesh, pos[2])
+          if get('IdString64.to_hex', get('Material.id64', mat)) ~= alias then error('private cape binding changed', 0) end
+          return mat
+        end
+        for _, pos in ipairs(r.positions) do
+          for _, field in ipairs(CAPE_FIELDS) do
+            write('Material.set_texture', material(pos), field, get('IdString64.from_hex', wanted[field]))
+          end
+        end
+        for _, pos in ipairs(r.positions) do write('Material.reinitialize_shader', material(pos)) end
+        for _, pos in ipairs(r.positions) do
+          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
+          write('Mesh.refresh_instance_hash', get('Unit.mesh', u, pos[1]))
+        end
+      end
+      local ok, why = pcall(transaction)
+      if not ok then
+        local reset, problem = self.restore(u)
+        return nil, tostring(why) .. (not reset and '; restore failed: ' .. tostring(problem) or '')
+      end
+      return true
+    end
+    function self.active(u) return records[u] ~= nil and records[u].active == true end
+    function self.known(u) return records[u] ~= nil end
+    function self.seed(u)
+      local r = records[u]
+      if not r then return nil end
+      local s = { slot = r.slot, source = r.source, positions = {} }
+      for i, p in ipairs(r.positions) do s.positions[i] = { p[1], p[2] } end
+      return s
+    end
+    -- every cape this mod painted put back (when it stops, before its units go)
+    function self.release()
+      local errors = {}
+      for u in pairs(records) do
+        local ok, why = self.restore(u)
+        if not ok then errors[#errors + 1] = why end
+      end
+      if #errors > 0 then return nil, concat(errors, '; ') end
+      return true
+    end
+    -- a new world: the capes of the one that's gone are let go untouched
+    function self.drop_gone()
+      for u in pairs(records) do if util.gone(u) then records[u] = nil end end
+    end
+    return self
   end
 
   -- ---------------------------------------------------------------- the engine table one mod gets
@@ -6401,6 +6627,7 @@ function M.install(ctx)
     function N.Unit.mesh(u, i)
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, 'Unit.mesh', why) end
+      if cape_seeds[u] then return refuse(rec, 'Unit.mesh', 'native cape reads require a fresh private transaction') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, 'Unit.mesh', 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m ~= nil then
@@ -6448,6 +6675,7 @@ function M.install(ctx)
       local b = 'Unit.set_material_at'
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, b, why) end
+      if cape_seeds[u] then return refuse(rec, b, 'use the native cape transaction or restoration') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, b, 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m == nil or not int(j, 1, once(rec, 'Mesh.num_materials', m) or 0) then return refuse(rec, b, 'no such material position') end
@@ -6533,6 +6761,109 @@ function M.install(ctx)
       return true
     end
 
+    -- Live palette materials (the HD2 Lua Runtime's guard.lua, ported): a mod declares its private material ids and
+    -- their texture slots, then, in the frame it spawned a copy, writes those slots on the copy's private material,
+    -- reinitializes its shader and refreshes its mesh's instance hash. That recipe was seen to work only so; anything
+    -- else (a material another unit shares, the game's own, a copy from an earlier frame, an undeclared slot) is
+    -- refused before it reaches the engine. A declaration writes nothing.
+    -- list: { { id = 16 lower-case hex, slots = { texture variable names } }, ... }; replaces the mod's last one
+    function N.Material.private_aliases(list)
+      local b = 'Material.private_aliases'
+      if type(list) ~= 'table' then return refuse(rec, b, 'expected a private ID list') end
+      local set = {}
+      for _, entry in ipairs(list) do
+        if type(entry) ~= 'table' or not hex16_lower(entry.id) or type(entry.slots) ~= 'table' then
+          return refuse(rec, b, 'invalid private material declaration')
+        end
+        local slots = {}
+        for _, name in ipairs(entry.slots) do
+          if type(name) ~= 'string' or #name > 64 or not name:match('^[%w_]+$') then return refuse(rec, b, 'invalid texture slot name') end
+          slots[name] = true
+        end
+        set[entry.id] = slots
+      end
+      rec.palette_aliases = set
+      return true
+    end
+    -- the declared slots of a material, if it's one of the mod's private ones
+    local function private_of(mat)
+      local id = once(rec, 'Material.id64', mat)
+      local hex = id ~= nil and once(rec, 'IdString64.to_hex', id) or nil
+      return type(hex) == 'string' and rec.palette_aliases ~= nil and rec.palette_aliases[hex] or nil
+    end
+    -- an owned copy's material or mesh handle from this frame, the copy spawned in this frame
+    local function spawn_frame(e) return owned[e.unit] and spawned[e.unit] == ctx.frame() end
+    if type(fn_of('Material.set_texture')) == 'function' then
+      function N.Material.set_private_texture(mat, variable, texture)
+        local b = 'Material.set_private_texture'
+        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
+          return refuse(rec, b, 'not a registered owned spawn-frame material')
+        end
+        if type(variable) ~= 'string' then return refuse(rec, b, 'variable name is not a string') end
+        if not private_of(mat)[variable] then return refuse(rec, b, 'texture slot was not declared') end
+        local res = resource(rec, 'texture', texture)
+        if not res then return refuse(rec, b, 'texture is not loaded') end
+        local r, why = checked(rec, 'Material.set_texture', mat, variable, res)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    if type(fn_of('Material.reinitialize_shader')) == 'function' then
+      function N.Material.reinitialize_shader(mat)
+        local b = 'Material.reinitialize_shader'
+        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
+          return refuse(rec, b, 'not an owned spawn-frame material')
+        end
+        local r, why = checked(rec, b, mat)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    if type(fn_of('Mesh.refresh_instance_hash')) == 'function' then
+      function N.Mesh.refresh_instance_hash(mesh)
+        local b = 'Mesh.refresh_instance_hash'
+        if not mesh_ok(rec, mesh) or not spawn_frame(meshes[mesh]) then return refuse(rec, b, 'not an owned spawn-frame mesh') end
+        local private, n = false, once(rec, 'Mesh.num_materials', mesh)
+        for i = 1, type(n) == 'number' and n or 0 do
+          local mat = once(rec, 'Mesh.material', mesh, i)
+          if mat ~= nil and private_of(mat) then private = true end
+        end
+        if not private then return refuse(rec, b, 'mesh has no registered private material') end
+        local r, why = checked(rec, b, mesh)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 1 or kind(r[1]) ~= 'MeshObject' then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    -- the game's own medium cape painted with a declared private material (fields: texture variable -> 16-hex texture,
+    -- all five of CAPE_FIELDS), and put back; only where the engine has every call the paint makes
+    local function has(name) return type(fn_of(name)) == 'function' end
+    if has('IdString32.from_hex') and has('IdString32.to_hex') and has('Material.reinitialize_shader')
+      and has('Mesh.refresh_instance_hash') then
+      local cape = cape_for(rec)
+      rec.cape = cape
+      function N.Unit.paint_private_cape(u, alias, fields)
+        local ok, why = cape.apply(u, alias, fields)
+        if cape.known(u) then
+          cape_seeds[u] = cape.seed(u)
+          if cape.active(u) then cape_owners[u] = rec
+          elseif cape_owners[u] == rec then cape_owners[u] = nil end
+          -- (the cape is put back by its slot from now on, without a read: never by the rebound list, which reads it)
+          if rec.rebound then rec.rebound[u] = nil end
+        end
+        if not ok then return refuse(rec, 'Unit.paint_private_cape', why) end
+        return true
+      end
+      function N.Unit.restore_private_cape(u)
+        if cape_owners[u] and cape_owners[u] ~= rec then return refuse(rec, 'Unit.restore_private_cape', 'cape belongs to another mod') end
+        local ok, why = cape.restore(u)
+        if not ok then return refuse(rec, 'Unit.restore_private_cape', why) end
+        return true
+      end
+    end
+
     -- World
     for _, name in ipairs({ 'units', 'num_units' }) do
       local b = 'World.' .. name
@@ -6561,7 +6892,7 @@ function M.install(ctx)
       if rotation ~= nil then u = once(rec, b, w, res, position, rotation)
       elseif position ~= nil then u = once(rec, b, w, res, position)
       else u = once(rec, b, w, res) end
-      if kind(u) == 'Unit' then owned[u] = w; util.fresh(u) end
+      if kind(u) == 'Unit' then owned[u] = w; spawned[u] = ctx.frame(); util.fresh(u) end
       return u
     end
     local function own_in(w, u)
@@ -7003,10 +7334,17 @@ function M.install(ctx)
   local function release(rec)
     local o = rec.owner
     local function g(name, ...) return guarded(o, name, fn_of(name), ...) end
+    -- the game's capes it painted, put back by their slot first (before anything reads them or its units go)
+    if rec.cape then
+      local ok, done, why = pcall(rec.cape.release)
+      if not (ok and done) then log(fmt('[%s] %s: putting back the capes it painted failed: %s', o, rec.id, tostring(ok and why or done))) end
+    end
     for i, v in pairs(rec.dead_zones or {}) do g('Mouse.set_dead_zone', i, v[1], v[2]) end
     rec.dead_zones = nil
+    -- (never a cape some mod has painted: its meshes are a private instance's, and reading those back is what faulted;
+    -- the cape is put back by its slot by the mod that painted it)
     for u, list in pairs(rec.rebound or {}) do
-      if type(u) == 'userdata' and not util.gone(u) and kind(u) == 'Unit' and g('Unit.alive', u) == true then
+      if type(u) == 'userdata' and not util.gone(u) and not cape_seeds[u] and kind(u) == 'Unit' and g('Unit.alive', u) == true then
         for key, previous in pairs(list) do
           local i, j = key:match('^(%d+):(%d+)$')
           i, j = tonumber(i), tonumber(j)
@@ -7054,6 +7392,28 @@ function M.install(ctx)
   end
   -- the loader stopped this mod (errors, a failed start, dev reload): everything it made is undone
   function rt.forget(owner)
+    -- (what it handed to an inbox and is still held: I drop it, never making a call for a mod that stopped; the lists
+    -- stay, so mods that start later still get the inbox)
+    for k, held in pairs(view.pending) do
+      if type(held) == 'table' then
+        local keep = {}
+        for _, h in ipairs(held) do if h.reader == owner then view.unheld(h) else keep[#keep + 1] = h end end
+        if #keep < #held then
+          view.pending[k] = keep
+          log(fmt('%s: %d held call(s) dropped: %s stopped', k, #held - #keep, owner))
+        end
+      end
+    end
+    -- (a trusted mod's inboxes: what's held for it goes; if it starts again, it's waited for afresh, and one it hadn't
+    -- set its global for is still handed to mods that start later)
+    for k, by in pairs(view.reserved) do
+      if by == owner then
+        local was = view.pending[k]
+        view.drop(k, owner .. ' stopped')
+        if type(was) == 'table' then view.pending[k] = {} end
+        view.shut[k] = nil
+      end
+    end
     local o = owners[owner]
     if not o then return end
     for _, rec in ipairs(o.order) do switch_off(rec, 'stopped by the loader') end
@@ -7078,11 +7438,15 @@ function M.install(ctx)
     for m in pairs(meshes) do meshes[m] = nil end
     for m in pairs(materials) do materials[m] = nil end
     for u in pairs(versions) do versions[u] = nil end
+    for u in pairs(spawned) do if util.gone(u) then spawned[u] = nil end end
+    for u in pairs(cape_seeds) do if util.gone(u) then cape_seeds[u] = nil end end
+    for u in pairs(cape_owners) do if util.gone(u) then cape_owners[u] = nil end end
     for _, o in pairs(owners) do
       for _, rec in ipairs(o.order) do
         for u, w in pairs(rec.owned) do if not listed(w) then rec.owned[u] = nil end end
         for u in pairs(rec.hidden) do if util.gone(u) then rec.hidden[u] = nil end end
         for u in pairs(rec.rebound or {}) do if util.gone(u) then rec.rebound[u] = nil end end
+        if rec.cape then rec.cape.drop_gone() end
         for gui, e in pairs(rec.guis) do
           if (ctx.instance and e.instance ~= ctx.instance()) or not listed(e.world) then rec.guis[gui] = nil end
         end
@@ -7092,6 +7456,11 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
   local function dispatch(o, event, ...)
+    -- (a trusted mod that set its view's global with rawset, which I'm not told of: found before its first update)
+    local first_update = event == 'update' and not o.looked
+    if first_update then o.looked = true; view.look(o) end
+    -- (calls held for its inbox until it fills in their call: made as soon as it has; nothing to do once none is held)
+    if event == 'update' and view.held_n > 0 then view.tick(o) end
     local first
     for _, rec in ipairs(o.order) do
       if rec.state == 'active' then
@@ -7103,6 +7472,8 @@ function M.install(ctx)
         end
       end
     end
+    -- (an inbox it still hasn't set its global for by the end of its first update: it never will)
+    if first_update then view.unset(o) end
     if first ~= nil then error(first, 0) end
   end
 
@@ -7114,6 +7485,22 @@ function M.install(ctx)
       owners[owner] = o
     end
     return o
+  end
+  -- what a mod has of a grant: 'granted', 'asked' (its list entry gives it once the player says yes; with why, the
+  -- player is told now), or nil (its entry doesn't give it, or it has none)
+  local function grant_state(owner, what, why)
+    local t = ctx.trusted(owner)
+    if not t then return nil end
+    if what == 'lobby' then return t.network and 'granted' or nil end
+    if what == 'files' then return t.files and 'granted' or nil end
+    if what == 'patches' then
+      local p = t.patches and ctx.access and ctx.access(owner)
+      if not p then return nil end
+      if p.consent() then return 'granted' end
+      if why then p.asked(why) end
+      return 'asked'
+    end
+    return nil
   end
   local function new_mod(o, spec)
     if type(spec) ~= 'table' or type(spec.id) ~= 'string' or not spec.id:match('^[%w_%.%-]+$') or #spec.id > 64 then
@@ -7128,6 +7515,20 @@ function M.install(ctx)
     for _, h in ipairs(type(spec.bones) == 'table' and spec.bones or {}) do
       if not hex16(h) then return nil, 'bones lists 16-hex unit resources' end
       bones[h:lower()] = true
+    end
+    -- what the mod says it needs (spec.needs): engine calls by name ('Material.set_texture') and what my list may give
+    -- a trusted mod ('lobby', 'files', 'patches'). I check them here, once, so a mod made for a newer runtime or one
+    -- that isn't on my list hears what's missing (handle.missing) and the player sees it, instead of a mod that starts
+    -- and half works
+    local needs = {}
+    if spec.needs ~= nil then
+      if type(spec.needs) ~= 'table' or #spec.needs > 64 then return nil, 'needs lists at most 64 names' end
+      for _, n in ipairs(spec.needs) do
+        if type(n) ~= 'string' or #n > 64 or not (n:match('^%a[%w_]*%.%a[%w_]*$') or GRANTS[n]) then
+          return nil, 'needs lists engine calls (Namespace.call) and lobby, files or patches'
+        end
+        needs[#needs + 1] = n
+      end
     end
     if #o.order >= 8 then return nil, 'eight mods per file at most' end
     local rec = { owner = o.name, short = o.short, id = spec.id, name = type(spec.name) == 'string' and spec.name or spec.id,
@@ -7154,6 +7555,36 @@ function M.install(ctx)
     end
     function handle.state() return rec.state end
     function handle.switch_off(why) return switch_off(rec, 'by itself: ' .. tostring(why)) end
+    -- what of spec.needs I can't give, as a new list (empty when everything is there)
+    rec.missing = {}
+    for _, n in ipairs(needs) do
+      local ns, call = n:match('^(%a[%w_]*)%.(%a[%w_]*)$')
+      local have
+      if ns then have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
+      else have = grant_state(o.name, n) ~= nil end
+      if not have then rec.missing[#rec.missing + 1] = n end
+    end
+    function handle.missing()
+      local out = {}
+      for i, n in ipairs(rec.missing) do out[i] = n end
+      return out
+    end
+    -- handle.request(what, why): ask for 'lobby', 'files' or 'patches' before doing the work that needs it.
+    -- -> 'granted' | 'asked' (the player has to say yes in my options menu; they've been told, ask again later) |
+    -- nil, why (I don't give it to this mod; the log and a notice say so once, so the player knows what to report)
+    function handle.request(what, why)
+      if not GRANTS[what] then return nil, 'unknown request ' .. tostring(what) end
+      if rec.state ~= 'active' then return nil, rec.state end
+      local state = grant_state(o.name, what, type(why) == 'string' and why:sub(1, 200) or nil)
+      if state then return state end
+      if not rec.said['request ' .. what] then
+        rec.said['request ' .. what] = true
+        log(fmt('[%s] %s asks for %s%s: I give that only to the mods on my list (TRUSTED); to ask for a place, open an issue on GitHub',
+          o.name, rec.name, GRANTS[what], type(why) == 'string' and ' (' .. why:sub(1, 200) .. ')' or ''))
+        if ctx.notify then ctx.notify({ text = rec.name:upper():sub(1, 32) .. ' NEEDS ACCESS THIS LOADER DOESN\'T GIVE (SEE LOG)', dur = 20 }) end
+      end
+      return nil, 'not given to this mod'
+    end
     rec.handle = handle
     o.mods[rec.id] = rec
     o.order[#o.order + 1] = rec
@@ -7169,14 +7600,15 @@ function M.install(ctx)
     -- its environment shares the runtime mods' globals from now on
     if o.env and not envs[o.env] then
       envs[o.env] = o
-      -- (a trusted mod gets only the shared globals its TRUSTED entry accepts, each from the one mod it names: its
-      -- environment otherwise holds only what it set itself)
+      -- (a trusted mod gets only the shared globals its TRUSTED entry accepts, each from the one mod it names, and the
+      -- other trusted mods' views like everyone: its environment otherwise holds only what it set itself)
       local trusted = ctx.trusted(o.name)
+      -- the views already out, whichever started first (view.publish hands them to the mods already here)
+      for k, vw in pairs(view.by_name) do
+        if vw.on and vw.by ~= o.name and rawget(o.env, k) == nil then rawset(o.env, k, view.make(k, vw, o.name)) end
+      end
       if not trusted then
         for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
-        for k, vw in pairs(view.by_name) do
-          if vw.on and vw.by ~= o.name and rawget(o.env, k) == nil then rawset(o.env, k, view.make(k, vw, o.name)) end
-        end
       else
         for k, v in pairs(shared) do
           if view.accepts(trusted, k, shared_by[k]) then
@@ -7192,6 +7624,19 @@ function M.install(ctx)
       for k, v in pairs(own) do if shared_by[k] == nil or trusted then rt.on_global(o.env, k, v) end end
     end
     log(fmt('[%s] HD2 Lua Runtime look-alike: mod %s%s', o.name, rec.id, rec.lobby_key and ' (lobby key ' .. rec.lobby_key .. ')' or ''))
+    if #rec.missing > 0 then
+      log(fmt('[%s] %s needs what this loader (%s) doesn\'t have: %s', o.name, rec.name, tostring(ctx.VERSION),
+        concat(rec.missing, ', ')))
+      if ctx.notify then ctx.notify({ text = rec.name:upper():sub(1, 32) .. ' NEEDS MORE THAN THIS LOADER HAS (SEE LOG)', dur = 20 }) end
+    end
+    -- (the mod list's line is the file's: what any of its mods lacks, each name once)
+    if ctx.missing then
+      local all, seen = {}, {}
+      for _, x in ipairs(o.order) do
+        for _, n in ipairs(x.missing or {}) do if not seen[n] then seen[n] = true; all[#all + 1] = n end end
+      end
+      ctx.missing(o.name, all)
+    end
     return handle
   end
   local function public_for(owner, env)
@@ -7219,7 +7664,39 @@ function M.install(ctx)
     rawset(env, 'HD2Runtime', pub)
     local pkg = rawget(env, 'package')
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
+    view.inboxes(env, owner)
     return true
+  end
+  -- the view spec of global k in a TRUSTED entry (its view is one spec, or a list of them, each its own global)
+  function view.spec_of(t, k)
+    local v = type(t) == 'table' and t.view or nil
+    if type(v) ~= 'table' then return nil end
+    if v.global ~= nil then return v.global == k and v or nil end
+    for _, x in ipairs(v) do if type(x) == 'table' and x.global == k then return x end end
+    return nil
+  end
+  -- a view with takes calls is an inbox: every mod gets it from the start, runtime mod or not (a mod that only hands
+  -- in data needn't be a runtime mod), and before its trusted mod has set it, if that mod is installed, so a
+  -- mod that starts first doesn't have to wait for it; what it hands in then is held and handed over once it has
+  function view.inboxes(env, owner)
+    if ctx.trusted(owner) then return end                      -- (a trusted mod's environment: only its own globals)
+    for k, by in pairs(view.reserved) do
+      local spec = by ~= owner and view.spec_of(ctx.trusted(by), k)
+      if spec and type(spec.takes) == 'table' and rawget(env, k) == nil then
+        local vw = view.by_name[k]
+        if not (vw and vw.on) and view.pending[k] == nil and ctx.present and ctx.present(by) then view.pending[k] = {} end
+        if (vw and vw.on) or view.pending[k] then rawset(env, k, view.make(k, vw or { spec = spec }, owner)) end
+      end
+    end
+  end
+  function view.look(o)
+    if not o.env or not ctx.trusted(o.name) then return end
+    for k, by in pairs(view.reserved) do
+      if by == o.name and not view.by_name[k] then
+        local v = rawget(o.env, k)
+        if type(v) == 'table' then rt.on_global(o.env, k, v) end
+      end
+    end
   end
   -- a shared global a trusted mod takes: its TRUSTED entry's accepts names the global and the one mod it takes it from
   -- (a library its own package carries, say)
@@ -7290,6 +7767,46 @@ function M.install(ctx)
     end
     return true
   end
+  -- the one table a takes call hands in, copied all the way down before the trusted mod sees it, so nothing it gets
+  -- runs code or leads back into the caller: keys strings, numbers or booleans, values those (strings up to 256
+  -- characters, no NaN) or tables of them, 8 deep and view.TAKE values at most; a function, a userdata or a table
+  -- inside itself refuses the whole call. Read raw: a metatable on it never runs. -> the copy, or nil, why
+  function view.data(v)
+    local budget, seen = view.TAKE, {}
+    local function copy(t, depth)
+      if depth > view.DEPTH then error('more than ' .. view.DEPTH .. ' tables deep', 0) end
+      if seen[t] then error('a table inside itself', 0) end
+      seen[t] = true
+      local out = {}
+      for k, x in next, t do
+        budget = budget - 1
+        if budget < 0 then error('more than ' .. view.TAKE .. ' values', 0) end
+        local tk, tx = type(k), type(x)
+        if not (tk == 'string' or (tk == 'number' and k == k) or tk == 'boolean') or (tk == 'string' and #k > 256) then
+          error('a key that isn\'t a short string or a number', 0)
+        end
+        if tx == 'table' then out[k] = copy(x, depth + 1)
+        elseif tx == 'boolean' or (tx == 'number' and x == x) or (tx == 'string' and #x <= 256) then out[k] = x
+        else error('a value that isn\'t plain data (' .. tx .. ')', 0) end
+      end
+      seen[t] = nil
+      return out
+    end
+    local ok, c = pcall(copy, v, 1)
+    if not ok then return nil, tostring(c) end
+    return c
+  end
+  -- a takes call made (now, or for a held one when the trusted mod set its global): under the caller's own crash key,
+  -- the answers copied as a call's are
+  function view.hand(cur, reader, key, name, data)
+    local fn = rawget(cur.real, name)
+    if type(fn) ~= 'function' then return nil, 'not there' end
+    local r, why = guarded(reader, key, packed, fn, data)
+    if type(r) ~= 'table' then return nil, why end
+    local budget, out = { n = view.LIMIT }, { n = r.n }
+    for i = 1, r.n do out[i] = view.copy(r[i], nil, 1, budget, {}) end
+    return unpack(out, 1, out.n)
+  end
   -- one reader's view: each call guarded under the reader's own crash key (<global>.<call>), so a call that ends the
   -- game is skipped for that reader from then on, not for the trusted mod
   function view.make(k, vw, reader)
@@ -7312,6 +7829,50 @@ function M.install(ctx)
         local budget, out = { n = view.LIMIT }, { n = r.n }
         for i = 1, r.n do out[i] = view.copy(r[i], i == 1 and keys or nil, 1, budget, {}) end
         return unpack(out, 1, out.n)
+      end
+    end
+    -- takes calls: one table of plain data in (copied, view.data), held while the trusted mod hasn't set its global yet
+    for name in pairs(type(vw.spec.takes) == 'table' and vw.spec.takes or {}) do
+      local key = k .. '.' .. name
+      pub[name] = function(...)
+        local tell = function(why)
+          local said = reader .. '|' .. key .. '|' .. why
+          if not view.told[said] then view.told[said] = true; log(fmt('[%s] %s refused: %s', reader, key, why)) end
+          return nil, why
+        end
+        if select('#', ...) ~= 1 or type((...)) ~= 'table' then return tell('it takes one table of plain data') end
+        local count = reader .. '|' .. key
+        if (view.took[count] or 0) >= view.TAKES then return tell(view.TAKES .. ' calls at most') end
+        -- (made now once the trusted mod has the call; held while it's coming: not up yet, or up and its call not
+        -- filled in yet; a refused call doesn't count against the mod's calls; every refusal before the copy, which
+        -- reads up to view.TAKE values, so a mod that asks again each frame costs nothing)
+        local cur = view.by_name[k]
+        local now = cur and cur.on and type(rawget(cur.real, name)) == 'function'
+        if not now then
+          local by = view.reserved[k]
+          if not (cur and cur.on) and not (ctx.present and ctx.present(by)) then
+            view.drop(k, by .. ' isn\'t running')
+            return nil, 'not running'
+          end
+          if view.shut[k] then return tell((cur and cur.on) and 'not there' or 'not running') end
+          if (view.held_by[count] or 0) >= view.HELD_EACH then return tell(view.HELD_EACH .. ' held calls a mod at most') end
+          local held = view.pending[k]
+          if type(held) == 'table' and #held >= view.HELD then return tell(view.HELD .. ' held calls at most') end
+        end
+        local data, why = view.data((...))
+        if data == nil then return tell(why) end
+        if now then
+          view.took[count] = (view.took[count] or 0) + 1
+          view.drain(k)
+          return view.hand(cur, reader, key, name, data)
+        end
+        local held = view.pending[k]
+        if type(held) ~= 'table' then held = {}; view.pending[k] = held end
+        held[#held + 1] = { reader = reader, key = key, name = name, data = data }
+        view.held_by[count] = (view.held_by[count] or 0) + 1
+        view.held_n = view.held_n + 1
+        view.took[count] = (view.took[count] or 0) + 1
+        return 'held'
       end
     end
     -- (fields read when asked: the trusted mod may fill its table after making it; plain values only)
@@ -7350,8 +7911,97 @@ function M.install(ctx)
     shared[k], shared_by[k] = nil, nil
     local calls = {}
     for name in pairs(type(spec.calls) == 'table' and spec.calls or {}) do calls[#calls + 1] = name end
+    for name in pairs(type(spec.takes) == 'table' and spec.takes or {}) do calls[#calls + 1] = name .. ' (takes data)' end
     table.sort(calls)
-    log(fmt('[%s] %s: a read-only view for the other runtime mods (%s)', o.name, k, concat(calls, ', ')))
+    log(fmt('[%s] %s: a read-only view for the other %s (%s)', o.name, k,
+      type(spec.takes) == 'table' and 'mods' or 'runtime mods', concat(calls, ', ')))
+    -- what other mods handed in before it set its global, handed over now, in their order (those whose call it has
+    -- filled in already; the rest at its next update, or the next call to it); a shut inbox opens again
+    view.shut[k], view.waits[k] = nil, nil
+    if type(view.pending[k]) == 'table' then view.drain(k) else view.pending[k] = false end
+  end
+  -- a held call let go (made or dropped)
+  function view.unheld(h)
+    local c = h.reader .. '|' .. h.key
+    view.held_by[c] = (view.held_by[c] or 1) - 1
+    view.held_n = view.held_n - 1
+  end
+  -- the calls held for an inbox made now, those whose call the trusted mod has filled in, in their order; the rest stay
+  -- held until it has. -> how many were made
+  function view.drain(k)
+    local held, cur = view.pending[k], view.by_name[k]
+    if type(held) ~= 'table' or not (cur and cur.on) then return 0 end
+    -- (I take the list out first: a call made here may set the global again, and the drain that runs then has only
+    -- what's held after this one started, so each call is made once; I look its view up each time, as that may
+    -- replace it)
+    view.pending[k] = {}
+    local left, who = {}, {}
+    for _, h in ipairs(held) do
+      cur = view.by_name[k]
+      if cur and cur.on and type(rawget(cur.real, h.name)) == 'function' then
+        view.unheld(h)
+        local ok, a, b = pcall(view.hand, cur, h.reader, h.key, h.name, h.data)
+        who[#who + 1] = h.reader .. ' ' .. h.name .. ': ' .. (ok and (a ~= nil and tostring(a) or 'nil, ' .. tostring(b)) or tostring(a))
+      else
+        left[#left + 1] = h
+      end
+    end
+    -- (what was held while these were made comes after the ones left)
+    local new = view.pending[k]
+    if type(new) == 'table' then for _, h in ipairs(new) do left[#left + 1] = h end end
+    view.pending[k] = #left > 0 and left or false
+    if #who > 0 then log(fmt('[%s] %s: the %d calls held for it, made now (%s)', view.reserved[k], k, #who, concat(who, '; '))) end
+    return #who
+  end
+  -- an inbox whose trusted mod won't run (kept off, stopped, or never started), or whose held calls can never be
+  -- made: what's held for it goes, said once
+  function view.drop(k, why)
+    local held = view.pending[k]
+    view.pending[k], view.waits[k] = false, nil
+    if type(held) == 'table' and #held > 0 then
+      for _, h in ipairs(held) do view.unheld(h) end
+      log(fmt('%s: %d held call(s) dropped: %s', k, #held, why))
+    end
+  end
+  -- a trusted mod's update while calls are held: those whose call it has filled in made now; the rest wait through
+  -- view.WAIT of its updates at most (with none made), then I drop them and hold nothing more for that inbox
+  function view.tick(o)
+    for k, by in pairs(view.reserved) do
+      local held = view.pending[k]
+      if by == o.name and type(held) == 'table' and #held > 0 then
+        local made = view.drain(k)
+        local left = view.pending[k]
+        if made > 0 or type(left) ~= 'table' or #left == 0 then view.waits[k] = nil
+        else
+          view.waits[k] = (view.waits[k] or 0) + 1
+          if view.waits[k] >= view.WAIT then
+            view.shut[k] = true
+            view.drop(k, fmt('%s hasn\'t taken them in %d of its updates', o.name, view.WAIT))
+          end
+        end
+      end
+    end
+  end
+  -- the end of a trusted mod's first update: an inbox it still hasn't set its global for (it sets it as it starts)
+  -- won't get it; I drop what's held for it and hold nothing more for it, until it does set it
+  function view.unset(o)
+    view.look(o)
+    for k, by in pairs(view.reserved) do
+      local vw = view.by_name[k]
+      if by == o.name and not (vw and vw.on) then
+        view.shut[k] = true
+        view.drop(k, o.name .. ' didn\'t set it by the end of its first update')
+      end
+    end
+  end
+  -- after start-up: the inboxes of trusted mods that didn't start hold nothing more
+  function rt.settle()
+    for k, by in pairs(view.reserved) do
+      local vw = view.by_name[k]
+      if view.pending[k] ~= false and not (vw and vw.on) and not (ctx.present and ctx.present(by)) then
+        view.drop(k, by .. ' isn\'t running')
+      end
+    end
   end
   function rt.on_global(env, k, v)
     local o = envs[env]
@@ -7359,8 +8009,8 @@ function M.install(ctx)
     if v == nil then return end
     local trust = ctx.trusted(o.name)
     if trust then
-      local spec = type(trust) == 'table' and trust.view
-      if type(spec) == 'table' and spec.global == k and type(v) == 'table' then view.publish(o, env, k, v, spec) end
+      local spec = view.spec_of(trust, k)
+      if spec and type(v) == 'table' then view.publish(o, env, k, v, spec) end
       return
     end
     if view.by_name[k] or view.reserved[k] then return end            -- a view's name: this copy is its own
@@ -8083,15 +8733,28 @@ end
 
 -- ------------------------------------------------------------------ crash learning
 -- State kept between launches: "skip: <key>" (a call that crashed the game) and "off: <addon> <fingerprint>
--- <reason>" (an addon I turned off; it comes back on its own when its file changes, i.e. an update).
+-- <reason>" (an addon I turned off; it comes back on its own when its file changes, i.e. an update, and its skips go).
 -- "rule: 3": a first call that never returned is skipped at once (that one is certain). A per-frame job (drawing, a
 -- scan) running when the game died is only suspected the first time ("suspect: <key>") and skipped if the next launch
 -- dies in it again: a game that ends for its own reasons mid-frame mustn't switch a feature off for good. Skips from
 -- the older rules are dropped once (except rule 2's certain ones). "version: <v>": the loader that wrote it. My own
 -- skips (loader|...) are dropped when the loader changes: an update may well have fixed what crashed, and a skip of
 -- mine can take away the drawing for every mod.
+-- "skip: shared|Unit.<call>:<kind>": a call on one kind of unit that ended the game for one mod, refused for every
+-- mod (the engine's answer for that kind, whoever asks). Dropped when the loader or the game's build ("build: <id>")
+-- changes: either may well have changed what crashed.
+-- "strikes: <addon> <n> <fingerprint>": launches in a row it ended the game; at tr.CRASH_STRIKES it's turned off. A
+-- launch it didn't end (a clean one, or another's crash) starts the count over; the line stays (at 0) while it has
+-- skipped calls other than a language file's, so a change of its file tries them again, as for a mod I turned off.
+-- One still 'pending' at 0 (its mod not found since it crashed, or a boot script's, whose key carries its
+-- fingerprint) has no file to compare: it goes (starter.unfound).
 local RULE = '3'
 local skip, off, dropped, suspect = {}, {}, {}, {}
+-- The crash trace's state (below) and the crash learning's: tr.shared (the refusals shared with every mod), tr.strikes
+-- (name -> { n, fp }) and tr.CRASH_STRIKES, the launches in a row a mod ends the game before it's turned off (its call
+-- is skipped from the first). (Fields, not locals: the loader is near Lua 5.1's 200 locals.)
+local tr = { bytes = 0, firsts = {}, singles = {}, last_tick = -1, cap = 200 * 1024, said = false,
+  shared = { n = 0, of = {}, said = {} }, strikes = {}, CRASH_STRIKES = 3 }
 -- v1.fp: 1.0.0's fingerprint (every 7th byte). An entry 1.0.0 wrote for a mod or boot script is matched by it and
 -- saved under the new fingerprint, whichever launch that source is next seen in.
 local v1 = {}
@@ -8103,21 +8766,40 @@ do
     for line in f:lines() do
       rule = line:match('^rule: (%S+)$') or rule
       ver = line:match('^version: (%S+)$') or ver
+      tr.shared.build = line:match('^build: (.+)$') or tr.shared.build
       local k = line:match('^skip: (.+)$')
       if k then old[#old + 1] = k end
       local sp = line:match('^suspect: (.+)$')
       if sp then suspect[sp] = true end
       local name, fp, why = line:match('^off: (%S+) (%S+) (.*)$')
       if name then off[name] = { fp = fp, why = why } end
+      local sn, sc, sf = line:match('^strikes: (%S+) (%d+) (%S+)$')
+      if sn then tr.strikes[sn] = { n = tonumber(sc), fp = sf } end
     end
     f:close()
     for _, k in ipairs(old) do
       -- rule 2's skips stay, except a job's (loader|draw:...): those were blamed on one exit, which rule 3 doesn't do
       local keep = rule == RULE or (rule == '2' and not k:match('|draw:'))
-      if keep and ver ~= VERSION and k:match('^loader|') then keep = false end
+      if keep and ver ~= VERSION and (k:match('^loader|') or k:match('^shared|')) then keep = false end
       if keep then skip[k] = true else dropped[#dropped + 1] = k end
+      if keep and k:match('^shared|') then tr.shared.n = tr.shared.n + 1 end
     end
+    -- (the loader changed since the last launch: a crash from it isn't shared, it may be one I've fixed)
+    tr.shared.moved = ver ~= VERSION
   end
+end
+-- The shared key for a mod's call on a kind of unit: only Unit calls, the kind (a string) as the hex of its resource id:
+-- the last run of 8 to 16 hex digits in it, leading zeros left out, so a mod's own label around it ("r<hex>",
+-- "0x<hex>", "cape_<hex>_lod") meets every other spelling of that kind; else nil (nothing shared).
+function tr.shared.key_of(name, kind)
+  if sub(name, 1, 5) ~= 'Unit.' or type(kind) ~= 'string' then return nil end
+  local hex
+  for run in kind:lower():gmatch('%x+') do
+    run = run:gsub('^0+', '')
+    if #run >= 8 and #run <= 16 then hex = run end
+  end
+  if not hex then return nil end
+  return 'shared|' .. name .. ':' .. hex
 end
 -- Written to a .tmp first and put in place only when the whole of it was written and closed, so a full or locked disk
 -- never leaves me with half a state (every skip and every mod turned off would be forgotten). Returns true when saved.
@@ -8130,6 +8812,7 @@ do
   end
   save_state = function()
     local out = { 'rule: ' .. RULE, 'version: ' .. VERSION }
+    if tr.shared.now or tr.shared.build then out[#out + 1] = 'build: ' .. (tr.shared.now or tr.shared.build) end
     for k in pairs(suspect) do out[#out + 1] = 'suspect: ' .. k end
     local keys = {}
     for k in pairs(skip) do keys[#keys + 1] = k end
@@ -8139,6 +8822,13 @@ do
     for n in pairs(off) do names[#names + 1] = n end
     sort(names)
     for _, n in ipairs(names) do out[#out + 1] = 'off: ' .. n .. ' ' .. off[n].fp .. ' ' .. off[n].why end
+    names = {}
+    for n in pairs(tr.strikes) do names[#names + 1] = n end
+    sort(names)
+    for _, n in ipairs(names) do
+      local s = tr.strikes[n]
+      out[#out + 1] = 'strikes: ' .. n .. ' ' .. s.n .. ' ' .. s.fp
+    end
     local text = concat(out, '\n') .. '\n'
     local tmp = STATE_FILE .. '.tmp'
     local f = open(tmp, 'w')
@@ -8171,13 +8861,17 @@ end
 -- "> owner|call" / "< owner|call" = making that call for the first time / it returned (blamed if it never returned);
 -- ">> owner|job @<s>" / "<< owner|job" = a per-frame job (blamed if still open and started within RECENT s);
 -- "#### clean shutdown" = the game called shutdown(): nothing to blame.
+-- "= owner|call" = that first call (a chef.call_kind one) took only the unit: a crash in it is the engine's answer for
+-- that kind of unit, so it's shared with every mod (tr.shared.single); a call with arguments of the mod's own isn't.
 local blamed, blamed_job = nil, false
 do
   local f = open(TRACE_FILE, 'r')
   if f then
-    local firsts, opened, order, last_t, clean = {}, {}, {}, 0, false
+    local firsts, opened, order, last_t, clean, singles = {}, {}, {}, 0, false, {}
     for line in f:lines() do
       if line:match('^#### clean shutdown') then clean = true end
+      local one = line:match('^= (.+)$')
+      if one then singles[one] = true end
       local t = line:match('^t (%d+)$')
       if t then last_t = tonumber(t) end
       local o, at = line:match('^>> (.-) @(%d+)$')
@@ -8193,6 +8887,7 @@ do
     f:close()
     if not clean then
       blamed = firsts[#firsts]
+      tr.shared.single = blamed ~= nil and singles[blamed] == true
       -- (the text GUI removal first: holds opened after it in the same frame are only drawing that followed it)
       local rk = 'loader|text:reclaim'
       if not blamed and opened[rk] and last_t - opened[rk] <= RECENT then blamed, blamed_job = rk, true end
@@ -8208,11 +8903,7 @@ end
 
 local trace = open(TRACE_FILE, 'w')
 if not trace then log('the crash trace can\'t be opened: a call that crashes the game this launch won\'t be learned from') end
--- The trace only has to tell the next launch what was open when the game died. When it passes 200 KB I write it
--- again with only that: the last time stamp, the jobs held (">> key @s") and the first calls that haven't returned.
-local tr = { bytes = 0, firsts = {}, last_tick = -1, cap = 200 * 1024, said = false }
 -- An error as text for the log, whatever it is: an error object whose __tostring fails mustn't raise again in here.
--- (A field, not a local: the loader is near Lua 5.1's 200 locals.)
 function tr.why(e)
   if type(e) == 'string' then return e end
   local ok, s = pcall(tostring, e)
@@ -8224,6 +8915,9 @@ function tr.failed()
   if not tr.said then tr.said = true; log('the crash trace can\'t be written: a call that crashes the game this launch may not be learned from') end
 end
 local held = {}                          -- the per-frame jobs open now: key -> the second it opened
+-- The trace only has to tell the next launch what was open when the game died. When it passes 200 KB I write it
+-- again with only that: the last time stamp, the jobs held (">> key @s") and the first calls that haven't returned,
+-- each with its "=" line when it took only the unit (tr.singles: key -> true from its "=" until it returns).
 local function crumb(line)
   -- one breadcrumb is one line: a mod's text in a key (chef.call_kind's kind) can't add lines of its own and make the
   -- next launch blame another mod or a loader job
@@ -8233,7 +8927,9 @@ local function crumb(line)
   if c2 == '> ' then tr.firsts[#tr.firsts + 1] = sub(line, 3)
   elseif c2 == '< ' then
     local k = sub(line, 3)
+    tr.singles[k] = nil
     for i = #tr.firsts, 1, -1 do if tr.firsts[i] == k then table.remove(tr.firsts, i); break end end
+  elseif c2 == '= ' then tr.singles[sub(line, 3)] = true
   end
   tr.bytes = tr.bytes + #line + 1
   if tr.bytes > tr.cap then
@@ -8243,7 +8939,10 @@ local function crumb(line)
     local out = {}
     if tr.last_tick >= 0 then out[#out + 1] = 't ' .. tr.last_tick end
     for k, at in pairs(held) do out[#out + 1] = fmt('>> %s @%d', k, at) end
-    for _, k in ipairs(tr.firsts) do out[#out + 1] = '> ' .. k end
+    for _, k in ipairs(tr.firsts) do
+      if tr.singles[k] then out[#out + 1] = '= ' .. k end
+      out[#out + 1] = '> ' .. k
+    end
     local text = concat(out, '\n') .. (#out > 0 and '\n' or '')
     tr.bytes = #text
     local okw, w = pcall(trace.write, trace, text)
@@ -8336,7 +9035,7 @@ local function hold(key, on)
   elseif not on and held[key] then held[key] = nil; crumb('<< ' .. key) end
 end
 -- An engine read mods may make that has ended the game in some cases (GameSession.game_object_field_batched, on other
--- players' objects): skipped for a mod once it crashed a launch (and the mod off until it changes, as for any crash
+-- players' objects): skipped for a mod once it crashed a launch (the crash counted against the mod, as for any crash
 -- of its own); its first call on each object breadcrumbed like any first call (a game that ends in it blames it for
 -- sure), and each run of calls held as a job while it goes on (blamed if a second launch ends in it). The sandbox
 -- checks the object exists first (sandbox.lua, sb.guard_engine). tr.reads: key -> { at = the last call (s), ids = the
@@ -8369,8 +9068,9 @@ end
 -- Patch archive layout (as my build tools write it and Arsenal deploys it): 72-byte header (0xF0000011, type
 -- count, entry count, ...), 32-byte type rows, 80-byte entries (id, type, offset, stream offset, gpu offset,
 -- 2 unused: u64; then size: u32 ...). A Lua resource: u32 length, u32 envelope (1 or 2: source text), then the text.
--- scan.big: Lua resources over MAX_LUA I didn't read; scan.said: the skipped headers already in the log
-local found_addons, found_options, found_boots, scan = {}, {}, {}, { files = 0, ms = 0, bad = 0, seq = 0, big = 0, said = {},
+-- scan.big: Lua resources over MAX_LUA I didn't read; scan.huge: patch files over MAX_ENTRIES rows I didn't read for
+-- mods (a mod's own patch is a few rows; one that big is built data); scan.said: the skipped headers already in the log
+local found_addons, found_options, found_boots, scan = {}, {}, {}, { files = 0, ms = 0, bad = 0, seq = 0, big = 0, huge = 0, said = {},
   langs = {},                          -- langs: "-- HD2-Lang:" language files (services.lang)
   list = {},                           -- list: every patch file read, {file, n}, lowest number first (the index)
   mine = {}, cores = {} }              -- mine: boot scripts carrying my marker; cores: rows of my core, {file, n, version}
@@ -8406,7 +9106,8 @@ local function read_patch(f, name)
   local head = f:read(72) or ''
   if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
   local nt, ne = u32(head, 5), u32(head, 9)
-  if nt > 4096 or ne > MAX_ENTRIES then scan.bad = scan.bad + 1; return end
+  if nt > 4096 then scan.bad = scan.bad + 1; return end
+  if ne > MAX_ENTRIES then scan.huge = scan.huge + 1; return end
   local toc = f:read(nt * 32 + ne * 80) or ''
   if #toc < nt * 32 + ne * 80 then scan.bad = scan.bad + 1; return end
   for e = 0, ne - 1 do
@@ -10315,11 +11016,23 @@ svc.runtime = services.runtime.install({ log = log, guarded = guarded, fn_of = f
   VERSION = VERSION, util = svc.util, frame = function() return frame_no end, now = function() return elapsed end,
   instance = function() return world.instance end,
   trusted = function(owner) return TRUSTED[owner] end,
+  -- (a mod's spec.needs and handle.request: what it lacks goes on the mod list, its patches grant answers requests)
+  notify = function(n) notices[#notices + 1] = n end,
+  missing = function(owner, list) local a = svc.ctx.addon(owner); if a then a.missing = list end end,
+  access = function(owner) return svc.access and svc.access[owner] or nil end,
+  -- (a trusted mod that's installed and not switched off: other mods' calls to its inbox are held for it until it
+  -- starts; one kept off after a crash, stopped or not started holds nothing)
+  present = function(owner)
+    if not (svc.access ~= nil and svc.access[owner] ~= nil) then return false end
+    local a = svc.ctx.addon(owner)
+    return not (a and a.on == false)
+  end,
   -- the view names: only their trusted mod's value is ever shared under them
   reserved = (function()
     local r = {}
     for owner, t in pairs(TRUSTED) do
-      if type(t.view) == 'table' and type(t.view.global) == 'string' then r[t.view.global] = owner end
+      local list = type(t.view) == 'table' and (t.view.global ~= nil and { t.view } or t.view) or {}
+      for _, v in ipairs(list) do if type(v) == 'table' and type(v.global) == 'string' then r[v.global] = owner end end
     end
     return r
   end)(),
@@ -10381,11 +11094,35 @@ local function make_api(a)
   function chef.log(...) local ok, s = pcall(fmt, ...); log('[' .. owner .. '] ' .. (ok and s or tr.why((...)))) end
   function chef.call(name, ...) return guarded(owner, name, fn_of(name), ...) end
   local kind_keys = {}                   -- name -> kind -> "name:kind", built once
+  local marked = {}                      -- "name:kind" -> true once its first call was looked at (unit only or not)
+  local shared = tr.shared               -- (one look-up a call)
   function chef.call_kind(name, kind, ...)
     local t = kind_keys[name]
     if not t then t = {}; kind_keys[name] = t end
     local key = t[kind]
     if not key then key = name .. ':' .. kind; t[kind] = key end
+    -- (refused for every mod: it ended the game for one asking the same of that kind, with only the unit; a call with
+    -- more arguments isn't the call that was learned)
+    if shared.n > 0 and select('#', ...) == 1 then
+      local sk = shared.of[key]
+      if sk == nil then sk = shared.key_of(name, kind) or false; shared.of[key] = sk end
+      if sk and skip[sk] then
+        local said = shared.said[owner]
+        if not said then said = {}; shared.said[owner] = said end
+        if not said[sk] then
+          said[sk] = true
+          log(fmt('[%s] %s skipped: it ended the game for a mod in an earlier launch', owner, sk:sub(8)))
+        end
+        return nil, 'skipped'
+      end
+    end
+    -- (its first call, when it took only the unit, is marked so in the trace: a crash in that is the engine's answer for
+    -- that kind, and the next launch shares it with every mod)
+    if not marked[key] then
+      marked[key] = true
+      local k = key_of(owner, key)
+      if select('#', ...) == 1 and not proven[k] then crumb('= ' .. k) end
+    end
     return guarded(owner, key, fn_of(name), ...)
   end
   function chef.time() return elapsed end
@@ -10740,32 +11477,97 @@ function starter.requires_ok(r)
   end
   return true
 end
+-- A mod that changed since it was turned off goes back on, and the calls of its that crashed the game are tried again
+-- (an update may well have fixed them). A language file's skip stays: its key carries that file's own fingerprint.
+function starter.back_on(name)
+  off[name] = nil
+  local n = starter.retry(name)
+  log('turned back on: ' .. name .. ' (the mod changed since it was turned off)' ..
+    (n > 0 and fmt('; its %d skipped call(s) are tried again', n) or ''))
+end
+-- a mod's own skipped calls dropped (it changed: an update may well have fixed them), its crash count with them, and
+-- the state saved. -> how many calls
+function starter.retry(name)
+  local p, ks = name .. '|', {}
+  for k in pairs(skip) do if k:sub(1, #p) == p and not k:match('|lang:%x+$') then ks[#ks + 1] = k end end
+  for _, k in ipairs(ks) do skip[k] = nil end
+  tr.strikes[name] = nil
+  save_state()
+  return #ks
+end
+-- a mod still on after crashing the game (fewer than tr.CRASH_STRIKES in a row, or one that asked to stay on) that
+-- changed since: its skipped calls are tried again
+function starter.changed_since_crash(name, fp)
+  local s = tr.strikes[name]
+  if not (s and s.fp ~= 'pending' and s.fp ~= fp) then return end
+  local n = starter.retry(name)
+  log(fmt('%s changed since it crashed the game: %s', name, n > 0 and n .. ' skipped call(s) tried again' or 'its count starts over'))
+end
+-- A mod that asked to stay on after a crash ("-- HD2-Keep-On-Crash: yes" in its first lines; keep) has its off line
+-- taken away: only the call that crashed stays skipped. Its strikes line stays, at 0, so a change of its file tries
+-- that call again (now, if it changed already). -> nil, for the caller's `was`
+function starter.keep_on(name, was, fp)
+  off[name] = nil
+  tr.strikes[name] = { n = 0, fp = was.fp }
+  save_state()
+  log('kept on after a crash (it asked to): ' .. name .. '; the call that crashed stays skipped')
+  starter.changed_since_crash(name, fp)
+end
+-- The count of a mod the last launch ended, said once its file is read (the crash is counted before it is): one that
+-- asked to stay on is never turned off for it.
+function starter.stays(name, keep)
+  local s = tr.strikes[name]
+  if not (tr.shared.counted and name == tr.shared.struck and s and s.n > 0) then return end
+  if keep then
+    log(fmt('%s stays on: it asked to (HD2-Keep-On-Crash), %d crash(es) in a row; the call that crashed stays skipped',
+      name, s.n))
+  else
+    log(fmt('%s stays on: %d of the %d crashes in a row that turn it off', name, s.n, tr.CRASH_STRIKES))
+  end
+end
+-- once the addons have their fingerprints: a strikes line at 0 still 'pending' belongs to a mod not found since it
+-- crashed (a boot script's never resolves: its key carries its fingerprint, so its line goes; its skips stay). A mod's
+-- line stays, marked 'gone': whatever file of it comes back is a change, and its skipped calls are tried again.
+function starter.unfound()
+  local named, gone = {}, {}
+  for _, r in ipairs(found_named) do named[r.name] = true end
+  for name, s in pairs(tr.strikes) do
+    if s.n == 0 and s.fp == 'pending' and not named[name] then gone[#gone + 1] = name end
+  end
+  for _, name in ipairs(gone) do
+    if name:match('^boot:') then tr.strikes[name] = nil else tr.strikes[name].fp = 'gone' end
+  end
+  if #gone > 0 then save_state() end
+end
 function starter.addon(r)
   local a = { name = r.name, short = r.name:match('([^/]+)$'), file = r.file, fp = fingerprint(r.src),
               on = true, errors = 0, ms = 0, max_ms = 0, dev = r.dev, requires = {} }
   addons[#addons + 1] = a
   for _, q in ipairs(services.requirements(r.src)) do a.requires[#a.requires + 1] = q.name end
   v1.off(a.name, r.src, a.fp)
+  starter.changed_since_crash(a.name, a.fp)
   local was = off[a.name]
-  -- A mod can ask to stay on after a crash ("-- HD2-Keep-On-Crash: yes" in its first lines): then only
-  -- the call that crashed is skipped.
   local keep = r.src:sub(1, 400):match('\n%-%- HD2%-Keep%-On%-Crash: yes') ~= nil
-  if was and keep then
-    off[a.name] = nil
-    save_state()
-    log('kept on after a crash (it asked to): ' .. a.name .. '; the call that crashed stays skipped')
-    was = nil
-  end
+  if was and keep then was = starter.keep_on(a.name, was, a.fp) end
   if was and was.fp == a.fp then
     a.on = false
     starter.state(a, 'kept off', was.why)
     log('kept off: ' .. a.name .. ' (' .. was.why .. '); an update of the mod turns it back on')
     notices[#notices + 1] = { text = a.short:upper():gsub('_', ' ') .. ' IS OFF AFTER A CRASH (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
   elseif was then
-    off[a.name] = nil
-    save_state()
-    log('turned back on: ' .. a.name .. ' (the mod changed since it was turned off)')
+    starter.back_on(a.name)
   end
+  if a.on and skip[a.name .. '|start'] then
+    -- its own start code ended the game: not run again (a change of its file drops the skip, and it starts). Without a
+    -- strikes or off line (a skip from an older state) I add one at 0, so that change is seen.
+    if not tr.strikes[a.name] and not off[a.name] then tr.strikes[a.name] = { n = 0, fp = a.fp }; save_state() end
+    a.on = false
+    starter.state(a, 'not started', 'its start ended the game')
+    log('not started: ' .. a.name .. ' (its start ended the game; an update of the mod tries it again)')
+    notices[#notices + 1] = { text = a.short:upper():gsub('_', ' ') .. ' IS OFF AFTER A CRASH (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
+    return a
+  end
+  starter.stays(a.name, keep)
   if a.on then
     local rok, why = starter.requires_ok(r)
     if not rok then
@@ -11034,6 +11836,7 @@ end
 -- until the player turns it on), and a notice the first time it waits for it
 function starter.trust(sb)
   local found = {}
+  svc.access = {}
   for _, r in ipairs(found_addons) do found[r.name] = true end
   for _, r in ipairs(found_named) do found[r.name] = true end
   for name, t in pairs(TRUSTED) do
@@ -11045,15 +11848,16 @@ function starter.trust(sb)
         local asked = false
         g.patches = { scratch = t.patches.scratch, marker = t.patches.marker,
           consent = function() return row ~= nil and row.value == true end,
-          asked = function()
+          asked = function(why)
             if asked then return end
             asked = true
-            log(fmt('%s wants to write game patch files: turn on "Game patch files: %s" in my options menu (F9) to allow it',
-              name, t.title))
+            log(fmt('%s wants to write game patch files%s: turn on "Game patch files: %s" in my options menu (F9) to allow it',
+              name, type(why) == 'string' and ' (' .. why .. ')' or '', t.title))
             notices[#notices + 1] = { text = t.title:upper() .. ' WANTS TO WRITE GAME FILES: F9 > ' .. LOADER:upper(), dur = 20 }
           end }
       end
       sb.grant(name, g)
+      svc.access[name] = g.patches or false
       local what = {}
       if t.network then what[#what + 1] = 'the Steam lobby' end
       if t.files then what[#what + 1] = 'its own files' end
@@ -11147,17 +11951,19 @@ function starter.named_one(r)
   v1.off(r.name, r.src, fp)
   local was = off[r.name]
   if was and was.fp == 'pending' then was.fp = fp; save_state() end
-  if was and r.src:sub(1, 400):match('\n%-%- HD2%-Keep%-On%-Crash: yes') then
-    off[r.name] = nil; save_state(); was = nil
-    log('kept on after a crash (it asked to): ' .. r.name .. '; the call that crashed stays skipped')
-  end
+  local st = tr.strikes[r.name]
+  if st and st.fp == 'pending' then st.fp = fp; save_state() end
+  starter.changed_since_crash(r.name, fp)
+  local keep = r.src:sub(1, 400):match('\n%-%- HD2%-Keep%-On%-Crash: yes') ~= nil
+  if was and keep then was = starter.keep_on(r.name, was, fp) end
+  starter.stays(r.name, keep)
   if was and was.fp == fp then
     starter.never(r.name, r.file, 'kept off', was.why)
     log('kept off: ' .. r.name .. ' (' .. was.why .. '); an update of the mod turns it back on')
     notices[#notices + 1] = { text = short:upper():gsub('_', ' ') .. ' IS OFF AFTER A CRASH (SEE ' .. FILES:upper() .. '.LOG)', dur = 25 }
     return
   end
-  if was then off[r.name] = nil; save_state(); log('turned back on: ' .. r.name .. ' (the mod changed since it was turned off)') end
+  if was then starter.back_on(r.name) end
   local rok, why = starter.requires_ok(r)
   if not rok then
     starter.never(r.name, r.file, 'not started', why)
@@ -11511,8 +12317,24 @@ do   -- (one ok/v pair: the loader is near Lua 5.1's 200 locals)
   sort(v)
   if #v > 0 then log('each addon gets LuaJIT\'s ' .. concat(v, ' and ')) end
 end
+-- the game's build: a refusal shared with every mod goes when it changes (an update may well have changed what crashed)
+do
+  local v = guarded('loader', 'Application.build_identifier', fn_of('Application.build_identifier'))
+  tr.shared.now = (type(v) == 'string' or type(v) == 'number') and tostring(v):gsub('%s', '') or nil
+  if tr.shared.now == '' then tr.shared.now = nil end
+  if tr.shared.now and tr.shared.build and tr.shared.now ~= tr.shared.build then
+    local gone = {}
+    for k in pairs(skip) do if k:match('^shared|') then gone[#gone + 1] = k end end
+    for _, k in ipairs(gone) do skip[k] = nil; dropped[#dropped + 1] = k end
+    tr.shared.n = 0
+  end
+  if tr.shared.now and tr.shared.now ~= tr.shared.build and #dropped == 0 then save_state() end
+  -- (the game's build changed since the last launch, or isn't known now as it was: a crash from it isn't shared)
+  if tr.shared.now ~= tr.shared.build then tr.shared.moved = true end
+end
 if #dropped > 0 then
-  log('dropped ' .. #dropped .. ' skip(s) recorded by an older crash rule or an older version of me: ' .. concat(dropped, ', '))
+  log('dropped ' .. #dropped .. ' skip(s) recorded by an older crash rule, an older version of me or another game build: ' ..
+    concat(dropped, ', '))
   save_state()
 end
 -- My drawing (loader|draw:gui, :lines, :bitmaps, :top) is held for a world's whole life, so it's open whenever a game
@@ -11526,6 +12348,9 @@ end
 if blamed and blamed_job and not suspect[blamed] then
   log('the last launch ended while ' .. blamed .. ' was running; if the next one ends the same way, I skip it')
   suspect = { [blamed] = true }
+  -- (a launch that may have ended in a mod's own job isn't one it didn't end: its count is kept, none added)
+  local owner = blamed:match('^([^|]+)|')
+  if owner ~= 'loader' then tr.shared.struck = owner end
   blamed = nil
   save_state()
 elseif not blamed and next(suspect) then
@@ -11539,7 +12364,41 @@ if blamed then
   log('the last launch crashed in: ' .. blamed .. ' (that call is skipped from now on)')
   -- (a language file's key carries its own fingerprint: skipping it is enough, no mod is turned off for it)
   if owner and owner ~= 'loader' and not blamed:match('^[^|]+|lang:%x+$') then
-    off[owner] = { fp = 'pending', why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') }
+    -- the mod stays on (its call skipped) until it has ended tr.CRASH_STRIKES launches in a row; then it's turned off
+    local s = tr.strikes[owner] or { n = 0 }
+    s.n, s.fp = s.n + 1, 'pending'
+    tr.shared.struck, tr.shared.counted = owner, true
+    if s.n >= tr.CRASH_STRIKES then
+      tr.strikes[owner] = nil
+      off[owner] = { fp = 'pending', why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') .. ' (' .. s.n .. ' launches in a row)' }
+    else
+      tr.strikes[owner] = s
+      -- (a mod's count is said once its file is read, in starter.stays; a boot script never asks to stay on)
+      if owner:match('^boot:') then starter.stays(owner, false) end
+    end
+    -- a call on one kind of unit (chef.call_kind; of my helpers only chef.lights passes the unit alone) that took only
+    -- the unit is refused for every mod too, asked the same way: another mod asking it of that kind would end the game
+    -- the same way (only the mod that found it has the crash counted). Not one with arguments of the mod's own (a bad
+    -- node index is that mod's), nor a crash from before the loader or the game changed.
+    local call, kind = blamed:match('^[^|]+|(Unit%.[%w_]+):(.+)$')
+    local sk = call and tr.shared.single and not tr.shared.moved and tr.shared.key_of(call, kind)
+    if sk and not skip[sk] then
+      skip[sk] = true; tr.shared.n = tr.shared.n + 1
+      log('refused for every mod from now on: ' .. sk:sub(8) .. ' (a change of the game\'s build or of me tries it again)')
+    end
+  end
+  save_state()
+end
+-- every other mod didn't end the last launch: its count starts over (its line stays, at 0, while it has skipped calls
+-- a change of its file tries again: not a language file's)
+if next(tr.strikes) then
+  for name, s in pairs(tr.strikes) do
+    if name ~= tr.shared.struck then
+      s.n = 0
+      local p, any = name .. '|', false
+      for k in pairs(skip) do if sub(k, 1, #p) == p and not k:match('|lang:%x+$') then any = true; break end end
+      if not any then tr.strikes[name] = nil end
+    end
   end
   save_state()
 end
@@ -11570,6 +12429,7 @@ log(fmt('found %d addon(s), %d boot-style script(s) and %d option file(s) in %d 
   #found_named, #found_options, scan.files, scan.ms))
 if scan.bad > 0 then log(fmt('%d patch file(s) or mod(s) skipped: not laid out the way I read them, or cut short', scan.bad)) end
 if scan.big > 0 then log(fmt('%d Lua resource(s) over 4 MB not read (too big to be a mod)', scan.big)) end
+if scan.huge > 0 then log(fmt('%d patch file(s) over 200,000 resources not read for mods (too big to hold a mod)', scan.huge)) end
 if #scan.langs > 0 then
   ok, err = pcall(function()
     svc.lang.load(scan.langs)
@@ -11604,11 +12464,14 @@ if TEST then
     log('dev mode failed: ' .. tr.why(err))
   end
 end
--- an addon blamed for the last crash is turned off now that I know its fingerprint
+-- an addon blamed for the last crash is turned off (or has its crash counted) now that I know its fingerprint
 for _, r in ipairs(found_addons) do
   local o = off[r.name]
   if o and o.fp == 'pending' then o.fp = fingerprint(r.src); save_state() end
+  local st = tr.strikes[r.name]
+  if st and st.fp == 'pending' then st.fp = fingerprint(r.src); save_state() end
 end
+starter.unfound()
 ok, err = pcall(svc.install_shims, G)
 if not ok then log('the look-alikes failed: ' .. tr.why(err)) end
 -- the locked-down space every loader mod runs in (after the compat parts and the look-alikes, which mods reach
@@ -11638,6 +12501,11 @@ ok, err = pcall(start_boots)
 if not ok then log('starting the other boot scripts failed: ' .. tr.why(err)) end
 ok, err = pcall(svc.startup_done)
 if not ok then log('after startup failed: ' .. tr.why(err)) end
+-- (every mod has started or not: an inbox whose trusted mod didn't start holds nothing more)
+if svc.runtime and svc.runtime.settle then
+  ok, err = pcall(svc.runtime.settle)
+  if not ok then log('settling the inboxes failed: ' .. tr.why(err)) end
+end
 svc.ctx.health_dirty = false
 ok, err = pcall(svc.util.write_health)
 if not ok then log('writing the health file failed: ' .. tr.why(err)) end
