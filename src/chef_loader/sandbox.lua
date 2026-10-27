@@ -468,7 +468,8 @@ function M.install(ctx)
     local h = f:read(72)
     if type(h) ~= 'string' or #h < 72 or u32(h, 1) ~= 0xF0000011 then return nil, 'not a patch file' end
     local types, count = u32(h, 5), u32(h, 9)
-    if types > 4096 or count > 262144 then return nil, 'not a patch file' end
+    -- (a mod's built patch can pass 375,000 rows; the rows are read 4096 at a time, so the cap only bounds the time)
+    if types > 4096 or count > 2097152 then return nil, 'not a patch file' end
     local tt = types > 0 and f:read(32 * types) or ''
     if #tt ~= 32 * types then return nil, 'a cut-off patch file' end
     -- The layout must be the one I read: the type table's counts (u64 at +16) add up to the row count and every row's

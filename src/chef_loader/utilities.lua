@@ -101,12 +101,14 @@ function M.index(ctx, P)
   local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
               compared = 0, read = 0, excl = 0 }
   -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index *
-  -- 2^18 + entry. The key is a number, not the row's 16 bytes as a string: a string per row would grow Lua's string
-  -- table by up to 200,000, and each doubling of it is one step of tens of ms no pause can split. The number is the
-  -- id's low 45 bits * 256 + the type's index (types are a few strings, seen again and again); the id's top 19 bits go
-  -- with the code in the value (top * 2^31 + code: up to 8191 patches, below 2^50), so two ids that share the low bits
-  -- are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the id's
-  -- low byte into 256, so no single table grows to 200,000 keys (one rehash of that is tens of ms too).
+  -- 2^21 + entry (a patch up to 2,097,152 rows, the most the sandbox lets a mod place). The key is a number, not the
+  -- row's 16 bytes as a string: a string per row would grow Lua's string table by hundreds of thousands, and each
+  -- doubling of it is one step of tens of ms no pause can split. The number is the id's low 45 bits * 256 + the type's
+  -- index (types are a few strings, seen again and again); the id's top 19 bits go with the code in the value
+  -- (top * 2^34 + code: up to 8191 patches, below 2^53, so a double holds it exactly), so two ids that share the low
+  -- bits are told apart. The rare second one is kept by its 16 bytes (wins_s / shads_s). The tables are split by the
+  -- id's low byte into 256, so no single table grows to hundreds of thousands of keys (one rehash of that is tens of
+  -- ms too).
   local wins, shads, wins_s, shads_s, tix, ntypes = {}, {}, {}, {}, {}, 0
   for b = 0, 255 do wins[b], shads[b] = {}, {} end
   local list = P.patches()
@@ -130,7 +132,7 @@ function M.index(ctx, P)
         local head = f:read(72) or ''
         if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
         local t_, e_ = u32(head, 5), u32(head, 9)
-        if t_ > 4096 or e_ > 200000 then return end
+        if t_ > 4096 or e_ > 2097152 then return end
         if t_ > 0 and #(f:read(t_ * 32) or '') < t_ * 32 then return end
         nt, ne = t_, e_
       end)
@@ -149,20 +151,20 @@ function M.index(ctx, P)
             if not ti then ntypes = ntypes + 1; ti = ntypes; tix[ts] = ti end
             local lo, hi = u32(s, at), u32(s, at + 4)
             local b, top = lo % 256, floor(hi / 8192)
-            local code = pi * 262144 + e
+            local code = pi * 2097152 + e
             local wt, st, k = wins[b], shads[b], ((hi % 8192) * 4294967296 + lo) * 256 + ti
             local v = ti < 256 and wt[k] or nil
-            local was = v and floor(v / 2147483648) == top and v % 2147483648 or nil
+            local was = v and floor(v / 17179869184) == top and v % 17179869184 or nil
             if ti >= 256 or (v and not was) then                 -- (by its 16 bytes)
               wt, st, k = wins_s, shads_s, s_sub(s, at, at + 15)
               was = wt[k]
             end
-            if was and floor(was / 262144) ~= pi then          -- (a resource listed twice in one patch: once)
+            if was and floor(was / 2097152) ~= pi then         -- (a resource listed twice in one patch: once)
               local sh = st[k]
               if not sh then sh = {}; st[k] = sh end
               table.insert(sh, 1, was)
             end
-            wt[k] = wt == wins_s and code or top * 2147483648 + code
+            wt[k] = wt == wins_s and code or top * 17179869184 + code
           end
           e0 = e0 + n
           pause()
@@ -175,7 +177,7 @@ function M.index(ctx, P)
     pause()
   end
   local function row(code)
-    local pi, e = floor(code / 262144), code % 262144
+    local pi, e = floor(code / 2097152), code % 2097152
     local blocks = tocs[pi]
     local b = floor(e / 512)
     return list[pi], blocks and blocks[b + 1] or '', (e - b * 512) * 80 + 1
@@ -224,7 +226,7 @@ function M.index(ctx, P)
     for key, list_of in pairs(st) do            -- (nothing is added while this walks it: yielding is fine)
       steps = steps + 1
       if steps % 256 == 0 then pause() end
-      local wp, wtoc, wat = row(wt[key] % 2147483648)
+      local wp, wtoc, wat = row(wt[key] % 17179869184)
       for _, code in ipairs(list_of) do
         local lp, ltoc, lat = row(code)
         if label(wp) ~= label(lp) then
@@ -287,14 +289,14 @@ function M.index(ctx, P)
     local k = ti and ti < 256 and ((hi % 8192) * 4294967296 + lo) * 256 + ti
     local v = k and wins[b][k]
     local w, sh
-    if v and floor(v / 2147483648) == floor(hi / 8192) then w, sh = v % 2147483648, shads[b][k]
+    if v and floor(v / 17179869184) == floor(hi / 8192) then w, sh = v % 17179869184, shads[b][k]
     else w, sh = wins_s[key], shads_s[key] end
     if not w then return nil end
     local out = {}
-    local pi = floor(w / 262144)
+    local pi = floor(w / 2097152)
     out[1] = { patch = list[pi].n, file = list[pi].file, mods = mods_of(list[pi]) }
     for _, code in ipairs(sh or {}) do
-      local p = list[floor(code / 262144)]
+      local p = list[floor(code / 2097152)]
       out[#out + 1] = { patch = p.n, file = p.file, mods = mods_of(p) }
     end
     return out
@@ -1822,12 +1824,13 @@ function M.install(ctx, L)
     for _, m in ipairs(L.addons) do
       -- (another mod's version read raw: its table can't raise into this call)
       local v = type(m.module) == 'table' and rawget(m.module, 'version') or nil
-      local req = {}
+      local req, lacks = {}, {}
       for i, q in ipairs(m.requires or {}) do req[i] = q end
+      for i, q in ipairs(m.missing or {}) do lacks[i] = q end
       out[#out + 1] = { name = m.name, kind = 'addon', on = m.on == true, dev = m.dev == true, file = m.file,
                         version = (type(v) == 'string' or type(v) == 'number') and tostring(v) or nil,
                         state = state_of(m), why = m.why, errors = m.errors or 0, ms_avg = m.last_avg, ms_max = m.last_max,
-                        requires = req }
+                        requires = req, missing = lacks }
     end
     for _, b in ipairs(L.boots()) do
       local r = b.a or b
@@ -1847,10 +1850,11 @@ function M.install(ctx, L)
   end
   local function field(v) return (tostring(v == nil and '' or v):gsub('[\t\r\n]', ' ')) end
   function util.health_text()
-    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile' }
+    local out = { 'name\tstate\twhy\tkind\tversion\terrors\tms_avg\tms_max\tfile\tmissing' }
     for _, m in ipairs(util.mod_list()) do
       out[#out + 1] = concat({ field(m.name), field(m.state), field(m.why), field(m.kind), field(m.version), field(m.errors),
-        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file) }, '\t')
+        m.ms_avg and fmt('%.3f', m.ms_avg) or '', m.ms_max and fmt('%.2f', m.ms_max) or '', field(m.file),
+        field(m.missing and concat(m.missing, ' ') or '') }, '\t')
     end
     return concat(out, '\n') .. '\n'
   end
