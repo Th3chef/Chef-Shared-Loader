@@ -308,8 +308,29 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   - its first call is breadcrumbed for it;
   - a unit is checked before it's asked anything (with the loader's unit rules);
   - a refused call returns `nil, why`.
-- **What it made is undone when it stops:** its units, its GUIs, the units it hid, the materials it swapped on the
-  game's units and the mouse dead zones it changed. Textures it set with `Material.set_texture` can't be: the engine
+- **Live palette materials** (that runtime's private-material calls, with its rules and refusals, word for word): a
+  mod recolours its own copies during play, without a restart.
+  - `Material.private_aliases(list)` declares the mod's private materials, `{ { id = '<16 lower-case hex>', slots =
+    { 'material_lut', ... } }, ... }` (slot names letters, digits and `_`, 64 at most). It replaces the mod's last
+    declaration and writes nothing.
+  - `Material.set_private_texture(mat, variable, texture)`, `Material.reinitialize_shader(mat)` and
+    `Mesh.refresh_instance_hash(mesh)` work only on a material (or a mesh with one) that is declared, of a unit the mod
+    spawned **in this frame**, read in this frame. Anything else is refused before it reaches the engine: the game's
+    own materials (shared by every unit that wears them), a copy from an earlier frame, an undeclared slot, a texture
+    that isn't loaded. The recipe that works is the order above: every slot's texture, then the shader, then the
+    mesh. Each call is protected and its answers checked (`'unobserved return shape'` if the engine answers otherwise).
+  - `Unit.paint_private_cape(u, alias, fields)` paints the game's own medium cape (the one cape whose layout is known)
+    with a declared private material: `fields` gives all five of `material_lut`, `cape_lut`, `cape_gradient`,
+    `decal_sheet` and `cape_scalar_fields` (16-hex loaded textures). The loader binds the material by the cape's slot
+    first and reads only the new private instance; `Unit.restore_private_cape(u)` binds the game's material back by
+    that slot without reading the painted meshes. A painted cape is one mod's at a time (another's paint or restore is
+    refused), and once painted it can't be read or swapped through `Unit.mesh` / `Unit.set_material_at` again
+    (`'native cape reads require a fresh private transaction'`): paint it again instead.
+  - A call the game build lacks the engine functions for isn't there (`handle.missing()` names it, with
+    `spec.needs`).
+- **What it made is undone when it stops:** the game's capes it painted (put back by their slot first, before anything
+  else), its units, its GUIs, the units it hid, the materials it swapped on the game's units and the mouse dead zones
+  it changed. Textures it set with `Material.set_texture` can't be: the engine
   can't tell what a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
   once when it stops your mod (errors, a failed start, a dev reload), before it undoes anything, while your engine
   calls still work. (`stop` is Chef Shared Loader's own; the HD2 Lua Runtime itself never calls it.) A mod that

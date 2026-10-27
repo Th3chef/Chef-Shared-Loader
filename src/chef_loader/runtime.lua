@@ -14,8 +14,13 @@
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
 --     a world that's gone, or a runtime-built one, is refused), and a refused call returns nil and why
---   * what a mod made is undone when it stops: its units destroyed, its GUIs destroyed, units it hid shown, materials
---     it swapped on units it didn't make put back, mouse dead zones it changed put back
+--   * live palette materials, as that runtime has them: Material.private_aliases (declared private ids and slots),
+--     Material.set_private_texture, Material.reinitialize_shader and Mesh.refresh_instance_hash on a declared material
+--     of a copy the mod spawned in this frame, and Unit.paint_private_cape / restore_private_cape (the game's medium
+--     cape, bound by its slot, put back by it without a read); each only where the engine has what it calls
+--   * what a mod made is undone when it stops: the game's capes it painted put back (first), its units destroyed, its
+--     GUIs destroyed, units it hid shown, materials it swapped on units it didn't make put back, mouse dead zones it
+--     changed put back
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
@@ -59,6 +64,15 @@ local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
 local GUIS_PER_MOD, PRIMITIVES, SETS_PER_SECOND = 6, 12000, 10
 -- the resource types Application.can_get answers for (another string goes to the engine as a type name)
 local CAN_GET = { unit = true, material = true, texture = true, font = true, runtime_font = true, package = true }
+-- the private palette ids and the native cape's resources: lower-case 16 hex, as the HD2 Lua Runtime takes them
+local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
+-- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
+-- slot, the material the game gives it and how many mesh positions carry that slot (the medium cape, build 26088801),
+-- and the texture variables a paint sets, every one of them each time
+local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 } }
+local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
+local CAPE_FIELD = {}
+for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
 
 -- ctx: log(line), mod_log(owner, text), guarded(owner, key, fn, ...), fn_of(name), G (the game's globals),
 -- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
@@ -90,6 +104,21 @@ function M.install(ctx)
     if not (t == nil and why == 'skipped') then rec.seen[name] = true end
     if type(t) ~= 'table' then return nil, why end
     return unpack(t, 1, t.n)
+  end
+  -- a call whose answers are checked (the palette calls): protected every time, every answer packed ({ n = ... });
+  -- its first call for this mod breadcrumbed through guarded, as once() does. -> the answers, or nil, why
+  local function checked(rec, name, ...)
+    local fn = fn_of(name)
+    if fn == nil then return nil, name .. ' is not in this game build' end
+    if rec.seen[name] then
+      local ok, t = pcall(packed, fn, ...)
+      if ok then return t end
+      return nil, tostring(t)
+    end
+    local t, why = guarded(rec.owner, name, packed, fn, ...)
+    if not (t == nil and why == 'skipped') then rec.seen[name] = true end
+    if type(t) ~= 'table' then return nil, why end
+    return t
   end
   -- a refusal: nil, why; the first of each kind (binding and why, 30 a mod at most) goes to the log
   local function refuse(rec, binding, why)
@@ -211,13 +240,183 @@ function M.install(ctx)
   local meshes = setmetatable({}, { __mode = 'k' })
   local materials = setmetatable({}, { __mode = 'k' })
   local versions = setmetatable({}, { __mode = 'k' })   -- unit -> how many times its materials were swapped
+  -- the frame a mod spawned each of its units in: the palette writes are for a copy in that frame only
+  local spawned = setmetatable({}, { __mode = 'k' })
+  -- the game's capes a mod painted with its private material (Unit.paint_private_cape): unit -> the mod that has it
+  -- painted, and unit -> its seed (slot, source and positions, as hex and numbers). A cape with a seed is never read
+  -- again outside a fresh paint: its meshes are a private instance's then, and reading those back is what faulted
+  local cape_owners = setmetatable({}, { __mode = 'k' })
+  local cape_seeds = setmetatable({}, { __mode = 'k' })
   local function mesh_ok(rec, m)
     local e = meshes[m]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit)
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
   end
   local function material_ok(rec, mat)
     local e = materials[mat]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and e.version == (versions[e.unit] or 0)
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
+      and e.version == (versions[e.unit] or 0)
+  end
+
+  -- ---------------------------------------------------------------- the game's cape, painted live
+  -- (the HD2 Lua Runtime's cape_palette.lua, ported to my bookkeeping.) One mod's paints of the game's own medium cape
+  -- with its private material: the binding is replaced by the cape's stable slot before any mesh or material is read
+  -- (so what's read is the private instance, never the game's shared one), and put back by that slot without reading
+  -- the painted meshes. No engine value outlives a call: a record keeps hex strings and numbers.
+  local function cape_for(rec)
+    local self, records = {}, setmetatable({}, { __mode = 'k' })
+    -- inside a paint: an engine call that fails, or a read with no answer, raises (and the paint puts the cape back)
+    local function call(name, ...)
+      local r, why = checked(rec, name, ...)
+      if not r then error(tostring(why), 0) end
+      return r
+    end
+    local function get(name, ...)
+      local v = call(name, ...)[1]
+      if v == nil then error(name .. ' gave no answer', 0) end
+      return v
+    end
+    -- a write, with the answers it was seen to give: a binding the material it replaced, a mesh refresh the mesh,
+    -- the setters nothing
+    local function write(name, ...)
+      local r = call(name, ...)
+      if name == 'Unit.set_material' then
+        if not (r.n == 1 and kind(r[1]) == 'IdString64') then error('unexpected material binding return', 0) end
+        return get('IdString64.to_hex', r[1])
+      elseif name == 'Mesh.refresh_instance_hash' then
+        if not (r.n == 1 and kind(r[1]) == 'MeshObject') then error('unexpected mesh refresh return', 0) end
+      elseif r.n ~= 0 then error('unexpected private cape setter return', 0) end
+    end
+    local function loaded(what, hex) return hex16_lower(hex) and resource(rec, what, hex) ~= nil end
+    -- (the material handles anyone holds of this cape are stale from now on)
+    local function bind(u, r, id)
+      versions[u] = (versions[u] or 0) + 1
+      return write('Unit.set_material', u, get('IdString32.from_hex', r.slot), get('IdString64.from_hex', id))
+    end
+    local function snapshot(u, spec)
+      local positions = {}
+      for i = 1, get('Unit.num_meshes', u) do
+        local mesh = get('Unit.mesh', u, i)
+        for j = 1, get('Mesh.num_materials', mesh) do
+          if get('IdString32.to_hex', get('Mesh.material_slot_id', mesh, j)) == spec.slot then
+            if get('IdString64.to_hex', get('Material.id64', get('Mesh.material', mesh, j))) ~= spec.source then
+              error('cape source was replaced by another mod', 0)
+            end
+            positions[#positions + 1] = { i, j }
+          end
+        end
+      end
+      if #positions ~= spec.positions then error('cape material layout changed', 0) end
+      return { slot = spec.slot, source = spec.source, positions = positions }
+    end
+    -- a cape is this mod's to paint: the game's (not one the mod spawned), in a live world, not another mod's painted
+    -- one, and one my unit rules let a mod read
+    local function allowed(u)
+      if rec.owned[u] or (cape_owners[u] and cape_owners[u] ~= rec) or unit_ask(rec, 'Unit.mesh', u) then return false end
+      return listed(once(rec, 'Unit.world', u))
+    end
+    local function restored(u)
+      cape_seeds[u] = self.seed(u)
+      if cape_owners[u] == rec then cape_owners[u] = nil end
+    end
+    function self.restore(u)
+      local r = records[u]
+      if not r then return true end
+      if not r.active then restored(u); return true end
+      if alive(rec, u) then
+        local ok, why = pcall(bind, u, r, r.source)
+        if not ok then return nil, tostring(why) end
+      end
+      r.active = false
+      restored(u)
+      return true
+    end
+    function self.apply(u, alias, fields)
+      if not alive(rec, u) or not allowed(u) then return nil, 'Cape unit is unavailable' end
+      local name = once(rec, 'Unit.resource_name', u)
+      local spec = name ~= nil and CAPES[once(rec, 'IdString64.to_hex', name) or ''] or nil
+      if not spec then return nil, 'This cape geometry has no live-paint contract' end
+      local declared = rec.palette_aliases and rec.palette_aliases[alias]
+      if not declared or not loaded('material', alias) or alias == spec.source then return nil, 'Private cape material is unavailable' end
+      if type(fields) ~= 'table' then return nil, 'Invalid cape texture tuple' end
+      local wanted = {}
+      for field, value in pairs(fields) do
+        if not CAPE_FIELD[field] or not declared[field] then return nil, 'Undeclared cape texture slot' end
+        if not loaded('texture', value) then return nil, 'Cape texture is not loaded' end
+        wanted[field] = value
+      end
+      for _, field in ipairs(CAPE_FIELDS) do if not wanted[field] then return nil, 'Incomplete cape texture tuple' end end
+      local r = records[u]
+      if not r then
+        -- (a cape another mod painted before: its seed, so the painted meshes aren't read again)
+        local prior = cape_seeds[u]
+        if prior then
+          if prior.slot ~= spec.slot or prior.source ~= spec.source or #prior.positions ~= spec.positions then
+            return nil, 'Stored cape layout does not match this geometry'
+          end
+          r = { slot = prior.slot, source = prior.source, positions = {} }
+          for i, p in ipairs(prior.positions) do r.positions[i] = { p[1], p[2] } end
+        else
+          local ok, result = pcall(snapshot, u, spec)
+          if not ok then return nil, tostring(result) end
+          r = result
+        end
+        records[u] = r
+      end
+      local function transaction()
+        -- (the private instance painted before is retired without being read, the same alias again too)
+        if r.active then bind(u, r, r.source); r.active = false end
+        r.active = true
+        bind(u, r, alias)
+        local function material(pos)
+          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
+          local mesh = get('Unit.mesh', u, pos[1])
+          if pos[2] > get('Mesh.num_materials', mesh) then error('cape slot count changed', 0) end
+          local mat = get('Mesh.material', mesh, pos[2])
+          if get('IdString64.to_hex', get('Material.id64', mat)) ~= alias then error('private cape binding changed', 0) end
+          return mat
+        end
+        for _, pos in ipairs(r.positions) do
+          for _, field in ipairs(CAPE_FIELDS) do
+            write('Material.set_texture', material(pos), field, get('IdString64.from_hex', wanted[field]))
+          end
+        end
+        for _, pos in ipairs(r.positions) do write('Material.reinitialize_shader', material(pos)) end
+        for _, pos in ipairs(r.positions) do
+          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
+          write('Mesh.refresh_instance_hash', get('Unit.mesh', u, pos[1]))
+        end
+      end
+      local ok, why = pcall(transaction)
+      if not ok then
+        local reset, problem = self.restore(u)
+        return nil, tostring(why) .. (not reset and '; restore failed: ' .. tostring(problem) or '')
+      end
+      return true
+    end
+    function self.active(u) return records[u] ~= nil and records[u].active == true end
+    function self.known(u) return records[u] ~= nil end
+    function self.seed(u)
+      local r = records[u]
+      if not r then return nil end
+      local s = { slot = r.slot, source = r.source, positions = {} }
+      for i, p in ipairs(r.positions) do s.positions[i] = { p[1], p[2] } end
+      return s
+    end
+    -- every cape this mod painted put back (when it stops, before its units go)
+    function self.release()
+      local errors = {}
+      for u in pairs(records) do
+        local ok, why = self.restore(u)
+        if not ok then errors[#errors + 1] = why end
+      end
+      if #errors > 0 then return nil, concat(errors, '; ') end
+      return true
+    end
+    -- a new world: the capes of the one that's gone are let go untouched
+    function self.drop_gone()
+      for u in pairs(records) do if util.gone(u) then records[u] = nil end end
+    end
+    return self
   end
 
   -- ---------------------------------------------------------------- the engine table one mod gets
@@ -265,6 +464,7 @@ function M.install(ctx)
     function N.Unit.mesh(u, i)
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, 'Unit.mesh', why) end
+      if cape_seeds[u] then return refuse(rec, 'Unit.mesh', 'native cape reads require a fresh private transaction') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, 'Unit.mesh', 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m ~= nil then
@@ -312,6 +512,7 @@ function M.install(ctx)
       local b = 'Unit.set_material_at'
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, b, why) end
+      if cape_seeds[u] then return refuse(rec, b, 'use the native cape transaction or restoration') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, b, 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m == nil or not int(j, 1, once(rec, 'Mesh.num_materials', m) or 0) then return refuse(rec, b, 'no such material position') end
@@ -397,6 +598,109 @@ function M.install(ctx)
       return true
     end
 
+    -- Live palette materials (the HD2 Lua Runtime's guard.lua, ported): a mod declares its private material ids and
+    -- their texture slots, then, in the frame it spawned a copy, writes those slots on the copy's private material,
+    -- reinitializes its shader and refreshes its mesh's instance hash. That recipe was seen to work only so; anything
+    -- else (a material another unit shares, the game's own, a copy from an earlier frame, an undeclared slot) is
+    -- refused before it reaches the engine. A declaration writes nothing.
+    -- list: { { id = 16 lower-case hex, slots = { texture variable names } }, ... }; replaces the mod's last one
+    function N.Material.private_aliases(list)
+      local b = 'Material.private_aliases'
+      if type(list) ~= 'table' then return refuse(rec, b, 'expected a private ID list') end
+      local set = {}
+      for _, entry in ipairs(list) do
+        if type(entry) ~= 'table' or not hex16_lower(entry.id) or type(entry.slots) ~= 'table' then
+          return refuse(rec, b, 'invalid private material declaration')
+        end
+        local slots = {}
+        for _, name in ipairs(entry.slots) do
+          if type(name) ~= 'string' or #name > 64 or not name:match('^[%w_]+$') then return refuse(rec, b, 'invalid texture slot name') end
+          slots[name] = true
+        end
+        set[entry.id] = slots
+      end
+      rec.palette_aliases = set
+      return true
+    end
+    -- the declared slots of a material, if it's one of the mod's private ones
+    local function private_of(mat)
+      local id = once(rec, 'Material.id64', mat)
+      local hex = id ~= nil and once(rec, 'IdString64.to_hex', id) or nil
+      return type(hex) == 'string' and rec.palette_aliases ~= nil and rec.palette_aliases[hex] or nil
+    end
+    -- an owned copy's material or mesh handle from this frame, the copy spawned in this frame
+    local function spawn_frame(e) return owned[e.unit] and spawned[e.unit] == ctx.frame() end
+    if type(fn_of('Material.set_texture')) == 'function' then
+      function N.Material.set_private_texture(mat, variable, texture)
+        local b = 'Material.set_private_texture'
+        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
+          return refuse(rec, b, 'not a registered owned spawn-frame material')
+        end
+        if type(variable) ~= 'string' then return refuse(rec, b, 'variable name is not a string') end
+        if not private_of(mat)[variable] then return refuse(rec, b, 'texture slot was not declared') end
+        local res = resource(rec, 'texture', texture)
+        if not res then return refuse(rec, b, 'texture is not loaded') end
+        local r, why = checked(rec, 'Material.set_texture', mat, variable, res)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    if type(fn_of('Material.reinitialize_shader')) == 'function' then
+      function N.Material.reinitialize_shader(mat)
+        local b = 'Material.reinitialize_shader'
+        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
+          return refuse(rec, b, 'not an owned spawn-frame material')
+        end
+        local r, why = checked(rec, b, mat)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    if type(fn_of('Mesh.refresh_instance_hash')) == 'function' then
+      function N.Mesh.refresh_instance_hash(mesh)
+        local b = 'Mesh.refresh_instance_hash'
+        if not mesh_ok(rec, mesh) or not spawn_frame(meshes[mesh]) then return refuse(rec, b, 'not an owned spawn-frame mesh') end
+        local private, n = false, once(rec, 'Mesh.num_materials', mesh)
+        for i = 1, type(n) == 'number' and n or 0 do
+          local mat = once(rec, 'Mesh.material', mesh, i)
+          if mat ~= nil and private_of(mat) then private = true end
+        end
+        if not private then return refuse(rec, b, 'mesh has no registered private material') end
+        local r, why = checked(rec, b, mesh)
+        if not r then return refuse(rec, b, tostring(why)) end
+        if r.n ~= 1 or kind(r[1]) ~= 'MeshObject' then return refuse(rec, b, 'unobserved return shape') end
+        return true
+      end
+    end
+    -- the game's own medium cape painted with a declared private material (fields: texture variable -> 16-hex texture,
+    -- all five of CAPE_FIELDS), and put back; only where the engine has every call the paint makes
+    local function has(name) return type(fn_of(name)) == 'function' end
+    if has('IdString32.from_hex') and has('IdString32.to_hex') and has('Material.reinitialize_shader')
+      and has('Mesh.refresh_instance_hash') then
+      local cape = cape_for(rec)
+      rec.cape = cape
+      function N.Unit.paint_private_cape(u, alias, fields)
+        local ok, why = cape.apply(u, alias, fields)
+        if cape.known(u) then
+          cape_seeds[u] = cape.seed(u)
+          if cape.active(u) then cape_owners[u] = rec
+          elseif cape_owners[u] == rec then cape_owners[u] = nil end
+          -- (the cape is put back by its slot from now on, without a read: never by the rebound list, which reads it)
+          if rec.rebound then rec.rebound[u] = nil end
+        end
+        if not ok then return refuse(rec, 'Unit.paint_private_cape', why) end
+        return true
+      end
+      function N.Unit.restore_private_cape(u)
+        if cape_owners[u] and cape_owners[u] ~= rec then return refuse(rec, 'Unit.restore_private_cape', 'cape belongs to another mod') end
+        local ok, why = cape.restore(u)
+        if not ok then return refuse(rec, 'Unit.restore_private_cape', why) end
+        return true
+      end
+    end
+
     -- World
     for _, name in ipairs({ 'units', 'num_units' }) do
       local b = 'World.' .. name
@@ -425,7 +729,7 @@ function M.install(ctx)
       if rotation ~= nil then u = once(rec, b, w, res, position, rotation)
       elseif position ~= nil then u = once(rec, b, w, res, position)
       else u = once(rec, b, w, res) end
-      if kind(u) == 'Unit' then owned[u] = w; util.fresh(u) end
+      if kind(u) == 'Unit' then owned[u] = w; spawned[u] = ctx.frame(); util.fresh(u) end
       return u
     end
     local function own_in(w, u)
@@ -867,6 +1171,11 @@ function M.install(ctx)
   local function release(rec)
     local o = rec.owner
     local function g(name, ...) return guarded(o, name, fn_of(name), ...) end
+    -- the game's capes it painted, put back by their slot first (before anything reads them or its units go)
+    if rec.cape then
+      local ok, done, why = pcall(rec.cape.release)
+      if not (ok and done) then log(fmt('[%s] %s: putting back the capes it painted failed: %s', o, rec.id, tostring(ok and why or done))) end
+    end
     for i, v in pairs(rec.dead_zones or {}) do g('Mouse.set_dead_zone', i, v[1], v[2]) end
     rec.dead_zones = nil
     for u, list in pairs(rec.rebound or {}) do
@@ -942,11 +1251,15 @@ function M.install(ctx)
     for m in pairs(meshes) do meshes[m] = nil end
     for m in pairs(materials) do materials[m] = nil end
     for u in pairs(versions) do versions[u] = nil end
+    for u in pairs(spawned) do if util.gone(u) then spawned[u] = nil end end
+    for u in pairs(cape_seeds) do if util.gone(u) then cape_seeds[u] = nil end end
+    for u in pairs(cape_owners) do if util.gone(u) then cape_owners[u] = nil end end
     for _, o in pairs(owners) do
       for _, rec in ipairs(o.order) do
         for u, w in pairs(rec.owned) do if not listed(w) then rec.owned[u] = nil end end
         for u in pairs(rec.hidden) do if util.gone(u) then rec.hidden[u] = nil end end
         for u in pairs(rec.rebound or {}) do if util.gone(u) then rec.rebound[u] = nil end end
+        if rec.cape then rec.cape.drop_gone() end
         for gui, e in pairs(rec.guis) do
           if (ctx.instance and e.instance ~= ctx.instance()) or not listed(e.world) then rec.guis[gui] = nil end
         end
