@@ -91,7 +91,8 @@ local TRUSTED = {
     files = { { dir = '', name = 'hd2transmog-1.0' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.0' },
               { dir = '', name = 'hd2transmog-1.1' }, { dir = 'cowboybingus\\helldivers2\\transmog', name = 'transmog-1.1' },
               { dir = '', name = 'hd2transmog-outfit-' } },
-    patches = { scratch = 'hd2tm-wardrobe.tmp', marker = '-- HD2 Transmog wardrobe' },
+    -- (its older versions also built a styles patch: it may empty those too)
+    patches = { scratch = 'hd2tm-wardrobe.tmp', marker = { '-- HD2 Transmog wardrobe', '-- HD2 Transmog styles' } },
     accepts = { NativeNotification = 'mods/native_notification/core' },
     view = { { global = 'TransmogUI', fields = { 'version' },
                calls = { snapshot = { 'api_version', 'revision', 'context', 'applied', 'capabilities', 'health' },
@@ -5516,7 +5517,7 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- what a trusted mod gets beyond that
   -- grants[owner] = { files = { { dir, name } ... } (its own files in %LOCALAPPDATA%: below dir, names starting with
-  -- name; both lower case), patches = { scratch = file name prefix, marker = text, consent = fn() -> true when the
+  -- name; both lower case), patches = { scratch = file name prefix, marker = text or a list of texts, consent = fn() -> true when the
   -- player said yes, asked = fn(why) } }. Set before the mod's environment is made (its os gets remove and rename).
   local grants = {}
   function sb.grant(owner, g) if type(owner) == 'string' and type(g) == 'table' then grants[owner] = g end end
@@ -5614,7 +5615,9 @@ function M.install(ctx)
           local text = len > 0 and f:read(len) or ''
           if type(text) ~= 'string' or #text ~= len then return nil, 'a cut-off patch file' end
           if not only_comments(text) then return nil, 'a Lua resource with code in it' end
-          if marker and s_sub(text, 1, #marker) == marker then marked = true end
+          if type(marker) == 'table' then
+            for _, m in ipairs(marker) do if s_sub(text, 1, #m) == m then marked = true end end
+          elseif marker and s_sub(text, 1, #marker) == marker then marked = true end
         end
       end
     end
@@ -6237,9 +6240,11 @@ local CAN_GET = { unit = true, material = true, texture = true, font = true, run
 -- the private palette ids and the native cape's resources: lower-case 16 hex, as the HD2 Lua Runtime takes them
 local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
 -- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
--- slot, the material the game gives it and how many mesh positions carry that slot (the medium cape, build 26088801),
--- and the texture variables a paint sets, every one of them each time
-local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 } }
+-- slot, the material the game gives it and how many mesh positions carry that slot (build 26088801: the medium cape,
+-- and the shock-trooper cape that FS-05, B-27 and other armors bring), and the texture variables a paint sets, every
+-- one of them each time
+local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 },
+                ['ea846ef460cc5ba0'] = { slot = '3d35eb9e', source = '38bd5d2916d3ab44', positions = 3 } }
 local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
 local CAPE_FIELD = {}
 for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end

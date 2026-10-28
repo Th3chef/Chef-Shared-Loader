@@ -411,7 +411,7 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- what a trusted mod gets beyond that
   -- grants[owner] = { files = { { dir, name } ... } (its own files in %LOCALAPPDATA%: below dir, names starting with
-  -- name; both lower case), patches = { scratch = file name prefix, marker = text, consent = fn() -> true when the
+  -- name; both lower case), patches = { scratch = file name prefix, marker = text or a list of texts, consent = fn() -> true when the
   -- player said yes, asked = fn(why) } }. Set before the mod's environment is made (its os gets remove and rename).
   local grants = {}
   function sb.grant(owner, g) if type(owner) == 'string' and type(g) == 'table' then grants[owner] = g end end
@@ -509,7 +509,9 @@ function M.install(ctx)
           local text = len > 0 and f:read(len) or ''
           if type(text) ~= 'string' or #text ~= len then return nil, 'a cut-off patch file' end
           if not only_comments(text) then return nil, 'a Lua resource with code in it' end
-          if marker and s_sub(text, 1, #marker) == marker then marked = true end
+          if type(marker) == 'table' then
+            for _, m in ipairs(marker) do if s_sub(text, 1, #m) == m then marked = true end end
+          elseif marker and s_sub(text, 1, #marker) == marker then marked = true end
         end
       end
     end

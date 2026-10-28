@@ -320,7 +320,8 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
     own materials (shared by every unit that wears them), a copy from an earlier frame, an undeclared slot, a texture
     that isn't loaded. The recipe that works is the order above: every slot's texture, then the shader, then the
     mesh. Each call is protected and its answers checked (`'unobserved return shape'` if the engine answers otherwise).
-  - `Unit.paint_private_cape(u, alias, fields)` paints the game's own medium cape (the one cape whose layout is known)
+  - `Unit.paint_private_cape(u, alias, fields)` paints the game's own cape (the two whose layout is known: the medium
+    cape, and the shock-trooper cape that FS-05, B-27 and other armors bring)
     with a declared private material: `fields` gives all five of `material_lut`, `cape_lut`, `cape_gradient`,
     `decal_sheet` and `cape_scalar_fields` (16-hex loaded textures). The loader binds the material by the cape's slot
     first and reads only the new private instance; `Unit.restore_private_cape(u)` binds the game's material back by
@@ -355,7 +356,7 @@ each only what its entry gives. What an entry can give:
 - **Its own files in `%LOCALAPPDATA%`:** names starting with the prefixes the entry lists.
 - **Game patch files**, only once the player turns on "Game patch files: <the mod>" in the options menu (a notice
   says so the first time the mod asks):
-  - its scratch file in `data\`, and patches carrying its marker;
+  - its scratch file in `data\`, and patches carrying its marker (an entry may list several marker texts);
   - a file only takes a patch's name by being renamed to it, and it's checked first: its table of contents must be
     the layout the loader knows (the type counts add up to the rows), it must not replace the game's `boot` script,
     and every Lua resource in it must be comment lines only, the size the row gives, with no stream or GPU data;

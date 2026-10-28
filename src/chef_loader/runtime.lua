@@ -69,9 +69,11 @@ local CAN_GET = { unit = true, material = true, texture = true, font = true, run
 -- the private palette ids and the native cape's resources: lower-case 16 hex, as the HD2 Lua Runtime takes them
 local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
 -- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
--- slot, the material the game gives it and how many mesh positions carry that slot (the medium cape, build 26088801),
--- and the texture variables a paint sets, every one of them each time
-local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 } }
+-- slot, the material the game gives it and how many mesh positions carry that slot (build 26088801: the medium cape,
+-- and the shock-trooper cape that FS-05, B-27 and other armors bring), and the texture variables a paint sets, every
+-- one of them each time
+local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 },
+                ['ea846ef460cc5ba0'] = { slot = '3d35eb9e', source = '38bd5d2916d3ab44', positions = 3 } }
 local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
 local CAPE_FIELD = {}
 for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
