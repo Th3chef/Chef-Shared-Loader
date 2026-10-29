@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.4.1
+
+**Safety**
+- A single launch that ends without a clean shutdown no longer blames a mod. Closing the game from outside (Task
+  Manager, Steam's Stop) leaves the same trace as a crash, so a call or per-frame job that was open is only suspected
+  the first time: nothing is skipped, counted or refused for every mod, and the log says so. If the next launch ends
+  in the same call too, it's a crash: the call is skipped and both launches count against the mod. A mod's start code
+  and `game_object_field_batched` follow the same rule. So a mod that crashes the game in a new call every launch is
+  now turned off at its 4th crash in a row, not its 3rd.
+- Mods can no longer open Steam overlay pages, read the player's Steam id, see the friend list, send invites, use the
+  lobby browser or use Steam voice chat. `Steam` keeps its reads about the game and the client (`app_id`,
+  `client_running`, `connected`, `is_installed`, `language`, `overlay_active`, `owns_app`, `user_name`), and a call a
+  game update adds stays out until it's known to be a read. `Friends`, `SteamClient`, `SteamVoip`, `SteamVoipClient`
+  and `SteamVoipRoom` read as `false`. `chef.call` refuses the same.
+- A trusted mod no longer gets files of its own or game patch file writes: it reads and writes files as every other
+  mod does (nothing in `data\`, no `os.remove` or `os.rename`). Trusted entries now carry the lobby and screenshots
+  only.
+
+**New for mods**
+- Works beside a loader that bundles the HD2 Lua Runtime. When that loader handed off to this one and the runtime's
+  own core (`mods/hd2rt/core`) is installed, the core and every mod that announces `-- @requires mods/hd2rt/core` or
+  `-- @after mods/hd2rt/core` are left to the loader that bundles it, which runs them on the real runtime. The log names
+  each one, and `chef.mods()` and `chef_loader_health.txt` show them as `left to its loader`. With no handoff (this
+  loader deployed above that one), the look-alike runs those mods and the core shows as `not started`; without that
+  core, the look-alike runs them as before.
+- `chef.hold_mouse(true)` from a shutdown hook is refused (`the game is closing`), so nothing can keep the mouse held
+  as the game quits.
+- For mod authors: put `-- HD2-Requires: chef-shared-loader` in every addon that uses `chef`. Without it, another
+  loader deployed above this one may start the addon itself and list it as failed on its own screen. The example mod
+  and `docs/TESTING.md` carry it now.
+
+**Changes**
+- Run by another loader that handed off to it, the loader names that loader in the log and in
+  `chef_loader_health.txt` for the mods it already started (before: the revision or table name it found).
+- The hang watchdog stays on under a loader that handed off to it and sets its own debug hook: the watchdog's hook
+  takes the host's place during the loader's own calls and gives it back after.
+- Older log sessions are kept. Before `chef_loader.log` starts fresh (past 1 MB), its launches move to the end of
+  `chef_loader.old.log`, which keeps the newest whole launches within 4 MB. If that file can't be written, the log
+  starts fresh as before and says why.
+- The log has a line when the mouse goes back to the game (the options menu closed, or the game closing), with the
+  dead zone it put back, in release builds too (before, only test builds logged it). A mod that holds and lets go every
+  frame logs it once, until the options menu has the mouse again.
+- Lower cost a frame:
+  - `chef.text`: an unchanged text costs much less, and a text that changes every frame (a counter, a timer) is
+    measured faster and makes far less garbage.
+  - `chef.call` goes through one layer instead of two; `chef.camera`'s engine calls go through one protected call once
+    they're proven; lines and sprite sheets have fast paths like rects; triangles and arcs take rects' shortcuts.
+  - HD2 Lua Runtime mods' Unit reads check each unit once a frame.
+  - The options menu keeps its hint line and each row's label and value between frames, mods' key binds no longer ask
+    whether the menu is open on every read, and the full screen look asks about the game's pause screen every 0.25 s.
+  - The performance monitor reuses its tables, and when Adjustable it asks for the game's cursor every 0.25 s unless
+    you're dragging it.
+  - The color cache is emptied only when a color was added.
+- The game's settings file (for the Render Scale and `chef.setting`) is read again at most every 90 s, not 30 s. A
+  world change or a new screen size still reads it at once.
+- Start-up writes the crash state once, and only when something in it changed.
+- Removed from the HD2 Lua Runtime look-alike: the live palette and cape calls (`Material.private_aliases`,
+  `Material.set_private_texture`, `Material.reinitialize_shader`, `Mesh.refresh_instance_hash`,
+  `Unit.paint_private_cape`, `Unit.restore_private_cape`), the read-only views and inboxes a trusted mod could offer
+  the other mods, and the shared globals it could take from a named mod. `handle.request('files')` and
+  `handle.request('patches')` are always refused; `spec.needs` still takes those names, so `handle.missing()` lists
+  them. A mod built on these calls runs on its own runtime's loader.
+- The mod manager's description of the loader now ends "Mod Source: github.com/Th3chef/Chef-Shared-Loader".
+
+**Fixes**
+- A unit kept from an earlier world could pass as usable again two worlds later, and a call on it ended the game. It
+  now stays refused in every later world as long as a mod keeps asking about it. (thanks sscoolqaz)
+- Two colors could share one cached color when a mod passed channels that weren't whole numbers 0-255 (`(0.5, 0, 0)`
+  was drawn as `(0, 128, 0)`). Each color now reaches the engine as given.
+- One mod's bad color in `chef.bitmap` sent every mod's bitmaps down the slow path for the session, and one in a
+  triangle or arc made every mod's shapes draw with rects. Now only that call fails.
+
 ## 1.4.0
 
 **Safety**

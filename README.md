@@ -2,13 +2,19 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.4.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.4.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
 the bottom), then Purge and Deploy. If a mod that replaces the game's `boot` script has a higher priority, it takes the
 loader's place and no loader mod runs, unless that mod's `boot` is the loader's start-up stub (see
 [Other mods' boot scripts](#other-mods-boot-scripts)).
+
+**With Rat's Shared Loader** (HD2 Transmog Foundation 1.1.2 and its Cache and Style Library need it): keep Rat's Shared
+Loader above Chef Shared Loader, as Transmog asks. Rat's Shared Loader then runs Transmog and the other HD2 Lua Runtime
+mods on its own runtime, and Chef Shared Loader runs below it with every Chef Shared Loader mod. Those mods then run
+without this loader's lockdown and trusted-mod permissions. The other order works too: then nothing hands off to Chef
+Shared Loader, so it runs those mods itself, on its look-alike of the HD2 Lua Runtime, locked down like its other mods.
 
 **Mods that need memory access won't work:** since the October 20, 2026 update (7.2.0) the game runs plain Lua 5.1, with
 no `ffi`, so no Lua mod can read or write game memory. No loader can bring that back.
@@ -18,7 +24,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.4.0
+- **Version:** 1.4.1
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -233,7 +239,7 @@ Source: `src/chef_loader/sandbox.lua`.
 | `dofile`, `loadfile`, `module` | Raise errors (`module(..., package.seeall)` would hand out the game's globals). |
 | `require` | The mod's own `package.loaded`, then its own `package.preload` (a loop is an error), then only `bit`, `string`, `table`, `math`, `coroutine`, `table.new`, `table.clear` (the mod's own copies). Everything else raises an error: no C modules, and no `require('_G')`, `('debug')` or `('io')`. Another mod's exports go through `chef.require`; `require('mods/<author>/<name>')` and `package.loaded` give another running mod's module too (a trusted mod's never). |
 | `package` | A per-mod table (`loaded`, `preload`, empty `path`/`cpath`). No `loadlib`. |
-| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer`, every `*Lobby*` / `*GameServer*` table and, from 1.4.0, `Console`, `CommandWindow`, `ConsoleHelp`, `SaveSystem`, `Cloud` and `CloudToken` (each reads as `false`). `Application` (from 1.4.0) keeps everything but the calls that write files, change or save the player's settings or open a browser (`save_render_target`, `set_user_setting`, `open_url_in_browser` ..., and any name with save, write, dump, export, capture, screenshot, url or browser in it). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `synchronizing_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `game_object_field_batched`, `is_*`, `has_*`, `get_*`, `num_*`; `game_object_field_batched` answers only for an object that exists, and a game that ends in it skips that call for that mod, which stays on as after any crash of its own: it's turned off only after it ends 3 launches in a row) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
+| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer`, every `*Lobby*` / `*GameServer*` table and, from 1.4.0, `Console`, `CommandWindow`, `ConsoleHelp`, `SaveSystem`, `Cloud` and `CloudToken`, and from 1.4.1 `Friends` (the friend list and invites), `SteamClient` (the lobby browser) and `SteamVoip`, `SteamVoipClient` and `SteamVoipRoom` (Steam voice chat) (each reads as `false`). `Steam` (from 1.4.1) keeps only `app_id`, `client_running`, `connected`, `is_installed`, `language`, `overlay_active`, `owns_app` and `user_name`: no `open_url` (the Steam overlay), `install_event` or `user_id`. `Application` (from 1.4.0) keeps everything but the calls that write files, change or save the player's settings or open a browser (`save_render_target`, `set_user_setting`, `open_url_in_browser` ..., and any name with save, write, dump, export, capture, screenshot, url or browser in it). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `synchronizing_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `game_object_field_batched`, `is_*`, `has_*`, `get_*`, `num_*`; `game_object_field_batched` answers only for an object that exists, and a game that ends in it two launches in a row skips that call for that mod, which stays on as after any crash of its own: it's turned off only after it ends 3 launches in a row) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
 | `debug` | `traceback` and `getinfo` (levels shifted past the wrapper, `func` removed). No `getlocal`, `getupvalue`, `setupvalue`, `getregistry`, `sethook`, `getmetatable`, `setfenv`. |
 | `getfenv` / `setfenv` | A function of the game, of the loader or of another mod reads as the caller's own environment and can't be changed. Level 0 (the thread) reads as the mod's own and can't be set. |
 | `collectgarbage` | `count`, `step` and `collect` only. Other options (`stop`, ...) do nothing. |
@@ -247,7 +253,7 @@ Source: `src/chef_loader/sandbox.lua`.
   after the mod opened it to write this launch), so a mod can pick up its own old files.
 - **A mod's own files in `%LOCALAPPDATA%\`:** a file opened directly there (one name, an allowed type) is opened in
   the loader's folder instead, under the same name (said once per mod in the log). A read of one not there yet falls
-  back to `%LOCALAPPDATA%\`. Trusted mods keep their own files where they are.
+  back to `%LOCALAPPDATA%\`.
 - **Writes are allowed** only directly in the loader's folder, only as `.log .txt .json .csv .dat .ini .marker .fatal`, with names made
   of `[%w_%-%.]`, and never `chef_loader*` or `chef_data_*`. Saved tables go through `chef.save_table`.
 - **Refused always:** `..`, a `:` after the drive (alternate data streams), `~` (8.3 short names such as
@@ -264,20 +270,7 @@ Source: `src/chef_loader/sandbox.lua`.
 - **Only installed ones get grants.** The log says `trusted: <mod> (...)` at start-up.
 - **The Steam lobby:** through the HD2 Lua Runtime look-alike only (`runtime.lua`), on the lobby key the list gives
   the mod, in the lobby this player is in (never a friend's).
-- **Own files:** names starting with a given prefix, in given folders under `%LOCALAPPDATA%` (read, write, remove,
-  rename).
-- **Game patch files**, as part of the mod's entry (from 1.4.0 there's no options-menu row to turn on: the mods that
-  have this need it to work), always within these checks:
-  - **Writes and removals** in `data\`: the mod's scratch file (any suffix), sidecars (`.stream`,
-    `.gpu_resources`, `.part`) of a patch number that is free or the mod's, and the main file of the mod's own patch.
-    A patch is the mod's when its main file carries the mod's marker: a comment-only Lua resource starting with the
-    marker text (or one of them: an entry may list several; an empty text marks nothing).
-  - **A main file is never written under its name:** it is made by renaming a file to it. That file is checked
-    first. Its table of contents must read whole and be the layout the loader knows (the type counts add up to the
-    rows, every row's type is listed), no row may be the game's `boot` resource (`0xf476df93691895fa`), every Lua
-    resource in it must be comment lines only (no long comments; `\r` ends a line too), exactly the size its row
-    gives and with no stream or GPU data, and one must carry the marker. The log says `<mod> placed a checked game patch file: ...`.
-  - **A file still open for writing** is never renamed or removed.
+- **No files:** a trusted mod's files are every mod's (above): nothing in `data\`, no `os.remove` or `os.rename`.
 - **Screenshots** (`capture` in the entry, from 1.4.0): `chef.capture()`. The loader makes the engine call
   itself and saves the picture in its own folder as `<author>_<mod>_capture_01.dds` to `_50` (the oldest
   written over), one a second at most; see Trusted mods in [docs/MODDING.md](docs/MODDING.md).
@@ -307,13 +300,21 @@ Some engine calls end the game with a native fault (a null read on a stale handl
     that file.
   - `#### clean shutdown`: written when the game reaches `shutdown()`.
 - **Next launch (rule 3):**
-  - **A first call that never returned** is certain: it is skipped from then on. The mod that made it stays on until
-    it has ended 3 launches in a row (each its own call, each skipped); then it is turned off. A launch it doesn't end
-    starts the count over.
-  - **A mod whose start code ends the game** (`<mod>|start`) isn't started from the next launch on, until its file
+  - **A launch that didn't reach `shutdown()`** is said in the log as having ended without a clean shutdown: a crash,
+    or the game closed from outside (Task Manager, Steam's Stop). The trace can't tell those apart: a kill that lands
+    while a call is open leaves it open just as a crash in it would. (The game's crash dumps can't settle it either:
+    their names carry a random part, and the loader can't list a folder.)
+  - **A first call that never returned, or a per-frame job that was open** (and started within 60 s), is only
+    suspected the first time (`suspect:` in the state): nothing is skipped, no crash is counted against the mod and
+    nothing is refused for every mod. The log names it and says so. The suspicion goes after a launch that doesn't end
+    in it.
+  - **The next launch ending in the same call or job** is a crash: it is skipped from then on, and both launches count
+    against the mod that made it. The mod stays on until it has ended 3 launches in a row; then it is turned off. So a
+    mod that crashes the game in one call after another is turned off at its 4th crash in a row (2 calls, each
+    suspected once, then skipped), one launch later than if a single crash were enough. A launch it doesn't end starts
+    the count over; a launch only suspected of ending in its call keeps the count as it was.
+  - **A mod whose start code ends the game** (`<mod>|start`) twice in a row isn't started from then on, until its file
     changes. It doesn't wait for 3 in a row.
-  - **A per-frame job that was open** (and started within 60 s) is only suspected. It is skipped if the next launch
-    dies in it again.
   - **A launch that reached `shutdown()`** is never blamed. The game often crashes by itself after a menu quit.
 - **State** (`chef_loader_state.txt`):
   - `rule: 3`
@@ -392,7 +393,8 @@ A mod that ships its own `boot` (instead of `HD2-Boot`) would normally replace t
   - Boots that are copies of this loader: the start-up stub, a changed copy of it, or the loader built into a mod
     (they carry the `--@@LOADER@@` marker). The log lists them (`boot scripts of mine, not run: ...`).
   - The HD2 Lua Runtime's own boot (its first line starts `-- HD2 Lua Runtime`): its mods run on the loader's
-    look-alike of it (`src/chef_loader/runtime.lua`).
+    look-alike of it (`src/chef_loader/runtime.lua`). When a loader that bundles that runtime handed off to this one,
+    they're left to that loader instead.
   - Other mod loaders: a boot whose source mentions both `HD2-Addon` and `9ba626afa44a3aa3`, or carries
     `__boot_mod_loader`, such as Boot Mod Loader. Running one would start every addon a second time. The log and the
     screen name it.
@@ -445,7 +447,8 @@ All in `%APPDATA%\Arrowhead\Helldivers2\`.
 
 | File | Holds |
 |---|---|
-| `chef_loader.log` | The log. Appended each launch, started fresh once it passes 1 MB; at most 4 MB written per launch. |
+| `chef_loader.log` | The log. Appended each launch, started fresh once it passes 1 MB; at most 4 MB written per launch. Before it starts fresh, what was in it moves to `chef_loader.old.log`. |
+| `chef_loader.old.log` | The launches from before the log last started fresh, oldest first: the newest whole launches (each from its `==== Chef Shared Loader ... starting` line) within 4 MB; one launch over 4 MB on its own is kept whole. If it can't be written (in use, disk full), the log starts fresh as before and its second line says why. `.tmp` and `.bak` files next to it exist only while it's being replaced. |
 | `chef_loader_state.txt` | The crash state (see Crash guard). |
 | `chef_loader_trace.txt` | This launch's breadcrumbs (written again with only what's open whenever it passes 200 KB). |
 | `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. The loader's own lines are `_loader`'s: its options (`opt.<id>`), each mod's version at the last launch (`ver.<author>.<mod>`, for the update notices) and a mod's headings opened or closed against their default (`fold.<mod>.<heading>`, with characters other than letters, digits and `_ . -` written as `_`: `fold.mods_you_my_mod.Look`). |
@@ -469,8 +472,12 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.4.0 starting`
-- `lua: ...`: the probe's flags and numbers, ending with `flavor=lua51 / luajit / luajit-like`.
+- `==== Chef Shared Loader 1.4.1 starting`
+- When the log had passed 1 MB: `the last log passed 1 MB, so this one starts fresh; its launches are now at the end of
+  chef_loader.old.log (N KB: ...)`, or `couldn't keep the last log's launches in chef_loader.old.log (<why>); this log
+  starts fresh as before`.
+- `lua: ...`: the probe's flags and numbers in name order, eight to a line, with `flavor=lua51 / luajit / luajit-like`
+  on the first line.
 - `added the LuaJIT parts this game lacks: ...` and `each addon gets LuaJIT's load and xpcall`.
 - `found N addon(s), N boot-style script(s) and N option file(s) in N patch files (x ms)`.
 - `start-up: started by my start-up stub, the boot in <patch>; my core (<version>) is in <patch>`, with
@@ -483,10 +490,11 @@ The old place keeps a trace:
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
 - `options menu: F9, or the controller's touchpad / View held 2 s on the ship (to change the key without the menu: ...)`
   (the controller part only while "Controller in this menu" is on its first choice).
-- `mods run locked down: ... (sandbox 1.4.0)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.4.1)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`.
 - `hang watchdog: on (a mod's call over 3 s, or its start over 10 s, is stopped and the mod switched off)`, or
-  `hang watchdog: off (another debug hook is set)`.
+  `hang watchdog: off (another debug hook is set)` (never for the hook of a loader that handed off to me: mine takes its
+  place during my calls).
 - `crash recovery: N mod(s) held back by the crash state (options menu > Chef Shared Loader > CRASH RECOVERY)`
 
 **Per mod:**
@@ -509,24 +517,41 @@ The old place keeps a trace:
 - `running another mod's boot script too, with full access ...`
 - `<loader>'s boot script is in <patch>, below mine: not run, it would start every addon a second time; ...`, or
   `<loader>'s boot script in <patch> handed off to me: I run its mods`
-- `the HD2 Lua Runtime's boot script in <patch> (...): not needed, its mods run on my look-alike of it`
+- `the HD2 Lua Runtime's boot script in <patch> (...): not needed, its mods run on my look-alike of it`, or, when a
+  loader that bundles that runtime's core handed off to me, `... not needed, its mods are left to the loader that
+  bundles its core (in <patch>)`
+- The runtime's core that another loader bundles as an addon: `the HD2 Lua Runtime in <patch> (mods/hd2rt/core): left
+  to the loader that bundles it, which runs that runtime's mods` when that loader handed off to me, else
+  `the HD2 Lua Runtime in <patch> (mods/hd2rt/core): not needed, no loader handed off to me, so its mods run on my
+  look-alike of it`. With the handoff, for each mod that announces `@requires` / `@after mods/hd2rt/core`:
+  `<mod> (<patch>): made for the HD2 Lua Runtime, whose own core is in <patch>: left to the loader that bundles it, not
+  started on my look-alike`
 - `the boot script in <patch> (<its first line>) installs file mods from your mod manager, and Medic File Mod Merger
   manages the game's settings files here (...): both write the same files, so untick these in your mod manager and
   deploy (...): <file mod> in <patch>, ...`, or `... installs Medic File Mod Merger's own merged pack (...)`
 
 **Trusted mods and the HD2 Lua Runtime look-alike:**
-- `trusted: <mod> (the Steam lobby, its own files, game patch files, screenshots)`
+- `trusted: <mod> (the Steam lobby, screenshots)`
 - `[<mod>] HD2 Lua Runtime look-alike: mod <id> (lobby key <key>)` and `[<mod>] <binding> refused: <why>`
-- `<mod> placed a checked game patch file: ...`
 - `[<mod>] chef.capture: the first picture this launch is ...` (once a launch), and once each a line on
   the pictures' DDS header (`I set it to <format>`, already right, a layout it doesn't know, or not whole in time)
+
+**The mouse held from the game (the options menu, or a mod through `chef.hold_mouse`):**
+- `options menu: the mouse is held from the game while the menu has it (its dead zone was <mode>, <size>)` (once a
+  launch)
+- `options menu: the mouse given back to the game (its dead zone put back to <mode>, <size>)`, or
+  `options menu: the mouse let go (its dead zone was <size>, not mine: left as it is)`. At
+  shutdown these two start with `shutdown:`.
+- `options menu: the mouse's dead zone was found held after the menu let it go: put back`
 
 **When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`,
 ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the menu has opened once that launch.
 
 **Crash guard:**
-- `the last launch crashed in: <owner|call> (that call is skipped from now on)`
-- `the last launch ended while <job> was running; ...`
+- `the last launch ended without a clean shutdown (a crash or the game being closed from outside); ...`
+- `the last launch ended inside <owner|call> (a call that never returned): ... nothing is skipped or counted for it yet; ...`
+- `the last launch ended while <job> was running; if the next one ends the same way, I skip it ...`
+- `the last launch crashed in: <owner|call> (the launch before it ended in it too; that call is skipped from now on)`
 
 ## Cost
 
@@ -547,7 +572,7 @@ ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the 
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.4.0 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.4.1 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
@@ -595,10 +620,8 @@ Lua 5.1's limit of 200 active locals (about a dozen free), so new start-up code 
 
 ## Credits
 
-- **RatInPlat** (HD2 Transmog): the boot-script callback fixes, the mod list with each mod's state and the health
-  file, and `chef.index()` (pull requests #2 and #3); what an HD2 Lua Runtime mod needs and asks for (`spec.needs`,
-  `handle.missing()`, `handle.request`), the live palette material calls and the trusted mods' inbox views (pull
-  request #8); the shock-trooper cape for `Unit.paint_private_cape` (pull request #10).
+- **RatInPlat** (HD2 Transmog): the boot-script callback fixes, the mod list and health file, `chef.index()`, and what
+  an HD2 Lua Runtime mod needs (`spec.needs`) (pull requests #2, #3 and #8).
 - **luka189** (NarrowHUD): the reports and analysis behind the `chef.bitmap` flicker and lingering world lines fixes.
 - **Rosensterner:** the full screen menu look, its title picture, and the controller and mouse support in the options
   menu.

@@ -10,7 +10,7 @@ body:
     attributes:
       label: Loader version
       description: The first line of chef_loader.log says it.
-      placeholder: 1.4.0
+      placeholder: 1.4.1
     validations:
       required: true
   - type: input
@@ -50,4 +50,4 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Drag chef_loader.log here, plus chef_loader_health.txt and chef_loader_state.txt from the same folder (and the mod's own log, if it has one).
+      description: Drag chef_loader.log here, plus chef_loader_health.txt and chef_loader_state.txt from the same folder (and the mod's own log, if it has one). If it happened a few launches ago, chef_loader.old.log may still have it.
