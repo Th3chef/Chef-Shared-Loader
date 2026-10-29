@@ -5671,19 +5671,23 @@ function M.install(ctx, L)
   end
   -- Units are stamped with the engine world they were seen in. Within one engine world every unit stays usable (the
   -- ship loaded into the mission's world is the same engine world: the same units, re-stamped as they're seen). A
-  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Only two
-  -- worlds are kept, so the stamps can't pile up.
+  -- unit seen in any earlier engine world is never touched again (any call on one ends the game), however many worlds
+  -- have come since. Every earlier world's stamps are kept, in weak-keyed tables, so a stamp lasts only while
+  -- something still holds that unit and the stamps cannot pile up.
   local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }) }
   local function roll()
     if seen.inst ~= world.instance then
-      seen.inst, seen.before, seen.now = world.instance, seen.now, setmetatable({}, { __mode = 'k' })
+      local before = seen.before
+      for u in pairs(seen.now) do before[u] = true end
+      seen.inst, seen.now = world.instance, setmetatable({}, { __mode = 'k' })
     end
   end
+  local function stale(u) return seen.before[u] ~= nil and not seen.now[u] end
   local function current(u)
     if u == nil or not world.stable then return false end
     roll()
     if seen.now[u] then return true end
-    if seen.before[u] then return false end
+    if stale(u) then return false end
     seen.now[u] = true
     return true
   end
@@ -5725,7 +5729,7 @@ function M.install(ctx, L)
   function util.gone(u)
     if u == nil then return true end
     roll()
-    return seen.before[u] ~= nil and not seen.now[u]
+    return stale(u)
   end
   -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
   -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those
