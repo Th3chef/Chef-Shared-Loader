@@ -10,7 +10,7 @@ body:
     attributes:
       label: Loader version
       description: The first line of chef_loader.log says it.
-      placeholder: 1.3.1
+      placeholder: 1.4.0
     validations:
       required: true
   - type: input
@@ -19,20 +19,35 @@ body:
       label: Game version / date of the last game update
     validations:
       required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it happens
+      options:
+        - At start-up / on the title screen
+        - On the ship
+        - In a mission
+        - Everywhere
+        - Not sure
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: What you expected and what happened instead (a screenshot helps).
+      description: What you expected and what happened instead (a screenshot helps). If a mod is involved, the status line on its title bar in F9 (its state, version and last error) says a lot.
     validations:
       required: true
   - type: textarea
     id: mods
     attributes:
       label: Mods
-      description: The mods running on Chef Shared Loader, and anything else that replaces the game's boot script; your mod manager.
+      description: The mods running on Chef Shared Loader (chef_loader_health.txt lists them, with their state), anything else that replaces the game's boot script or the game's settings files (Medic File Mod Merger, for example), and your mod manager.
+  - type: textarea
+    id: options
+    attributes:
+      label: Loader options
+      description: Anything you changed in F9 > Chef Shared Loader (Compact look, Controls, Language, the performance monitor), and whether you used CRASH RECOVERY, a mod's on/off switch or "Reset every option to its default" before it happened.
   - type: textarea
     id: logs
     attributes:
       label: Logs
-      description: Drag chef_loader.log here (and the mod's own log, if it has one).
+      description: Drag chef_loader.log here, plus chef_loader_health.txt and chef_loader_state.txt from the same folder (and the mod's own log, if it has one).

@@ -14,6 +14,17 @@ The code in examples/ and in docs/MODDING.md is free to use as you like, with no
 Not allowed without asking first: reuploading Chef Shared Loader (anywhere, in any form), or releasing the loader, or
 most of it, under another name as your own loader.
 
+Continuing the loader: if no new version of Chef Shared Loader has been released on this repository's GitHub
+Releases page for 3 months in a row, you may ask to continue it. Open an issue on this repository saying what you
+plan. If within 30 days I haven't released a new version or said in that issue that I'm still working on it, you may
+fork this repository, keep developing it and release it, as long as:
+- it uses a different name and its own branding (the name "Chef Shared Loader", "Th3chef" and their logos and art
+  stay mine);
+- it says clearly that it's a continuation of Chef Shared Loader by Th3chef, with a link to this repository;
+- it doesn't claim to be the original or an official version.
+
+A continuation released this way may carry on under these same terms even if I release a new version later.
+
 This code is given as it is, without any warranty; its author is not liable for anything that comes from using it.
 
 Helldivers 2 is a trademark of its respective owners. This is an unofficial fan mod.

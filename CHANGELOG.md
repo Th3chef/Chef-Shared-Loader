@@ -1,5 +1,115 @@
 # Changelog
 
+## 1.4.0
+
+**Safety**
+- A hang watchdog: a mod's call that runs on for more than 3 s (an endless loop; 10 s for its start) is stopped and the
+  mod switched off for the session, so a stuck mod no longer freezes the game for good. It reaches a mod's own
+  coroutines too, and other mods' boot scripts while they load and run (not their shutdown, where a file-mod
+  installer may take its time); it can't stop a stuck engine call.
+- CRASH RECOVERY (F9 > Chef Shared Loader) lists the mods (and other mods' boot scripts) the crash guard holds back, each with a "Try again next
+  launch" button, so deleting `chef_loader_state.txt` by hand is no longer the only way.
+- Every mod has an on/off switch at the top of its options, showing the mod's name and version (mods without options
+  are listed now too). Off stops the mod at once and it stays off; on again, it starts again the next time you
+  launch the game. Mods that come in one package (one patch file, like a mod and the helper it bundles) are one entry with
+  one switch, the bundled parts listed under INCLUDED.
+- Each mod's title bar in the menu says how the mod is doing, at the right of its name: running, off, kept off,
+  stopped or not started (and why), how long its start took and how much memory it added, and its last error. The
+  compact menu shows it in dark ink on its yellow bar with a small square in the state's color; the full screen look
+  in color on the mod's title; a search on each mod's title line. A screenshot of it makes a good bug report.
+- A "Reset every option to its default" button at the end of every mod's options (press it twice).
+- When a mod was updated since the last launch, the loader says so on screen and in the log (old and new version).
+- No loader mod can make the game write files, change or save its settings, open a browser or run console commands
+  any more: Application's file and settings writes and the engine's Console, CommandWindow, SaveSystem and Cloud tables
+  are gone from every mod's view, and `chef.call` says why when it refuses one. A blocked call can't be reached
+  through a metatable or under another name any more either.
+- No loader mod can read other mods' saved data (`chef_data_*`), the loader's own files or logs it didn't write.
+- A loader mod can't load code under the loader's chunk name or another mod's, so its errors, crashes and hangs are
+  always its own.
+
+**New for mods**
+- New option rows: buttons (`chef.button`) and colors (a palette with a swatch, `chef.rgb`), and any row can have a
+  heading above it and a hint, shown while it's selected. A Mod Options Menu option's description is its hint.
+- `chef.bind` takes key combos (`'ctrl+shift+f6'`) and controller buttons (`'pad:cross'`), and the options menu
+  captures both. The ModBindingsMenu look-alike keeps defaults that have modifiers.
+- `chef.hold_mouse(on)` keeps the game's camera from turning with the mouse (a free camera's mouse look). It's the
+  loader's own hold, shared with the options menu, and the mouse goes back to the game when the last mod lets go, when
+  a mod holding it stops and when the game closes, so the camera never stays frozen. `chef.mouse_held()` says whether
+  it's held, and `chef.mouse_delta()` gives the mouse's movement each frame, held or not.
+- Events: `menu` (the options menu opened or closed; `chef.menu_open()` too), `mod_stopped` (name, why: so mods using
+  its exports can let them go) and `players` (someone starts joining, is in, or leaves; `chef.joining()` says how many
+  are still joining).
+- HD2 Lua Runtime mods: `Unit.paint_private_cape` also paints the shock-trooper cape (the one FS-05, B-27 and other
+  armors bring), next to the medium cape. By RatInPlat.
+- `chef.ray_box(from, dir, box, extents)`: where a ray meets a box you give (or a unit's own box). It's not a world
+  raycast: the game has none for Lua since 7.2.0. `chef.has('ray_box')`.
+- `chef.capture()`: a screenshot, for a trusted mod whose permission includes it. The loader makes the engine call
+  itself and saves the picture in its own folder (one a second at most, 50 per mod, the oldest written over); every
+  other mod gets `nil, 'not available to this mod'`.
+- For mod authors: type stubs for editor autocomplete (`docs/types/chef.lua`), a simulator that runs a mod without the
+  game (`tools/modsim/`), and `docs/TESTING.md` on both.
+
+**Changes**
+- Each mod's start (its compile and first run) is measured: the time in ms and how much Lua memory it added, on its
+  `started` line in the log, in `chef_loader_health.txt` (two new columns at the end) and in `chef.mods()`.
+- The "Game patch files" switch is gone: a trusted mod that builds game patch files can't work without them, so it's
+  now part of its permission. Every file it writes is still checked as before.
+- The options menu, reworked:
+  - The arrow keys do everything: Right opens a mod, changes a setting, presses a button or starts a key capture;
+    Left steps a setting back, and on < Back, a key or a button it goes back; Down or Up ends a search on what it
+    found. Enter isn't needed any more (the game also reads it and opens its chat, which sent a search's text to the
+    chat).
+  - Long mods' options fold under their headings; a search keeps each result under its heading.
+  - The compact menu's hint line follows what you used last (keys, mouse or controller), as the full screen one does.
+  - Hints get their own line above the key hints; a scroll bar shows when there's more; sub-headings are indented;
+    a thin rule sets a mod's switch apart from its options, and its reset button too; the reset button counts down
+    in orange; the full screen look has a value column and real slider bars, and shows each mod's version in its
+    list.
+  - The menu's colors now look as designed in game.
+  - The menu's mouse cursor hides while you use a controller, and comes back when you move the mouse or press a key.
+  - Mods are named as they name themselves (no more "CORE" for a mod whose file is called core), in the menu, the
+    performance monitor and the loader's messages.
+  - The compact menu no longer sits behind the performance monitor: where they'd overlap, it moves below the monitor
+    (or ends above it), and the full screen menu hides the monitor.
+  - The menu draws with less work a frame than before.
+- While the options menu is open, mods' hotkeys stay quiet: `chef.key_pressed`, `chef.key_down` and
+  `chef.mouse_down` answer false and `chef.wheel` 0, so typing a search never fires one.
+- `chef.save` refuses keys starting with `opt.` (the options menu saves its rows under them, so a mod could overwrite
+  its own option values).
+- `chef.own_log`: 8 log names a launch per mod at most, and 4 MB a launch for all of them together.
+- The loader's messages (a crash guard note, a mod updated) sit on a dark plate below the game's logo, and their time
+  only starts running once the game shows the ship or a mission (60 s at most), so they're no longer gone during the
+  loading screens.
+- When a mod with a file-mod installer is still deployed while Medic File Mod Merger manages the game's settings
+  files, the log names it and the file mods it would apply, and a notice says so once. The installer still runs as
+  before.
+- Docs: how a mod gets on the trusted list (`docs/MODDING.md`), and a continuation clause in the LICENSE (what happens
+  if the loader goes 3 months without a release).
+
+**Fixes**
+- `chef.players()` counted the game's peer list by its length, so a list keyed by peer id counted as 1 player. It now
+  counts every entry.
+- A `chef.bitmap` drawn after another mod drew many things in the same frame could flicker into a white square: the
+  material id it used was made earlier in the frame and could be stale by then. It's now made for each bitmap, and
+  each mod starts with its own color cache. Thanks to luka189 for the report and the analysis.
+- World lines (`chef.line`) stayed on screen, frozen, after a mod stopped drawing them, until a line was drawn again.
+  They now go the next frame. Thanks to luka189.
+- A `chef.notify` with a color that isn't a number broke every notice for the session, the loader's own included.
+  A bad color now gives the default; a long notice is no longer cut in the middle of a character.
+- A menu key set to a letter closed the menu when you typed that letter in a search.
+- Sliders with a step of 1 or more showed their value rounded (a 2.5 step showed 7.5 as 8).
+- A saved choice a mod no longer has fell back to the first choice instead of the row's default.
+- `chef.bind(nil, ...)` raised an error in the mod instead of returning nil, and its warning for a key name the game
+  doesn't know never showed.
+- `chef.wheel`, `chef.cursor` and `chef.mouse_down` stayed dead for the session when a mod asked in the first frames;
+  they ask again now, as keys do.
+- The crash guard could blame the wrong job after a long session, or take a half-written last trace line for a
+  crash.
+- A mod whose requirements go round in a circle is now logged as that, not as "not installed".
+- After an update, the loader kept reading the old version from `chef_loader_state.txt` at every launch, so a crash in
+  a Unit call on one kind of unit was never refused for every mod. The state now takes the new version on its first
+  launch.
+
 ## 1.3.1
 
 **Fixes**
