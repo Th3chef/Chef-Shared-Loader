@@ -122,10 +122,14 @@ local HINTS = {
 -- close after them, the next pair further off; a chip is at least as wide as a capital letter. When the whole line
 -- doesn't fit, the optional pairs go, then the gaps narrow (a pair's word still closer to its keys than the next
 -- pair); past that, the pairs that don't fit are left off the end.
--- (a hint text's width, asked of the loader every time: it keeps a text's width in the game's font by the text as
--- translated and for the font it measured it with, never a guessed glyph's, so a language or font changed under the
--- menu lays the line out anew, where a cache of my own would go stale; a key's chip; a pair, the gap after it not
--- counted; the whole line. Plain functions, so a line laid out every frame makes no closures)
+-- (a hint text's width, asked of the loader: it keeps a text's width in the game's font by the text as translated and
+-- for the font it measured it with, never a guessed glyph's; a key's chip; a pair, the gap after it not counted; the
+-- whole line. Plain functions, so a line laid out makes no closures)
+-- The line as laid out is kept in c (one per hint line, nav.hint): each chip's and word's x from the line's start,
+-- a chip's width and each text as drawn, laid out again only when its size, room, the menu's key, the font's capitals
+-- or fk change (nav.fit_key: the language, the font measuring a text anew, my menu opened, and once a second, so a
+-- glyph the font measured late is never kept longer than that). A line the language's budget cut (ctx.tr_cut) is
+-- laid out again in the next frame.
 local function hint_tw(ctx, t, px) return ctx.text_width(t, px) end
 local function hint_chip_w(ctx, k, key, px, P) return math.max(hint_tw(ctx, P(k or key or ''), px), 5 * px) + 4 * px end
 local function hint_pair_w(ctx, pr, key, px, P, wgap)
@@ -141,40 +145,60 @@ local function hint_line_w(ctx, pairs_, with_opt, gap, key, px, P, wgap)
   end
   return w
 end
-local function hint_line(ctx, x, y, rh, px, x_end, pairs_, key, word_c, chip_c, ink, layer, P)
-  local ty = y + math.floor((rh - 7 * px) / 2)
-  local wgap = 6 * px                                -- (between a pair's keys and its word)
+local function hint_line(ctx, x, y, rh, px, x_end, pairs_, key, word_c, chip_c, ink, layer, P, c, fk)
   local room = x_end - x
-  local with_opt, gap = true, 12 * px
-  if hint_line_w(ctx, pairs_, true, gap, key, px, P, wgap) > room then
-    with_opt = false
-    if hint_line_w(ctx, pairs_, false, gap, key, px, P, wgap) > room then gap, wgap = 8 * px, 4 * px end
-  end
-  local first = true
-  for _, pr in ipairs(pairs_) do
-    if with_opt or not pr.opt then
-      local pw = hint_pair_w(ctx, pr, key, px, P, wgap)
-      if (first and 0 or gap) + pw > x_end - x then break end
-      if not first then x = x + gap end
-      first = false
-      for k = 1, #pr do
-        local t = P(pr[k] or key or '')
-        local w = hint_tw(ctx, t, px)
-        local cw = math.max(w, 5 * px)
-        if k > 1 then x = x + 3 * px end
-        ctx.rect(x, y + 2 * px, cw + 4 * px, rh - 4 * px, chip_c, layer)
-        ctx.text(x + 2 * px + math.floor((cw - w) / 2), ty, t, px, ink, layer + 1)
-        x = x + cw + 4 * px
-      end
-      if pr.word then
-        if #pr > 0 then x = x + wgap end
-        local t = P(pr.word)
-        ctx.text(x, ty, t, px, word_c, layer)
-        x = x + hint_tw(ctx, t, px)
+  if c.k ~= fk or c.px ~= px or c.room ~= room or c.key ~= key or c.P ~= P then
+    local cut = ctx.tr_cut
+    if cut then cut(true) end
+    c.k, c.px, c.room, c.key, c.P = fk, px, room, key, P
+    local wgap = 6 * px                              -- (between a pair's keys and its word)
+    local with_opt, gap = true, 12 * px
+    if hint_line_w(ctx, pairs_, true, gap, key, px, P, wgap) > room then
+      with_opt = false
+      if hint_line_w(ctx, pairs_, false, gap, key, px, P, wgap) > room then gap, wgap = 8 * px, 4 * px end
+    end
+    -- (at: x from the line's start; a chip's kw is its width, a word's false)
+    local first, n, at = true, 0, 0
+    local kx, kw, tx, ts = c.kx, c.kw, c.tx, c.t
+    for _, pr in ipairs(pairs_) do
+      if with_opt or not pr.opt then
+        local pw = hint_pair_w(ctx, pr, key, px, P, wgap)
+        if (first and 0 or gap) + pw > room - at then break end
+        if not first then at = at + gap end
+        first = false
+        for k = 1, #pr do
+          local t = P(pr[k] or key or '')
+          local w = hint_tw(ctx, t, px)
+          local cw = math.max(w, 5 * px)
+          if k > 1 then at = at + 3 * px end
+          n = n + 1
+          kx[n], kw[n], tx[n], ts[n] = at, cw + 4 * px, at + 2 * px + math.floor((cw - w) / 2), t
+          at = at + cw + 4 * px
+        end
+        if pr.word then
+          if #pr > 0 then at = at + wgap end
+          local t = P(pr.word)
+          n = n + 1
+          kx[n], kw[n], tx[n], ts[n] = at, false, at, t
+          at = at + hint_tw(ctx, t, px)
+        end
       end
     end
+    c.n, c.w = n, at
+    if cut and cut() then c.k = nil end
   end
-  return x
+  local ty = y + math.floor((rh - 7 * px) / 2)
+  local kx, kw, tx, ts = c.kx, c.kw, c.tx, c.t
+  for i = 1, c.n do
+    local w = kw[i]
+    if w then
+      ctx.rect(x + kx[i], y + 2 * px, w, rh - 4 * px, chip_c, layer)
+      ctx.text(x + tx[i], ty, ts[i], px, ink, layer + 1)
+    else
+      ctx.text(x + tx[i], ty, ts[i], px, word_c, layer)
+    end
+  end
+  return x + c.w
 end
 
 -- A mod's error as text for the log. tostring alone can raise (an error object whose __tostring errors or doesn't
@@ -916,17 +940,18 @@ function M.install(ctx)
       end
       function b.key() return r.value end
       -- (false while my menu is open, in a capture too: its keys and buttons are its own then, so a key typed or
-      -- captured there never fires a binding; svc.menu_open, as the mod's own chef can't change it)
+      -- captured there never fires a binding; svc.menu_up, as the mod's own chef can't change it: a field I keep
+      -- equal to svc.menu_open() wherever my menu opens or closes, so a mod reading 80 binds a frame makes no call for it)
       function b.pressed()
         local v = r.value
-        if v == 'off' or svc.menu_open() then return false end
+        if v == 'off' or svc.menu_up then return false end
         local q = parts()
         if not q then return chef.key_pressed(v) end
         return combo(q, true)
       end
       function b.down()
         local v = r.value
-        if v == 'off' or svc.menu_open() then return false end
+        if v == 'off' or svc.menu_up then return false end
         local q = parts()
         if not q then return chef.key_down(v) end
         return combo(q, false)
@@ -1338,12 +1363,13 @@ function M.install(ctx)
   -- cursor axis (mouse_read asks for it; without one the camera turns while the menu is open); a mod's hold needs just
   -- the delta axis, since only svc.mouse_delta reads the cursor while it's held.
   -- on: mine; had: what I found; off: not this session; paused: not until the menu closes; ever: a cursor was read
+  -- down: the game is closing (svc.shutdown gave it back): never taken again
   local HOLD = 917351
   -- (clean: the looks in a row since the hold was let go that found the dead zone not mine: hold_heal)
   nav.hold = { on = false, had = nil, off = false, paused = false, other = nil, ever = false, heal_at = 0, bad = 0, clean = 0 }
   function nav.hold_take()
     local H, A = nav.hold, nav.axes
-    if H.on or H.off or H.paused or not (A and A.move) then return end
+    if H.on or H.off or H.paused or H.down or not (A and A.move) then return end
     if H.other and ctx.now() < H.other then return end
     local mode, size = eng('Mouse.dead_zone', A.move)
     if type(mode) ~= 'number' or type(size) ~= 'number' then
@@ -1386,10 +1412,21 @@ function M.install(ctx)
     if not H.on then return end
     H.on = false
     local _, size = eng('Mouse.dead_zone', A.move)
-    if size == HOLD then eng('Mouse.set_dead_zone', A.move, H.had[1], H.had[2]) end
-    if ctx.TEST then
-      local m2, s2 = eng('Mouse.dead_zone', A.move)
-      log(fmt('options menu (test): the mouse given back to the game (dead zone now %s, %s)', tostring(m2), tostring(s2)))
+    -- (one line each time I let it go, so a log shows the hold ending as well as starting; the values are what I put
+    -- back, not read again: no engine call more than the one put back, at shutdown least of all)
+    -- (quiet: a give-back was logged and my menu hasn't had the mouse since, so a mod that toggles chef.hold_mouse every
+    -- frame writes one line, not one a frame; mouse_read clears it while my menu has the mouse. Shutdown always says it.)
+    local at = H.down and 'shutdown' or 'options menu'
+    local say = H.down or not H.quiet
+    H.quiet = true
+    if size == HOLD then
+      eng('Mouse.set_dead_zone', A.move, H.had[1], H.had[2])
+      if say then
+        log(fmt('%s: the mouse given back to the game (its dead zone put back to %s, %s)', at, tostring(H.had[1]),
+          tostring(H.had[2])))
+      end
+    elseif say then
+      log(fmt('%s: the mouse let go (its dead zone was %s, not mine: left as it is)', at, tostring(size)))
     end
   end
   -- (after the hold was let go: a look once a second that it wasn't left held, until 10 looks in a row found it not
@@ -1463,6 +1500,7 @@ function M.install(ctx)
     local shown = win ~= nil and eng('Window.show_cursor', win) == true
     nav.game_cursor = shown                             -- (then the game's own cursor is the one drawn: not mine)
     local H = nav.hold
+    H.quiet = nil                                       -- (my menu has the mouse: its next give-back is logged)
     if not shown and A.cursor then nav.hold_take() end
     if shown then
       if H.on then nav.hold_give() end
@@ -2264,6 +2302,8 @@ function M.install(ctx)
     end
     return 3
   end
+  -- (a slider's and a key's text kept on the row, r.vs, made again only when what it's made from changes: the value
+  -- and, r.vs_k, the slider's step or whether the key clashes; as swatch keeps its color)
   local function value_text(r, users)
     local s, v = r.spec, r.value
     if s.type == 'toggle' then return v and 'ON' or 'OFF' end
@@ -2271,21 +2311,31 @@ function M.install(ctx)
     if s.type == 'slider' then
       -- (a whole number only when the value is one; else as many decimals as its step and min have, 3 at most, 2
       -- for a slider without a step. Worked out once a row and step: r.dp)
-      if floor(v) == v and v > -1e9 and v < 1e9 then return fmt('%d', v) end
       local st = s.step or 0
-      if r.dp_st ~= st then
-        r.dp_st, r.dp = st, st > 0 and max(nav.places(st), nav.places(s.min), nav.places(s.max)) or 2
+      if r.vs_v == v and r.vs_k == st then return r.vs end
+      local t
+      if floor(v) == v and v > -1e9 and v < 1e9 then t = fmt('%d', v)
+      else
+        if r.dp_st ~= st then
+          r.dp_st, r.dp = st, st > 0 and max(nav.places(st), nav.places(s.min), nav.places(s.max)) or 2
+        end
+        t = fmt(r.dp == 1 and '%.1f' or (r.dp == 2 and '%.2f' or (r.dp == 3 and '%.3f' or '%.0f')), v)
+        -- (a value a hair off a whole one, 0.1 * 30, reads as the whole one)
+        if r.dp > 0 and t:find('%.0+$') then t = t:gsub('%.0+$', '') end
+        if t == '-0' then t = '0' end
       end
-      local t = fmt(r.dp == 1 and '%.1f' or (r.dp == 2 and '%.2f' or (r.dp == 3 and '%.3f' or '%.0f')), v)
-      -- (a value a hair off a whole one, 0.1 * 30, reads as the whole one)
-      if r.dp > 0 and t:find('%.0+$') then t = t:gsub('%.0+$', '') end
-      return t == '-0' and '0' or t
+      r.vs, r.vs_v, r.vs_k = t, v, st
+      return t
     end
     if s.type == 'key' then
       if menu.capture == r then return 'PRESS A KEY' end
+      local clash = v ~= 'off' and (users[v] or 0) > 1
+      if r.vs_v == v and r.vs_k == clash then return r.vs end
       -- (a controller button as 'PAD CROSS': the menu's font has no '_'; a combo shows as it's kept, 'CTRL+F6')
       local shown = v == 'off' and 'NONE' or (v:find('^pad:') and 'pad ' .. (v:sub(5):gsub('_', ' '))) or v
-      return shown .. ((v ~= 'off' and (users[v] or 0) > 1) and ' !' or '')
+      local t = shown .. (clash and ' !' or '')
+      r.vs, r.vs_v, r.vs_k = t, v, clash
+      return t
     end
     if s.type == 'button' then return text_of(s.text or 'RUN') end
     if s.type == 'color' then return tostring(v) end         -- (the menu's font has no '#')
@@ -2638,7 +2688,7 @@ function M.install(ctx)
   -- The selected row's hint (or what else its clashing key is bound to) as lines of its own, w wide, at most `most`,
   -- the last one cut with dots when there's more. Wrapped again only when the text, its size, its room, the font or
   -- the language changed: nav.hw keeps the lines and how many, so a frame makes nothing new.
-  nav.hw, nav.nf = {}, {}                      -- (nav.nf: the full screen look's note line, as drawn)
+  nav.hw, nav.nf, nav.hl = {}, {}, {}          -- (nav.nf: the full screen look's note line, as drawn; nav.hl: nav.hint)
   function nav.hwrap(s, P, px, w, fit, most)
     local c, lv = nav.hw, ctx.lang_v and ctx.lang_v() or 0
     if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most then return c.n end
@@ -2659,6 +2709,61 @@ function M.install(ctx)
     for i = 1, c.n do c[i] = fit(ws[i], px, w) end
     if ws[most + 1] then c[most] = fit(ws[most] .. '...', px, w) end
     return c.n
+  end
+  -- What my looks keep of their texts from frame to frame is good while nav.fk stays: worked out once a frame by each
+  -- look before it draws, a new one when the font's capitals (P), the size, the language or the second changes, when
+  -- my menu opens (nav.opened), or when the font measures a text anew (a text of mine never drawn, its width asked
+  -- every frame, nav.fk_w, changes with the font: a font changed under the menu is laid out anew in the next frame;
+  -- kept as it is, tr_keep, so the language never looks it up). The second is the backstop for anything the font
+  -- changes that this one width doesn't show.
+  function nav.fit_key(P, px)
+    if nav.fk_p ~= P then nav.fk_pt = P('ABCDEFGHIJKLMNOPQRSTUVWXY0123456789') end
+    local lv, sec = ctx.lang_v and ctx.lang_v() or 0, floor(ctx.now())
+    if ctx.tr_keep then ctx.tr_keep(nav.fk_pt) end
+    local pw = ctx.text_width(nav.fk_pt, px)
+    if P ~= nav.fk_p or px ~= nav.fk_px or lv ~= nav.fk_lv or sec ~= nav.fk_s or pw ~= nav.fk_w then
+      nav.fk_p, nav.fk_px, nav.fk_lv, nav.fk_s, nav.fk_w, nav.fk = P, px, lv, sec, pw, (nav.fk or 0) + 1
+    end
+  end
+  -- A row's label and value as drawn, kept on the row in one small table (nav.fc: r.fc, by place, so a row seen once
+  -- costs it a few hundred bytes for good). i: 0 for the label, 6 for the value; c[i + 1] the text as the row gives it
+  -- this frame (raw), c[i + 2] it in the font's capitals, c[i + 3] the nav.fk it was made under (false: made again in
+  -- the next frame), c[i + 4] the width asked for (the whole text's, nav.fwhole, or the cut one's, nav.fcut),
+  -- c[i + 5] the room it was cut to and c[i + 6] the text cut to it. Made again only when raw or nav.fk changes, and
+  -- cut again only when the room changes too, so an open menu measures and cuts each row's texts about once a second,
+  -- not every frame. A text the language's budget cut (ctx.tr_cut) is made again in the next frame.
+  function nav.fc(r)
+    local c = r.fc
+    if not c then c = { false, false, false, false, false, false, false, false, false, false, false, false }; r.fc = c end
+    return c
+  end
+  function nav.fwhole(c, i, raw, px, P, whole)
+    if c[i + 1] ~= raw or c[i + 3] ~= nav.fk then
+      local cut = ctx.tr_cut
+      if cut then cut(true) end
+      local t = P(raw)
+      c[i + 1], c[i + 2], c[i + 3], c[i + 5] = raw, t, nav.fk, false
+      if whole then c[i + 4] = ctx.text_width(t, px) end
+      if cut and cut() then c[i + 3] = false end
+    end
+    return c[i + 2], c[i + 4]
+  end
+  function nav.fcut(c, i, room, px, fit, wide)
+    if c[i + 5] ~= room then
+      local cut = ctx.tr_cut
+      if cut then cut(true) end
+      local o = fit(c[i + 2], px, room)
+      c[i + 5], c[i + 6] = room, o
+      if wide then c[i + 4] = ctx.text_width(o, px) end
+      if cut and cut() then c[i + 3] = false end
+    end
+    return c[i + 6], c[i + 4]
+  end
+  -- a hint line (HINTS, nav.entry_hints) drawn from x to x_end, laid out once and kept per line: hint_line
+  function nav.hint(segs, x, y, rh, px, x_end, key, word_c, chip_c, ink, layer, P)
+    local c = nav.hl[segs]
+    if not c then c = { kx = {}, kw = {}, tx = {}, t = {}, n = 0, w = 0 }; nav.hl[segs] = c end
+    return hint_line(ctx, x, y, rh, px, x_end, segs, key, word_c, chip_c, ink, layer, P, c, nav.fk)
   end
   -- A thin scroll track on a list's right edge (xr: its right side, from yt down to yb) with a thumb for the lines in
   -- view (first, vis of n), and a small arrow at an end that has more lines past it. Nothing when they all fit.
@@ -2717,6 +2822,7 @@ function M.install(ctx)
     -- text cut to the room it has, measured (the game's font is proportional), in the font's characters
     local P = ctx.text_native and ctx.text_native() and caps or plain
     local fit, tw = ctx.text_fit or fit_cells, ctx.text_width
+    nav.fit_key(P, px)
     local inner = pw - 2 * tx                  -- the width between the insets
     -- The selected row's hint, or what else a clashing key is bound to, on lines of their own over the key hints (at
     -- most two, then cut): the key hints stay, and the panel grows down by those lines while it has one.
@@ -2828,7 +2934,9 @@ function M.install(ctx)
       else
         local r = l.row
         local t = r.spec.type
-        local lt = P(text_of(r.spec.label or r.id))
+        -- (the label and the value as drawn, kept on the row: nav.fc)
+        local fc = nav.fc(r)
+        local lt, ltw = nav.fwhole(fc, 0, text_of(r.spec.label or r.id), px, P, true)
         local lx = x0 + tx + (l.indent and 14 or 2) * px  -- (a subheading's rows indented with it)
         -- a choice or a slider picked: < value >, as in the full screen look; a reset button asking: its seconds left
         local arr = sel and (t == 'choice' or t == 'slider')
@@ -2840,8 +2948,8 @@ function M.install(ctx)
         local xe = x0 + pw - tx - aw - (sz > 0 and sz + 3 * px or 0) - cw   -- (the value's right edge)
         -- the value first, in the room the label leaves it (never under 40% of the row, arrows and all), then the
         -- label in what's left
-        local v = fit(P(value_text(r, users)), px, max(floor(inner * 0.4) - 2 * aw, xe - aw - 6 * px - lx - tw(lt, px)))
-        local vw = tw(v, px)
+        nav.fwhole(fc, 6, value_text(r, users), px, P)
+        local v, vw = nav.fcut(fc, 6, max(floor(inner * 0.4) - 2 * aw, xe - aw - 6 * px - lx - ltw), px, fit, true)
         local vx = xe - vw
         if sz > 0 then swatch(r, xe + 3 * px, y + 2 * px, sz, top + 3, floor(255 * menu_op + 0.5)) end
         if arr then
@@ -2853,7 +2961,7 @@ function M.install(ctx)
           nav.hit(ax - 2 * px, y, aw, rh, 'inc', i)
         end
         local lr = vx - aw - (arm and 4 or 6) * px - lx   -- (the label's room)
-        ctx.text(lx, ty, fit(lt, px, lr), px, white, top + 2)
+        ctx.text(lx, ty, (nav.fcut(fc, 0, lr, px, fit)), px, white, top + 2)
         -- (a mod's switch: its version after its name, in gray; on the lit row in the lighter hint gray)
         if r.switch then nav.ver_row(r, lx, ty, lt, lr, px, sel and nav.pc('hint', col) or gray, top + 2) end
         if t == 'key' and menu.capture ~= r then
@@ -2893,7 +3001,7 @@ function M.install(ctx)
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
         or ((menu.group or menu.search ~= '') and nav.entry_hints(ls[menu.sel])) or HINTS.list
-      hint_line(ctx, x0 + tx, hy, rh, px, x0 + tx + inner, segs,
+      nav.hint(segs, x0 + tx, hy, rh, px, x0 + tx + inner,
         svc.util and svc.util.key_label(menu_key.value) or menu_key.value, white, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
@@ -2906,7 +3014,7 @@ function M.install(ctx)
   -- should stay in view with its first row; not under the mouse), the thin line under my own entry, between it and
   -- the mods. nav.F: this frame's numbers and text functions, set by menu_draw_full (px, rh, b, top; the panes' bottom
   -- and top, py0 and py1; the lines in view); the colors come in as arguments, made in the frame they're drawn in.
-  nav.F = {}
+  nav.F, nav.no_rows = {}, {}
   -- (own: the pane shows my entry, my version after its title in vc. Returns where the title ends, where a status
   -- after it may end (before the note) and the title's y: nav.status_bar)
   function nav.pane(x, wd, title, note, panel, line, gray, own, vc)
@@ -2931,11 +3039,16 @@ function M.install(ctx)
     ctx.rect(x + F.b, y, 2 * F.px, F.rh, yellow, F.top + 4)
   end
   -- The game's pause screen up (its GAME / SOCIAL / OPTIONS tabs draw over my header): the one time it shows its own
-  -- cursor on the ship. mouse_read already asked this frame while the menu has the mouse; else I ask.
+  -- cursor on the ship. mouse_read already asked this frame while the menu has the mouse; else I ask, every 0.25 s
+  -- (nav.pz the answer, nav.pz_at when it's asked again; nav.opened forgets it, so the menu's first frame asks)
   function nav.paused()
     if nav.mouse and nav.axes and nav.axes.move then return nav.game_cursor == true end
-    local win = eng('Window.get_main_window')
-    return win ~= nil and eng('Window.show_cursor', win) == true
+    local t = ctx.now()
+    if nav.pz == nil or t >= nav.pz_at or t < nav.pz_at - 0.25 then
+      local win = eng('Window.get_main_window')
+      nav.pz, nav.pz_at = win ~= nil and eng('Window.show_cursor', win) == true, t + 0.25
+    end
+    return nav.pz
   end
   -- A mod's version after its title in the full screen look's list (mine: nav.ver_after), dim, dropped when it doesn't
   -- fit. The facts are the status's (nav.st, taken at most once a second, the same way nav.status takes them:
@@ -3003,6 +3116,7 @@ function M.install(ctx)
     local orange = nav.st_c(2, col)            -- a reset button asking SURE?
     local P = ctx.text_native and ctx.text_native() and caps or plain
     local fit, tw = ctx.text_fit or fit_cells, ctx.text_width
+    nav.fit_key(P, px)
     local midy = nav.midy
     local m = floor(48 * s)                    -- the outer margin
     -- The game's own bands still draw over mine (the ship's name and the menus' keys along the top, and the
@@ -3020,7 +3134,9 @@ function M.install(ctx)
     ctx.rect(0, h - hh, w, hh, panel, top + 1)
     ctx.rect(0, h - hh - 2 * b, w, 2 * b, yellow, top + 1)
     local searching = menu.typing or menu.search ~= ''
-    local rtext = searching and P('SEARCH /' .. menu.search .. (menu.typing and '_' or '')) or P(ctx.LOADER .. ' ' .. tostring(ctx.VERSION))
+    -- (my name and version, made once per font's capitals: nav.lv_t)
+    if nav.lv_p ~= P then nav.lv_p, nav.lv_t = P, P(ctx.LOADER .. ' ' .. tostring(ctx.VERSION)) end
+    local rtext = searching and P('SEARCH /' .. menu.search .. (menu.typing and '_' or '')) or nav.lv_t
     rtext = fit(rtext, px, floor(w * 0.4))
     local rw = tw(rtext, px)
     ctx.text(w - m - rw, midy(h - hh, band, px), rtext, px, searching and yellow or gray, top + 2)
@@ -3044,7 +3160,8 @@ function M.install(ctx)
     local listing = not menu.group and menu.search == ''       -- at the list of mods the lines are the mods
     -- the left pane: the mods, each with its version (at the list, the lines themselves; else every mod, the open one
     -- marked by its edge and yellow text, a click opens another)
-    nav.pane(lx, lw, 'MODS', tostring(#gs), panel, line, gray)
+    if nav.gs_n ~= #gs then nav.gs_n, nav.gs_s = #gs, tostring(#gs) end   -- (the count as text: made when it changes)
+    nav.pane(lx, lw, 'MODS', nav.gs_s, panel, line, gray)
     local y = py1 - rh - 4 * px - rh
     if listing then
       menu.top = nav.scroll(menu.sel, menu.top, #ls)
@@ -3084,7 +3201,7 @@ function M.install(ctx)
     local rows, title
     if listing then
       local l = ls[menu.sel]
-      rows = {}
+      rows = nav.no_rows                       -- (nothing to preview: one empty list for every frame, never written to)
       if l and l.pick then
         -- (the entry as it would open: its folds as they are)
         if nav.pv_g ~= l.pick or nav.pv_ver ~= ver.layout or nav.pv_fv ~= ver.fold then
@@ -3100,7 +3217,8 @@ function M.install(ctx)
     end
     -- (the entry shown is mine, open or in the preview: my version after its title)
     local own = listing and ls[menu.sel] and ls[menu.sel].pick or (not listing and menu.group)
-    local te, se, sty = nav.pane(rx, rwid, title, listing and #rows > 0 and P('RIGHT ARROW OPENS') or nil, panel, line,
+    if nav.ro_p ~= P then nav.ro_p, nav.ro_t = P, P('RIGHT ARROW OPENS') end
+    local te, se, sty = nav.pane(rx, rwid, title, listing and #rows > 0 and nav.ro_t or nil, panel, line,
       gray, own and own.mod == loader_mod, dim)
     -- (the entry's status on its title's right, before the note, in its colors; dimmer in the preview)
     if own then nav.status_bar(own.rows[1], te, se, sty, px, P, listing and dim or gray, col, listing, top + 3) end
@@ -3182,14 +3300,16 @@ function M.install(ctx)
       else
         local r = l.row
         local sp = r.spec
-        local v = fit(P(value_text(r, users)), px, vmax)
-        local vw = tw(v, px)
+        -- (the label and the value as drawn, kept on the row: nav.fc)
+        local fc = nav.fc(r)
+        nav.fwhole(fc, 6, value_text(r, users), px, P)
+        local v, vw = nav.fcut(fc, 6, vmax, px, fit, true)
         local live = not listing
         local lcol = live and white or dim
         local vcol = not live and dim or ((sp.type == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green))
         if live then nav.hit(rx, y, rwid, rh, 'line', i) end
-        local lab = P(text_of(sp.label or r.id))
-        local long = x + tw(lab, px) + 8 * px      -- (where a whole label would let its value start)
+        local lab, labw = nav.fwhole(fc, 0, text_of(sp.label or r.id), px, P, true)
+        local long = x + labw + 8 * px             -- (where a whole label would let its value start)
         if sp.type == 'choice' or sp.type == 'slider' or sp.type == 'color' then
           -- < value >, each arrow a box of its own for the mouse; a slider's short bar left of them takes a click or a
           -- drag; a color's swatch left of them
@@ -3225,14 +3345,14 @@ function M.install(ctx)
             if live then nav.hit(sx, y, sw, rh, 'bar', i) end
             bx = sx                                  -- (the label ends before the bar)
           end
-          ctx.text(x, ty, fit(lab, px, bx - 8 * px - x), px, lcol, top + 4)
+          ctx.text(x, ty, (nav.fcut(fc, 0, bx - 8 * px - x, px, fit)), px, lcol, top + 4)
         else
           -- (a reset button asking: SURE? in orange with its seconds left after it, an orange edge on its row)
           local arm = live and r.armed and ctx.now() < r.armed
           local cd = arm and nav.sure(r)
           local cdw = cd and tw(cd, px) + 4 * px or 0
           local vx = long > vc and max(vt, xr - vw - cdw) or vt
-          ctx.text(x, ty, fit(lab, px, vx - 8 * px - x), px, lcol, top + 4)
+          ctx.text(x, ty, (nav.fcut(fc, 0, vx - 8 * px - x, px, fit)), px, lcol, top + 4)
           -- (a mod's switch: its version after its name, dimmer, as mine is in the list of mods; on the lit row in the
           -- lighter hint gray, where the dim would sink into the glow)
           if r.switch then
@@ -3281,7 +3401,7 @@ function M.install(ctx)
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
         or ((menu.group or menu.search ~= '') and nav.entry_hints(ls[menu.sel])) or HINTS.list
-      hint_line(ctx, m, hy, rh, px, w - m, segs, close_key, white, white, ink, top + 2, P)
+      nav.hint(segs, m, hy, rh, px, w - m, close_key, white, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
   end
@@ -3290,6 +3410,13 @@ function M.install(ctx)
   -- open now? (mods' key and mouse-button reads answer nothing while it is: sandbox.lua, runtime.lua, chef.typed,
   -- chef.bind, svc.pad_bind and the ModBindingsMenu look-alike)
   function svc.menu_open() return menu.open == true end
+  -- (the same as a field, for the binds: set with menu.open, in menu_frame, the one place my menu opens or closes)
+  svc.menu_up = false
+  -- (my menu opened: what its look keeps from frame to frame laid out anew, nav.fit_key, and the pause screen asked
+  -- again, nav.paused)
+  function nav.opened()
+    svc.menu_up, nav.fk_s, nav.pz = true, nil, nil
+  end
   -- How my menu opens, for my log: at start-up (with how to change the key without the menu) and on the status lines
   -- until it has opened once. A key the PC keeps for itself (a laptop's F row without Fn) or another app takes never
   -- reaches the game: the menu just doesn't open, and nothing else in my log would say which key I wait for.
@@ -3332,6 +3459,7 @@ function M.install(ctx)
     if not menu.open and combo and not nav.combo and ctx.now() - combo >= 2 then
       nav.combo = true
       menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
+      nav.opened()
       nav.drag = nil
       nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed = true, true, 'pad', 0, true
       menu.ever = true
@@ -3356,7 +3484,7 @@ function M.install(ctx)
     if menu.open and menu.capture == nil and not menu.typing and (nav.act.back or nav.rclick) then
       if menu.group or menu.search ~= '' then go_back(); stepped = true
       else
-        menu.open = false
+        menu.open, svc.menu_up = false, false
         if menu.ask then reset_ask(menu.ask, false) end
         return
       end
@@ -3371,7 +3499,7 @@ function M.install(ctx)
     if not stepped and menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing)
        or (mk ~= 'off' and pressed(mk)
            and not (menu.typing and (mk:find('^%w$') or mk == 'space' or mk:find('^numpad %d$'))))) then
-      menu.open, menu.typing, nav.drag = false, false, nil
+      menu.open, menu.typing, nav.drag, svc.menu_up = false, false, nil, false
       if menu.ask then reset_ask(menu.ask, false) end
       return
     end
@@ -3379,6 +3507,7 @@ function M.install(ctx)
       if mk ~= 'off' and pressed(mk) then
         -- it always opens on the list of mods
         menu.open, menu.group, menu.search, menu.sel, menu.top = true, nil, '', 1, 1
+        nav.opened()
         nav.drag = nil
         -- (a mouse button or pad button already down when it opens is no press; no old boxes)
         nav.lmb, nav.rmb, nav.nhits, nav.seed = true, true, 0, true
@@ -3436,7 +3565,8 @@ function M.install(ctx)
                  down = { order = {}, hooks = {}, pos = {} }, last = {}, logs = {}, guards = {}, ended = {}, keys = {},
                  rel = {}, kidx = {}, kat = {}, rev = 0, seeded = {}, said = {}, pending = {}, home = {}, titles = {}, per = {},
                  refused = {}, frame = 0, ml = { at = -1 },
-                 rt = { hashes = {}, statuses = {}, versions = { [1] = true }, hash_reads = 0 } }
+                 rt = { hashes = {}, statuses = {}, versions = { [1] = true }, hash_reads = 0 },
+                 poll_f = { 'down', 'pressed', 'released', 'last' } }   -- (ModBindingsMenu's poll fills these, k.poll)
   local MOM_PER_MOD, MOM_MODS = 32, 112
   local REVISION = 'chef-shared-loader-' .. tostring(ctx.VERSION)
   local BINGUS_CAPS = { api = 1, logs = true, discovery = true, after_startup = true, on_update = true, on_shutdown = true,
@@ -3548,7 +3678,7 @@ function M.install(ctx)
       if not m then return nil end
       st, why, on = m.state, m.why, m.on
     end
-    if st == 'started elsewhere' then return 'loaded' end
+    if st == 'started elsewhere' or st == 'left to its loader' then return 'loaded' end
     if on and st == 'running' then return 'loaded' end
     if on and st == nil then return 'loading' end
     return 'load failed: ' .. tostring(why or st or 'off')
@@ -3965,7 +4095,9 @@ function M.install(ctx)
     -- poll(ids, out): is_down of each, with pressed / released since this out table's last poll
     function k.poll(ids, out)
       if type(ids) ~= 'table' or type(out) ~= 'table' then return false, 'invalid poll arguments' end
-      for _, f in ipairs({ 'down', 'pressed', 'released', 'last' }) do
+      local fs = shim.poll_f                    -- (the four names made once: a poll a frame makes no table)
+      for i = 1, 4 do
+        local f = fs[i]
         if out[f] == nil then out[f] = {} elseif type(out[f]) ~= 'table' then return false, 'invalid poll arguments' end
       end
       for i = 1, #ids do
@@ -4257,6 +4389,8 @@ function M.install(ctx)
   function svc.hold_mouse(owner, on)
     local S = nav.holds
     if on then
+      -- (asked from a shutdown hook, after I gave the mouse back: nothing after that would let it go again)
+      if nav.hold.down then return false, 'the mouse can\'t be held: the game is closing' end
       if nav.hold.off then return false, 'the mouse can\'t be held: the game gave no dead zone for it' end
       if not nav.find_axes().move then return false, 'the mouse can\'t be held: the game gave no mouse axis' end
       if not S.by[owner] then S.by[owner], S.n = true, S.n + 1 end
@@ -4448,7 +4582,10 @@ function M.install(ctx)
     if menu.open ~= (menu.told == true) then menu.told = menu.open; emit('menu', menu.open == true) end
   end
   function svc.shutdown()
-    nav.holds.by, nav.holds.n = {}, 0      -- (the mouse back to the game first, mods' holds too: nothing below may keep it)
+    -- (the mouse back to the game first, mods' holds too, and never taken again: a shutdown hook below asking for it is
+    -- refused, so nothing below may keep it)
+    nav.hold.down = true
+    nav.holds.by, nav.holds.n = {}, 0
     pcall(nav.hold_give)
     -- the guards stop first, then the look-alike's on_shutdown(id, fn) hooks; its on_shutdown(fn) ones run last (after
     -- every mod's and boot script's shutdown), before the settings are saved and the mods' logs close

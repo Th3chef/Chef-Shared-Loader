@@ -16,22 +16,25 @@
 -- below use functions taken before any mod runs, so no mod can bend them.
 -- Engine tables that aren't for mods are out of its view too (stingray and the globals alike): native code
 -- (PluginManager), other network routes (Http, WebSocket), the Localizer (it ends the game), the lobby (joining one and
--- writing what other players read: every *Lobby* table and Network's lobby calls), GameSession's writes, the engine's
--- console and save files (Console, CommandWindow, ConsoleHelp, SaveSystem, Cloud, CloudToken), and Application's
--- calls that write files, change the player's saved settings or open a browser (save_render_target,
--- set_user_setting, open_url_in_browser ...). A function left out stays out by identity too: reached through another
--- table, a metatable or a function __index, a mod finds nothing there (and chef.call refuses it by any name).
--- A mod the loader trusts by name (loader.lua, TRUSTED) can get more through sb.grant: files of its own in
--- %LOCALAPPDATA%, and game patch files in data\ (part of its grant) that are checked before they take a patch's
--- name, so they never carry code. The lobby, for those mods, goes through the HD2Runtime look-alike (runtime.lua).
+-- writing what other players read: every *Lobby* table, SteamClient's lobby browser and Network's lobby calls),
+-- GameSession's writes, the engine's console and save files (Console, CommandWindow, ConsoleHelp, SaveSystem, Cloud,
+-- CloudToken), Application's calls that write files, change the player's saved settings or open a browser
+-- (save_render_target, set_user_setting, open_url_in_browser ...), Steam's overlay and the player's Steam id
+-- (Steam.open_url, Steam.user_id ...), the friend list and its invites (Friends), and Steam's voice chat (SteamVoip,
+-- SteamVoipClient, SteamVoipRoom). A function left out stays out by identity too: reached through another table, a
+-- metatable or a function __index, a mod finds nothing there (and chef.call refuses it by any name).
+-- A mod the loader trusts by name (loader.lua, TRUSTED) is marked through sb.grant: chef.capture's pictures (which the
+-- loader saves itself), never a file of its own the others can't write. The lobby, for those mods, goes through the
+-- HD2Runtime look-alike (runtime.lua), whose Steam.user_id and Friends.playing_game are the loader's own calls (the
+-- game's functions by name), never the mod's view of the engine.
 -- A mod that replaces the game's boot script itself isn't a loader mod: the game hands it everything, with or without
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.4.0' }
+local M = { version = '1.4.1' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
-local rawset, newproxy = rawset, newproxy
+local rawset = rawset
 local collectgarbage = collectgarbage
 local setmetatable, getmetatable = setmetatable, getmetatable
 local s_find, s_match, s_gsub, s_sub, s_lower, s_byte, s_gmatch, s_rep = string.find, string.match, string.gsub,
@@ -53,15 +56,21 @@ local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
 local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
 -- engine tables that aren't for mods (M.engine_off), and calls left out of engine tables mods otherwise keep
 -- (M.CALLS_OFF): Network, GameSession and UnitSynchronizer keep only their reads (no lobby, connection or writes to
--- what other players see); Application loses what reaches the disk or past the game.
+-- what other players see); Application loses what reaches the disk or past the game; Steam keeps only what it says
+-- about this game and this client.
 -- (utilities.lua refuses the same through chef.call.) engine_off answers why (a text) or false; a CALLS_OFF rule
 -- answers true, or a text saying why, for a call that's left out.
 -- Whole tables: Console, CommandWindow and ConsoleHelp run the engine's own commands (and CommandWindow opens a window
 -- of its own, which can crash the game); SaveSystem, Cloud and CloudToken keep save files that outlast the game. No mod
--- I know of uses any of them.
+-- I know of uses any of them. Friends is the friend list (other people's Steam ids, names, what they play) and the
+-- invites sent from it; SteamClient has only lobby_browser, the way into other lobbies (SteamLobbyBrowser is off by
+-- the Lobby rule already). SteamVoip, SteamVoipClient and SteamVoipRoom are Steam's voice chat: their calls create,
+-- join and leave rooms, select the client's voice in and out, and add or remove other players in a room.
 M.TABLES_OFF = { PluginManager = 'native code', Http = 'the network', WebSocket = 'the network',
   Localizer = 'it ends the game', Console = "the engine's commands", CommandWindow = "the engine's commands",
-  ConsoleHelp = "the engine's commands", SaveSystem = 'files on disk', Cloud = 'files on disk', CloudToken = 'files on disk' }
+  ConsoleHelp = "the engine's commands", SaveSystem = 'files on disk', Cloud = 'files on disk', CloudToken = 'files on disk',
+  Friends = "other players' Steam data", SteamClient = 'the lobby', SteamVoip = 'voice chat with other players',
+  SteamVoipClient = 'voice chat with other players', SteamVoipRoom = 'voice chat with other players' }
 -- The real functions left out (below and in CALLS_OFF), by identity: function -> why. Filled as I install (the tables
 -- are the game's), so chef.call refuses one whatever table it's reached through (utilities.lua asks engine_off with
 -- the function a name resolves to). Weak keys: a function the game drops isn't kept alive here.
@@ -91,8 +100,17 @@ function M.writes(f)
     or s_find(f, 'url', 1, true) or s_find(f, 'browser', 1, true) or s_match(f, '^set_.*user_setting')
     or s_match(f, '^apply_.*user_setting')) ~= nil
 end
+-- Steam keeps what it says about this game and this client: the app id, whether Steam runs and is online, whether a
+-- game is installed or owned, Steam's language, whether the overlay is up, and the player's own name (the game shows
+-- it anyway). Left out: open_url (a page in the Steam overlay, as Application's browser call), install_event, user_id
+-- (an id that names the person outside the game) and any call a game update adds, until it's known to be a read: an
+-- allow list, like Network's.
+M.STEAM_KEEP = { app_id = true, client_running = true, connected = true, is_installed = true, language = true,
+  overlay_active = true, owns_app = true, user_name = true }
+M.STEAM_WHY = 'the Steam overlay or the player\'s Steam id'
 M.CALLS_OFF = {
   Application = function(f) return (M.APP_OFF[s_lower(f)] or M.writes(f)) and M.WRITES or false end,
+  Steam = function(f) return not M.STEAM_KEEP[s_lower(f)] and M.STEAM_WHY or false end,
   -- Network keeps only what reads like a read (peer_id, game_session, is_ / has_ / get_ / num_ ...), and never a name
   -- that mentions the lobby or a connection: a new call in a game update is left out until it's known to be a read
   Network = function(f)
@@ -210,8 +228,10 @@ function M.install(ctx)
   local WDIR = ctx.DIR and ctx.DIR ~= '' and low(ctx.DIR) or nil
   local GDIR = ctx.GAME_DIR and low(ctx.GAME_DIR) or nil
   local ODIR = ctx.OLD_DIR and low(ctx.OLD_DIR) or nil
-  local LDIR = ODIR                     -- %LOCALAPPDATA%\, for a trusted mod's own files (even when it's my folder too)
   if ODIR == WDIR then ODIR = nil end
+  -- the roots a mod's path may start with, in the order sb.check tries them: the loader's folder, the game's settings
+  -- folder, my old folder, the game's data folder (false for one I don't have)
+  sb.roots = { WDIR or false, GDIR or false, ODIR or false, 'data\\' }
   local OWN = s_lower(ctx.FILES or 'chef_loader')
 
   -- for the log: the player's folders as %APPDATA% / %LOCALAPPDATA%, so a log someone attaches to a bug report
@@ -244,9 +264,9 @@ function M.install(ctx)
     local p = low(path)
     if s_sub(p, 1, 2) == '\\\\' then return nil, 'network and device paths are off limits' end
     local writes = s_find(mode, '[wa%+]') ~= nil
-    -- which root: the loader's folder, the game's settings folder, my old folder, the game's data folder
+    -- which root (sb.roots)
     local root, rest
-    for _, r in ipairs({ WDIR or false, GDIR or false, ODIR or false, 'data\\' }) do
+    for _, r in ipairs(sb.roots) do
       if r and s_sub(p, 1, #r) == r and #p > #r then root, rest = r, s_sub(p, #r + 1); break end
     end
     if not root then
@@ -526,225 +546,15 @@ function M.install(ctx)
   end }
 
   -- ---------------------------------------------------------------- what a trusted mod gets beyond that
-  -- grants[owner] = { files = { { dir, name } ... } (its own files in %LOCALAPPDATA%: below dir, names starting with
-  -- name; both lower case), patches = { scratch = file name prefix, marker = text or a list of texts }, capture = true
-  -- (chef.capture's pictures, which the loader saves itself: the mod's own Application still has no
-  -- save_render_target) }. Set before
-  -- the mod's environment is made (its os gets remove and rename).
+  -- grants[owner] = { capture = true (chef.capture's pictures, which the loader saves itself: the mod's own
+  -- Application still has no save_render_target) }. Set before the mod's environment is made. A grant opens no file:
+  -- a trusted mod's io and os are every mod's (no os.remove or os.rename, no write in data\).
   local grants = {}
   function sb.grant(owner, g) if type(owner) == 'string' and type(g) == 'table' then grants[owner] = g end end
   -- is this mod one the loader trusts (granted more)?
   function sb.trusted(owner) return grants[owner] ~= nil end
   -- does its grant carry this flag (capture: chef.capture's pictures)? Being trusted for something else isn't enough.
   function sb.granted(owner, what) local g = grants[owner]; return g ~= nil and g[what] == true end
-  local function own_file(g, p)
-    if not (LDIR and g.files) or s_sub(p, 1, #LDIR) ~= LDIR then return false end
-    local names = names_of(s_sub(p, #LDIR + 1))
-    if not names then return false end
-    local file = names[#names]
-    if not s_match(file, '^[%w_%-%.]+$') then return false end
-    local dir = t_concat(names, '\\', 1, #names - 1)
-    for _, f in ipairs(g.files) do
-      if dir == f.dir and s_sub(file, 1, #f.name) == f.name then return true end
-    end
-    return false
-  end
-  -- a file in data\ a trusted mod may write: its scratch file (any suffix), or a patch's main file or sidecar.
-  -- -> 'scratch' | 'main' | 'side', and the patch number
-  local SIDES = { ['.stream'] = true, ['.gpu_resources'] = true, ['.part'] = true }
-  local function data_file(g, p)
-    if not g.patches or s_sub(p, 1, 5) ~= 'data\\' then return nil end
-    local names = names_of(s_sub(p, 6))
-    if not names or #names ~= 1 then return nil end
-    local file, scratch = names[1], g.patches.scratch
-    if scratch and s_sub(file, 1, #scratch) == scratch and s_match(s_sub(file, #scratch + 1), '^[%w_%-%.]*$') then
-      return 'scratch'
-    end
-    local n, suffix = s_match(file, '^9ba626afa44a3aa3%.patch_(%d+)(.*)$')
-    if n and #n <= 5 then
-      if suffix == '' then return 'main', n end
-      if SIDES[suffix] then return 'side', n end
-    end
-    return nil
-  end
-  -- What a patch main file holds: its table of contents read, and every Lua resource in it read too. A patch passes
-  -- when it replaces neither the game's boot script nor my core and each Lua resource in it is only comment lines (so
-  -- nothing in it can run; a long comment, --[[ ]], can end mid-line before code, so those are refused). -> true,
-  -- has_marker (a Lua resource starting with the marker, a text or one of a list of texts) | nil, why
-  local BOOT_ID, LUA_TYPE = '\250\149\024\105\147\223\118\244', '\226\023\209\044\250\141\078\161'
-  -- my core (mods/chef_shared_loader/core_1): the game's require loads the copy in the highest patch, so a patch
-  -- carrying one would take the loader's place
-  local CORE_ID = '\154\087\100\126\056\137\119\194'
-  local function u32(s, i) local a, b, c, d = s_byte(s, i, i + 3); return a + b * 256 + c * 65536 + d * 16777216 end
-  local function only_comments(text)
-    for line in s_gmatch(text .. '\n', '([^\r\n]*)[\r\n]') do   -- (Lua ends a comment at \r as well as \n)
-      if not s_match(line, '^%s*$') and (not s_match(line, '^%s*%-%-') or s_match(line, '^%s*%-%-%[=*%[')) then
-        return false
-      end
-    end
-    return true
-  end
-  local function read_patch(f, marker)
-    -- the marker texts I look for: an empty one would start every text and one that isn't text starts none, so
-    -- neither is kept (a list of only those marks nothing)
-    local marks = {}
-    if type(marker) == 'string' then marker = { marker } end
-    if type(marker) == 'table' then
-      for i = 1, #marker do
-        local m = marker[i]
-        if type(m) == 'string' and m ~= '' then marks[#marks + 1] = m end
-      end
-    end
-    local h = f:read(72)
-    if type(h) ~= 'string' or #h < 72 or u32(h, 1) ~= 0xF0000011 then return nil, 'not a patch file' end
-    local types, count = u32(h, 5), u32(h, 9)
-    -- (a mod's built patch can pass 375,000 rows; the rows are read 4096 at a time, so the cap only bounds the time)
-    if types > 4096 or count > 2097152 then return nil, 'not a patch file' end
-    local tt = types > 0 and f:read(32 * types) or ''
-    if #tt ~= 32 * types then return nil, 'a cut-off patch file' end
-    -- The layout must be the one I read: the type table's counts (u64 at +16) add up to the row count and every row's
-    -- type (at +8) is in it. A changed row size or field order fails this, so a patch is refused, never misread.
-    local listed, sum = {}, 0
-    for k = 0, types - 1 do
-      listed[s_sub(tt, 32 * k + 9, 32 * k + 16)] = true
-      sum = sum + u32(tt, 32 * k + 17) + u32(tt, 32 * k + 21) * 4294967296
-    end
-    if sum ~= count then return nil, 'a patch file layout I don\'t know' end
-    local marked, base = false, 72 + 32 * types
-    -- the rows a chunk at a time (a patch can have tens of thousands; one read of them all would be megabytes)
-    for first = 0, count - 1, 4096 do
-      local n = count - first
-      if n > 4096 then n = 4096 end
-      if not f:seek('set', base + 80 * first) then return nil, 'a cut-off patch file' end
-      local rows = f:read(80 * n) or ''
-      if #rows ~= 80 * n then return nil, 'a cut-off patch file' end
-      for i = 0, n - 1 do
-        local o = i * 80
-        if not listed[s_sub(rows, o + 9, o + 16)] then return nil, 'a patch file layout I don\'t know' end
-        if s_sub(rows, o + 1, o + 8) == BOOT_ID then return nil, 'it would replace the game\'s boot script' end
-        if s_sub(rows, o + 1, o + 8) == CORE_ID then return nil, 'it would replace the loader\'s core' end
-        if s_sub(rows, o + 9, o + 16) == LUA_TYPE then
-          local at = u32(rows, o + 17) + u32(rows, o + 21) * 4294967296
-          -- (seek takes a 32-bit long on the game's platform: an offset past 2 GB would wrap)
-          if at >= 2147483647 then return nil, 'a Lua resource past 2 GB' end
-          if not f:seek('set', at) then return nil, 'a cut-off patch file' end
-          local env8 = f:read(8)
-          if type(env8) ~= 'string' or #env8 < 8 then return nil, 'a cut-off patch file' end
-          local len = u32(env8, 1)
-          if len > 65536 then return nil, 'a Lua resource too big for a note' end
-          -- the row's size is what a loader reads; it must be just this text, or code could sit past the length I check
-          if u32(rows, o + 57) ~= len + 8 then return nil, 'a Lua resource whose sizes disagree' end
-          -- a Lua resource is all in the main file; stream or GPU data would be bytes I never read
-          if u32(rows, o + 61) ~= 0 or u32(rows, o + 65) ~= 0 then return nil, 'a Lua resource with stream or GPU data' end
-          local text = len > 0 and f:read(len) or ''
-          if type(text) ~= 'string' or #text ~= len then return nil, 'a cut-off patch file' end
-          if not only_comments(text) then return nil, 'a Lua resource with code in it' end
-          for k = 1, #marks do
-            if s_sub(text, 1, #marks[k]) == marks[k] then marked = true; break end
-          end
-        end
-      end
-    end
-    return true, marked
-  end
-  local function patch_check(path, marker)
-    if not real_open then return nil, 'no io' end
-    local f = real_open(path, 'rb')
-    if not f then return nil, 'not there' end
-    local ok, a, b = pcall(read_patch, f, marker)
-    pcall(f.close, f)
-    if not ok then return nil, 'unreadable: ' .. tostring(a) end
-    return a, b
-  end
-  sb.patch_check = patch_check
-  -- a patch number is this mod's to write: its main file (main: its path as the mod spelled it) isn't there, or it
-  -- carries the mod's marker
-  -- (the answer is kept until a mod renames or removes something in data\: each sidecar open would read the whole
-  -- main file again otherwise)
-  local ours_cache = {}
-  local function patch_ours(g, main)
-    local key = low(main)
-    local known = ours_cache[key]
-    if known ~= nil and known.g == g then return known.v end
-    local f = real_open and real_open(main, 'rb')
-    if not f then return true end                  -- (not there, or not readable now: not kept, asked again)
-    pcall(f.close, f)
-    local ok, marked = patch_check(main, g.patches.marker)
-    local v = ok == true and marked == true
-    ours_cache[key] = { g = g, v = v }
-    return v
-  end
-  -- A trusted mod's write handles on files in data\ come wrapped, so I know which are open: a file still open for
-  -- writing is never renamed (to a patch's name or any other) or removed, so nothing reaches a patch after its check.
-  -- The wrapper is a userdata (newproxy) whose __gc closes a handle the mod dropped; without newproxy it's a table, and
-  -- a dropped one simply leaves the weak tables. Open or not is read from them, so a count can't drift.
-  -- the key for a path: data\<name> as names_of reads it (data\.\x and data\\x are data\x), else the lower-case path
-  local function key_of(p)
-    if s_sub(p, 1, 5) == 'data\\' then
-      local names = names_of(s_sub(p, 6))
-      if names and #names == 1 then return 'data\\' .. names[1] end
-    end
-    return p
-  end
-  local real_of, path_of = setmetatable({}, { __mode = 'k' }), setmetatable({}, { __mode = 'k' })
-  local function open_for_writing(p)
-    for h, q in pairs(path_of) do if q == p and real_of[h] then return true end end
-    return false
-  end
-  local function let_go(h)
-    local f = real_of[h]
-    real_of[h] = nil
-    return f
-  end
-  -- a method's answers as the mod gets them: its handle where the file answered itself (5.2's write), all the others
-  local function answers(h, f, a, ...)
-    if a == f then return h, ... end
-    return a, ...
-  end
-  local hmethods = {}
-  for _, m in ipairs({ 'read', 'write', 'seek', 'flush', 'setvbuf' }) do
-    hmethods[m] = function(h, ...)
-      local f = real_of[h]
-      if not f then return nil, 'attempt to use a closed file' end
-      return answers(h, f, f[m](f, ...))
-    end
-  end
-  -- the iterator holds the handle, so it isn't collected (and its file closed) while a loop runs
-  function hmethods.lines(h, ...)
-    local f = real_of[h]
-    if not f then error('attempt to use a closed file', 2) end
-    local it = f:lines(...)
-    return function() local _ = h; return it() end
-  end
-  function hmethods.close(h)
-    local f = let_go(h)
-    if not f then return nil, 'attempt to use a closed file' end
-    return f:close()
-  end
-  local function wrapped(f, p)
-    local h, mt
-    if newproxy then h = newproxy(true); mt = getmetatable(h) else h = {}; mt = {}; setmetatable(h, mt) end
-    mt.__index, mt.__metatable = hmethods, 'locked'
-    mt.__tostring = function() return 'file (' .. (real_of[h] and 'open' or 'closed') .. ')' end
-    if newproxy then mt.__gc = function(x) local g = let_go(x); if g then pcall(g.close, g) end end end
-    real_of[h], path_of[h] = f, key_of(p)
-    return h
-  end
-  -- io.type for a mod: a wrapped handle is a file too
-  local function type_of(o)
-    if path_of[o] ~= nil then return real_of[o] and 'file' or 'closed file' end
-    return io_type(o)
-  end
-  -- May this trusted mod do this to path (p: lower case) in data\? -> true | nil, why | false (not a file of this kind)
-  local function data_ok(g, p, what, path)
-    local kind, n = data_file(g, p)
-    if not kind then return false end
-    if kind == 'scratch' then return true end
-    if kind == 'main' and what == 'write' then return nil, 'a patch main file is only made by renaming a checked file to it' end
-    if not patch_ours(g, s_sub(path, 1, 5) .. '9ba626afa44a3aa3.patch_' .. n) then return nil, 'that patch number is another mod\'s' end
-    return true, kind
-  end
-
   -- One mod's environment. owner: its name, for the log.
   -- The engine reads mods may make that have ended the game in some cases, in this mod's own copy of their table:
   -- GameSession.game_object_field_batched answers only for an object that exists (a whole number id), and goes
@@ -944,15 +754,13 @@ function M.install(ctx)
     end
     -- A mod's own file straight in %LOCALAPPDATA% (where mods for other loaders keep their logs and settings): kept in
     -- my folder instead, under the same name, said once per mod. A read finds it there, else in %LOCALAPPDATA% (the
-    -- fallback below), so settings saved before carry over. A trusted mod keeps its own files where they are.
+    -- fallback below), so settings saved before carry over.
     local moved = false
     -- (the path to open, and the file's name when it's one moved to my folder)
     local function redirect(path)
       if not (ODIR and ctx.DIR and type(path) == 'string') then return path end
       local p = low(path)
       if s_sub(p, 1, #ODIR) ~= ODIR then return path end
-      local g = grants[owner]
-      if g and own_file(g, p) then return path end
       local name = s_sub(path, #ODIR + 1)
       local ext = s_match(s_lower(name), '%.(%w+)$')
       if name == '' or s_find(name, '[\\/]') or not (ext and MOD_EXT[ext]) then return path end
@@ -977,25 +785,7 @@ function M.install(ctx)
             sb.claims[owner .. '|' .. names[1]] = true
           end
         end
-        if not ok then
-          local g = grants[owner]
-          local mode_ok = mode == nil or (type(mode) == 'string' and (s_match(mode, '^[rwa]%+?b?$') or s_match(mode, '^[rwa]b%+$')))
-          if g and mode_ok and real_open and type(path) == 'string' and path ~= '' and #path <= 400 and not s_find(path, '%z')
-            and s_sub(path, 1, 2) ~= '\\\\' and s_sub(path, 1, 2) ~= '//' then
-            local p = low(path)
-            local writes = mode ~= nil and s_find(mode, '[wa%+]') ~= nil
-            local yes, why = own_file(g, p), nil
-            local in_data = false
-            if not yes and writes then yes, why = data_ok(g, p, 'write', path); in_data = yes == true end
-            if yes then
-              local f, err, code = real_open(path, mode or 'r')
-              if f and in_data then return wrapped(f, p) end
-              return f, err, code
-            end
-            if yes == nil then return deny('open', asked, mode, why) end
-          end
-          return deny('open', asked, mode, root)
-        end
+        if not ok then return deny('open', asked, mode, root) end
         if not real_open then return nil, 'no io' end
         local f, err, code = real_open(path, mode or 'r')
         if f and not files_locked then lock_files(f) end
@@ -1022,51 +812,13 @@ function M.install(ctx)
         if not ok then deny('read', path, 'r', why); error(why, 2) end
         return io_.lines(path)
       end,
-      type = type_of,
+      type = io_type,
       close = function(f) if f ~= nil then return f:close() end end,
       write = function(...) return io_.write(...) end,
       popen = blocked('io.popen'), tmpfile = blocked('io.tmpfile'), input = blocked('io.input'),
       output = blocked('io.output'),
     }
     env.io = io_c
-    local g = grants[owner]
-    if g and type(os_) == 'table' and os_.remove and os_.rename then
-      -- a trusted mod's own files: removed or renamed within the same kind of place; renaming a file to a patch's
-      -- main name checks it first (it must pass and carry the mod's marker, so the number stays recognizably its)
-      local function place(path, what)
-        if type(path) ~= 'string' or path == '' or #path > 400 or s_find(path, '%z') then return nil, 'not a file path' end
-        local p = low(path)
-        if own_file(g, p) then return 'own' end
-        local ok, why = data_ok(g, p, what, path)
-        if ok then return 'data', why end
-        return nil, why or 'not one of this mod\'s files'
-      end
-      local function busy(path) return open_for_writing(key_of(low(path))) end
-      os_c.remove = function(path)
-        local where, why = place(path, 'remove')
-        if not where then return deny('remove', path, '-', why) end
-        if busy(path) then return deny('remove', path, '-', 'it is still open for writing') end
-        for k in pairs(ours_cache) do ours_cache[k] = nil end
-        return os_.remove(path)
-      end
-      os_c.rename = function(from, to)
-        local a, why = place(from, 'rename')
-        if not a then return deny('rename', from, '-', why) end
-        local b, kind = place(to, 'rename')
-        if not b then return deny('rename', to, '-', kind) end
-        if a ~= b then return deny('rename', to, '-', 'only within the same folder') end
-        if busy(from) or busy(to) then return deny('rename', from, '-', 'it is still open for writing') end
-        if kind == 'main' then
-          local ok, marked = patch_check(from, g.patches.marker)
-          if not ok then return deny('rename', from, '-', 'not a patch file it may make: ' .. tostring(marked)) end
-          if not marked then return deny('rename', from, '-', 'the patch doesn\'t carry the mod\'s marker') end
-          if ctx.log then ctx.log(s_format('%s placed a checked game patch file: %s', owner, show(to))) end
-        end
-        for k in pairs(ours_cache) do ours_cache[k] = nil end
-        return os_.rename(from, to)
-      end
-    end
-
     -- code it loads: text only, and it lands in this environment (or one the mod hands load); never under my own chunk
     -- name (sb.chunk: the loader's, whose code the hang watchdog leaves running)
     local NAMED = 'that chunk name is the loader\'s own (off limits to Chef Shared Loader mods)'

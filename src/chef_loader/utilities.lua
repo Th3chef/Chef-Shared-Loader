@@ -102,7 +102,7 @@ function M.index(ctx, P)
   local I = { rows = 0, same = 0, fallback = 0, shared = 0, files = 0, bad = 0, conflicts = {}, more = 0, unread = 0,
               compared = 0, read = 0, excl = 0 }
   -- A resource (id, type) -> its winning row, and the rows it shadows (highest first). A row is its code: patch index *
-  -- 2^21 + entry (a patch up to 2,097,152 rows, the most the sandbox lets a mod place). The key is a number, not the
+  -- 2^21 + entry (a patch of up to 262,144 rows is indexed; the code has room past that). The key is a number, not the
   -- row's 16 bytes as a string: a string per row would grow Lua's string table by hundreds of thousands, and each
   -- doubling of it is one step of tens of ms no pause can split. The number is the id's low 45 bits * 256 + the type's
   -- index (types are a few strings, seen again and again); the id's top 19 bits go with the code in the value
@@ -133,7 +133,7 @@ function M.index(ctx, P)
         local head = f:read(72) or ''
         if #head ~= 72 or u32(head, 1) ~= 0xF0000011 then return end
         local t_, e_ = u32(head, 5), u32(head, 9)
-        if t_ > 4096 or e_ > 2097152 then return end
+        if t_ > 4096 or e_ > 262144 then return end
         if t_ > 0 and #(f:read(t_ * 32) or '') < t_ * 32 then return end
         nt, ne = t_, e_
       end)
@@ -552,7 +552,8 @@ function M.install(ctx, L)
   -- the engine's Localizer, so there's nothing to look up), native code and the network
   local NEVER_TABLES = { Localizer = 'it ends the game', PluginManager = 'native code', Http = 'the network',
                          WebSocket = 'the network' }
-  -- (the lobby, GameSession's writes, the console and save files, and Application's file and settings writes too:
+  -- (the lobby, GameSession's writes, the console and save files, Application's file and settings writes, Steam's
+  -- overlay and Steam id, Friends and Steam's voice chat too:
   -- sandbox.lua's engine_off and CALLS_OFF, handed in as L.engine_off and L.calls_off, the same rules a mod's own view
   -- of the engine follows)
   local engine_off, calls_off = L.engine_off or function() return false end, L.calls_off or {}
@@ -616,25 +617,33 @@ function M.install(ctx, L)
   -- Units are stamped with the engine world they were seen in. Within one engine world every unit stays usable (the
   -- ship loaded into the mission's world is the same engine world: the same units, re-stamped as they're seen). A
   -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Only two
-  -- worlds are kept, so the stamps can't pile up.
-  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }) }
+  -- worlds are kept, so the stamps can't pile up. A mod can keep a handle longer than that, though: refused in the
+  -- second world, it would be unknown in the third and pass as new. So a unit refused as gone (by current() or
+  -- util.gone()) goes in this world's carry set, and the next world's before is this world's stamps plus the carry
+  -- set, which then starts empty. The limit: a gone unit stays refused in every later world as long as something asks
+  -- about it at least once in each engine world; one nobody asks about for a whole world drops off after it, like any
+  -- other stamp. The carry set holds only units asked about in this world, so it can't pile up either.
+  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }),
+    carry = setmetatable({}, { __mode = 'k' }) }
   local function roll()
     if seen.inst ~= world.instance then
+      for u in pairs(seen.carry) do seen.now[u] = true end
       seen.inst, seen.before, seen.now = world.instance, seen.now, setmetatable({}, { __mode = 'k' })
+      seen.carry = setmetatable({}, { __mode = 'k' })
     end
   end
   local function current(u)
     if u == nil or not world.stable then return false end
     roll()
     if seen.now[u] then return true end
-    if seen.before[u] then return false end
+    if seen.before[u] then seen.carry[u] = true; return false end
     seen.now[u] = true
     return true
   end
   -- a unit I know is new in this world (one a mod just spawned)
   local function fresh(u)
     roll()
-    seen.now[u], seen.before[u] = true, nil
+    seen.now[u], seen.before[u], seen.carry[u] = true, nil, nil
   end
   local said = {}
   local function once(key, line) if not said[key] then said[key] = true; log(line) end end
@@ -669,13 +678,18 @@ function M.install(ctx, L)
   function util.gone(u)
     if u == nil then return true end
     roll()
-    return seen.before[u] ~= nil and not seen.now[u]
+    if seen.before[u] ~= nil and not seen.now[u] then seen.carry[u] = true; return true end
+    return false
   end
   -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
-  -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those
-  function util.unit_refused(owner, name, u)
-    if util.gone(u) then return GONE end
-    seen.now[u] = true                    -- stamped even before the world settles (the instance is already this one)
+  -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those.
+  -- stamped: the caller already found u not gone and stamped it in this frame (the look-alike's alive check), so only
+  -- the call is checked
+  function util.unit_refused(owner, name, u, stamped)
+    if not stamped then
+      if util.gone(u) then return GONE end
+      seen.now[u] = true                  -- stamped even before the world settles (the instance is already this one)
+    end
     if class(name) ~= 'unit' then return nil end
     local k = unit_kind(u, owner)
     if k and BAD_KINDS[k] then
@@ -1069,7 +1083,7 @@ function M.install(ctx, L)
   util.session_now = session_now
 
   -- The game's settings file comes from the loader's one cache of it (read again on a world change or a new screen
-  -- size, else at most every 30 s); I only parse it again when its text changed.
+  -- size, else at most every 90 s); I only parse it again when its text changed.
   local settings = { n = -1, data = nil }
   local function settings_now()
     local text, n = L.settings_text()
@@ -1104,6 +1118,8 @@ function M.install(ctx, L)
     local l, r = floor(x0 + 0.5), floor(x1 + 0.5)
     if r > l then L.rect(l, y, r - l, hgt, c, layer) end
   end
+  -- x on the edge from (xa, ya) to (xb, yb) at height y
+  local function at(ya, xa, yb, xb, y) if yb == ya then return xa end return xa + (xb - xa) * (y - ya) / (yb - ya) end
   local function tri_spans(x1, y1, x2, y2, x3, y3, c, layer, step)
     -- sort by y, then fill one row of `step` pixels at a time, only the rows on the screen
     if y1 > y2 then x1, y1, x2, y2 = x2, y2, x1, y1 end
@@ -1112,7 +1128,6 @@ function M.install(ctx, L)
     if y3 - y1 < 0.5 then return end
     local sw, sh = ctx.screen()
     if not (finite(sw) and finite(sh)) then return end
-    local function at(ya, xa, yb, xb, y) if yb == ya then return xa end return xa + (xb - xa) * (y - ya) / (yb - ya) end
     local y, top = max(floor(y1), 0), min(y3, sh)
     step = max(step, ceil((top - y) / 4096))       -- (a screen taller than 4096 px gets thicker rows)
     while y < top do
@@ -1221,17 +1236,44 @@ function M.install(ctx, L)
   -- (a million meters: past that a double is still finite, but the engine's floats aren't what the mod meant)
   local function near(n) return finite(n) and n > -1e6 and n < 1e6 end
   -- is v (of that kind by its text) the engine's own: its metatable the one of a value the engine made, taken once
-  -- (util.made: kind -> that metatable, false for none)
+  -- (util.made: kind -> that metatable, false for none; also taken from the engine's values I make for a ray anyway.
+  -- util.made.own: the engine's Vector3 and Matrix4x4 came with metatables of their own, two different ones, so the
+  -- one a value carries names its kind; when they share one, only the text tells them apart)
   util.made = {}
+  local function learn(e, kind)
+    if util.made[kind] == nil then
+      util.made[kind] = getmetatable(e) or false
+      local a, b = util.made.Vector3, util.made.Matrix4x4
+      util.made.own = (a and b and a ~= b) or nil
+    end
+  end
   local function engine_made(v, kind)
-    local mt = util.made[kind]
-    if mt == nil then
+    if util.made[kind] == nil then
       local e = kind == 'Vector3' and api('Vector3', 0, 0, 0) or api('Matrix4x4.identity')
       if e == nil then return false end
-      mt = getmetatable(e) or false
-      util.made[kind] = mt
+      learn(e, kind)
     end
-    return getmetatable(v) == (mt or nil)
+    return getmetatable(v) == (util.made[kind] or nil)
+  end
+  -- The text (a new string each time) is read only when the metatable can't tell me.
+  -- v's kind ('Vector3', 'Matrix4x4', else what value_kind says)
+  local function made_kind(v)
+    if util.made.own then
+      local mt = getmetatable(v)
+      if mt == util.made.Vector3 then return 'Vector3' end
+      if mt == util.made.Matrix4x4 then return 'Matrix4x4' end
+    end
+    return value_kind(v)
+  end
+  -- value_kind(v) == kind and engine_made(v, kind), the text left unread where the metatable already answers: not the
+  -- engine's (one I've learned) is a no outright
+  local function made_as(v, kind)
+    local mt = util.made[kind]
+    if mt ~= nil then
+      if getmetatable(v) ~= (mt or nil) then return false end
+      if util.made.own then return true end
+    end
+    return value_kind(v) == kind and engine_made(v, kind)
   end
   -- x, y, z of a Vector3 or a plain { x, y, z } / { x = , y = , z = }; nil unless all three are numbers within reach.
   -- call: the mod's chef.call, for a value the mod handed me (read under its own crash key, never mine)
@@ -1239,7 +1281,7 @@ function M.install(ctx, L)
     local x, y, z
     if type(v) == 'table' and (v.x ~= nil or v[1] ~= nil) then
       if v.x ~= nil then x, y, z = v.x, v.y, v.z else x, y, z = v[1], v[2], v[3] end
-    elseif value_kind(v) == 'Vector3' and engine_made(v, 'Vector3') then
+    elseif made_as(v, 'Vector3') then
       if call then x, y, z = call('Vector3.to_elements', v) else x, y, z = xyz(v) end
     end
     if near(x) and near(y) and near(z) then return x, y, z end
@@ -1268,7 +1310,8 @@ function M.install(ctx, L)
     dx, dy, dz = dx / len, dy / len, dz / len
     local pose, ex, ey, ez
     local plain = type(box) == 'table' and (type(box.x) == 'number' or type(box[1]) == 'number')
-    if plain or value_kind(box) == 'Vector3' then
+    local bk = not plain and made_kind(box) or nil      -- (the box's kind, worked out once)
+    if plain or bk == 'Vector3' then
       -- the mod's own box: its middle (a Vector3 or a plain table) and, in a plain table, its yaw (radians about the up
       -- axis, 0 = facing +y, as chef.unit_rotation gives it). The ray goes into the box's own frame (its right
       -- (cos, -sin, 0), forward (sin, cos, 0), up) and the engine gets the box at the origin: an identity pose is the
@@ -1285,9 +1328,10 @@ function M.install(ctx, L)
       dx, dy = dx * c - dy * s, dx * s + dy * c
       pose = api('Matrix4x4.identity')
       if pose == nil then return nil, 'no Matrix4x4.identity' end
+      learn(pose, 'Matrix4x4')
     elseif ext == nil then
       -- a unit: its own box (Unit.box: its pose and half sizes)
-      local k = value_kind(box)
+      local k = bk
       if not (k == 'Unit' or (k == nil and type(box) == 'table')) then
         return nil, 'box: a unit, a Matrix4x4 with extents, or { x, y, z } with extents'
       end
@@ -1298,7 +1342,7 @@ function M.install(ctx, L)
       pose = p
     else
       -- a pose the engine made (this frame: its values don't outlive it)
-      if value_kind(box) ~= 'Matrix4x4' or not engine_made(box, 'Matrix4x4') then
+      if bk ~= 'Matrix4x4' or not engine_made(box, 'Matrix4x4') then
         return nil, 'box: a unit, a Matrix4x4 with extents, or { x, y, z } with extents'
       end
       ex, ey, ez = halves(ext, call)
@@ -1307,6 +1351,7 @@ function M.install(ctx, L)
     end
     local vf, vd, ve = api('Vector3', fx, fy, fz), api('Vector3', dx, dy, dz), api('Vector3', ex, ey, ez)
     if not (vf and vd and ve) then return nil, 'no Vector3' end
+    learn(vf, 'Vector3')
     local d, why = call('Math.ray_box_intersection', vf, vd, pose, ve)
     if d == nil and why ~= nil then return nil, why end
     if finite(d) and d >= 0 then return d end
@@ -1320,16 +1365,19 @@ function M.install(ctx, L)
   -- never holds more than keep of a mod's pictures (a mod can't list or delete files, so a cap that refused once full
   -- would stop it for good). One a second at most (M.CAPTURE.every). The number goes on across launches (my saved
   -- values). -> the file's name (not its path), or nil and why.
-  util.shots = {}                                    -- owner -> { at = when it last reached the engine, n = its number }
+  -- owner -> { at = when it last reached the engine, n = its number, flat = its name in file names, saved = its
+  -- number's key in my saved values }
+  util.shots = {}
   function util.capture(owner)
     local C, s = M.CAPTURE, util.shots[owner]
-    local flat = M.flat_owner(owner)
-    local key = ('capture.' .. flat):sub(1, 64)
     if not s then
+      local flat = M.flat_owner(owner)
+      local key = ('capture.' .. flat):sub(1, 64)
       local n = L.saved_get and tonumber(L.saved_get(key)) or 0
-      s = { n = (n >= 0 and n <= C.keep) and floor(n) or 0 }
+      s = { n = (n >= 0 and n <= C.keep) and floor(n) or 0, flat = flat, saved = key }
       util.shots[owner] = s
     end
+    local flat, key = s.flat, s.saved
     -- (not while a world loads or goes: the back buffer may be half torn down then, and a picture of a loading screen
     -- isn't what a mod asked for)
     if not world.stable then return nil, 'no world yet' end
@@ -1449,6 +1497,7 @@ function M.install(ctx, L)
   end
 
   -- ---------------------------------------------------------------- the helpers each mod gets
+  function util.nearest_first(p, q) return p.d < q.d end      -- (chef.units_near's order)
   function util.extend(chef, a)
     local owner = a.name
     local base_call, base_call_kind = chef.call, chef.call_kind
@@ -1465,10 +1514,30 @@ function M.install(ctx, L)
       if not s[why] then s[why] = true; log(fmt('[%s] refused %s: %s', owner, name, why)) end
       return nil, why
     end
+    -- PERF: chef.call is hot (hundreds a frame for a HUD mod). Each name's record (class_of: its class, worked out once)
+    -- is read straight here, and the common Unit ask, a unit already seen in this engine world and of a kind known to
+    -- be fine, is passed without a call to refused(); the instance compare stands in for roll()'s, so a unit from an
+    -- engine world before this one never takes the shortcut. Anything else goes through refused() as before, the same
+    -- answers. Then the engine call itself as the loader's chef.call makes it (guarded under the mod's crash key, the
+    -- engine function looked up by its name each call), without going through that one too.
     function chef.call(name, ...)
-      local why = refused(owner, name, ...)
-      if why then return refuse(name, why) end
-      return base_call(name, ...)
+      local c = class_of[name]
+      if c == nil then c = class(name) end
+      if c then
+        local fine = false
+        if c == 'unit' and world.stable and seen.inst == world.instance then
+          local u = ...
+          if u ~= nil and seen.now[u] then
+            local k = kind_of[u]
+            fine = k == false or (k ~= nil and not BAD_KINDS[k])
+          end
+        end
+        if not fine then
+          local why = refused(owner, name, ...)
+          if why then return refuse(name, why) end
+        end
+      end
+      return guarded(owner, name, fn_of(name), ...)
     end
     function chef.call_kind(name, kind, ...)
       local why = refused(owner, name, ...)
@@ -1527,19 +1596,23 @@ function M.install(ctx, L)
     end
     -- the units of the given watch (or every watch of this mod) within r of a point, nearest first:
     -- { { unit, kind, x, y, z, d }, ... } (positions from the watch's last list)
+    -- (the answer and its entries are new tables, the mod's to keep; nothing else is made: the one watch asked for is
+    -- looked at in place, and the order is util.nearest_first, one function for every call)
     function chef.units_near(x, y, z, r, w)
       local out = {}
       if type(x) ~= 'number' or type(y) ~= 'number' or type(z) ~= 'number' or type(r) ~= 'number' then return out end
-      local list = w and { w } or mine
       local r2 = r * r
-      for _, wt in ipairs(list) do
-        for _, it in ipairs(wt.items or {}) do
-          local dx, dy, dz = it.x - x, it.y - y, it.z - z
-          local d2 = dx * dx + dy * dy + dz * dz
-          if d2 <= r2 then out[#out + 1] = { unit = it.unit, kind = it.kind, x = it.x, y = it.y, z = it.z, d = sqrt(d2) } end
+      for i = 1, w and 1 or #mine do
+        local items = (w or mine[i]).items
+        if items then
+          for _, it in ipairs(items) do
+            local dx, dy, dz = it.x - x, it.y - y, it.z - z
+            local d2 = dx * dx + dy * dy + dz * dz
+            if d2 <= r2 then out[#out + 1] = { unit = it.unit, kind = it.kind, x = it.x, y = it.y, z = it.z, d = sqrt(d2) } end
+          end
         end
       end
-      sort(out, function(p, q) return p.d < q.d end)
+      if #out > 1 then sort(out, util.nearest_first) end
       return out
     end
     -- a ray against one box (not the world: the game has no raycast for Lua): the distance in meters, nil for a miss,
@@ -1923,15 +1996,36 @@ function M.install(ctx, L)
   -- a mod's name as my options menu shows it (util.mod_title, set by the loader: its title, else its short name with
   -- spaces), else its short name; the log's status line keeps the raw names
   local function pm_name(a) return util.mod_title and a.name and util.mod_title(a.name) or a.short or a.name end
+  -- The lines are made again once a second into the same tables (pm.rows, the mods' rows; pm.out, the lines, each with
+  -- its own cells table, l.own), so only the numbers that changed make new strings. The helpers, made once:
+  -- the rows' order, costliest first, then by name
+  function pm.by_cost(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end
+  -- line i of out: its text, its cells (a, b, c; or a, a table of fixed cells I never change) and its color
+  function pm.put(out, i, left, color, a, b, c)
+    local l = out[i]
+    if not l then l = { own = {} }; out[i] = l end
+    local cells = a
+    if type(a) ~= 'table' then
+      cells = l.own
+      cells[1], cells[2], cells[3] = a, b, c
+    end
+    l[1], l[2], l[3] = left, cells, color
+  end
+  -- (the cells of the header line and of a mod that's off)
+  pm.HEAD, pm.OFF = { 'MS', 'SHARE', 'WORST' }, { '', '', 'OFF' }
   local function pm_lines(now)
     local n = max(1, pm.frames)
     local frame_ms = (now - pm.t0) * 1000 / n
-    local rows, total = {}, 0
+    local rows, nr, total = pm.rows or {}, 0, 0
+    pm.rows = rows
     local budget = util.default_budget()               -- (the Budget row; a row's budget: its mod's chef.budget, else this)
     for _, a in ipairs(L.addons) do
       local avg = ((a.pm_ms or 0) - (a.pm_base or 0)) / n
       total = total + avg
-      rows[#rows + 1] = { name = pm_name(a), avg = avg, worst = a.pm_max or 0, on = a.on, budget = a.budget or budget }
+      nr = nr + 1
+      local r = rows[nr]
+      if not r then r = {}; rows[nr] = r end
+      r.name, r.avg, r.worst, r.on, r.budget = pm_name(a), avg, a.pm_max or 0, a.on, a.budget or budget
     end
     for _, b in ipairs(L.boots()) do
       local a = b.a ~= b and b.a or nil
@@ -1944,24 +2038,27 @@ function M.install(ctx, L)
       if not name:lower():find('file%-mod installer') then
         -- (an HD2-Boot mod by its name in the menu; a plain boot script by its own title)
         if b.a and type(b.a.short) == 'string' then name = pm_name(b.a) end
-        rows[#rows + 1] = { name = name, avg = avg, worst = worst, on = b.on ~= false,
-                            budget = type(b.a) == 'table' and b.a.budget or budget }
+        nr = nr + 1
+        local r = rows[nr]
+        if not r then r = {}; rows[nr] = r end
+        r.name, r.avg, r.worst, r.on, r.budget = name, avg, worst, b.on ~= false,
+          type(b.a) == 'table' and b.a.budget or budget
       end
     end
-    sort(rows, function(x, y) if x.avg ~= y.avg then return x.avg > y.avg end return x.name < y.name end)
+    for i = #rows, nr + 1, -1 do rows[i] = nil end
+    sort(rows, pm.by_cost)
     local self = pm.self / n
     local loader = max(0, pm.loader / n - self)
-    local function pct(ms) return frame_ms > 0 and ms / frame_ms * 100 or 0 end
     -- { left, { the MS, SHARE and WORST cells }, color }: 1 header, 2 frame line, 3 total, 4 a mod, 5 a heavy mod
     -- (at or over its budget), 6 off or dim. Each cell is right-aligned in its own column (the game's font isn't
     -- monospaced, so one string padded with spaces wouldn't line up); an empty cell is left out, so a mod that's off
-    -- has its OFF at the line's right end, in the last column, never under MS.
-    local function ms(v) return fmt('%.2f', v) end
-    local function share(v) return fmt('%.1f%%', pct(v)) end
-    local out = {
-      { fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), { 'MS', 'SHARE', 'WORST' }, 2 },
-      { 'ALL MODS', { ms(total + loader), share(total + loader) }, 3 },
-    }
+    -- has its OFF at the line's right end, in the last column, never under MS. (MS: '%.2f'; SHARE: '%.1f%%' of the
+    -- frame)
+    local out, put = pm.out or {}, pm.put
+    pm.out = out
+    put(out, 1, fmt('FRAME %.1f MS  %d FPS', frame_ms, frame_ms > 0 and floor(1000 / frame_ms + 0.5) or 0), 2, pm.HEAD)
+    put(out, 2, 'ALL MODS', 3, fmt('%.2f', total + loader), fmt('%.1f%%', frame_ms > 0 and (total + loader) / frame_ms * 100 or 0))
+    local k = 2
     -- "Hide mods under N ms" (util.perf_hide): the mods running under their budget (the Budget row, or their own
     -- chef.budget) share one line, their sum and the worst call among them (a mod that's off keeps its line: OFF
     -- says something)
@@ -1972,17 +2069,24 @@ function M.install(ctx, L)
         low, low_n = low + r.avg, low_n + 1
         if r.worst > low_worst then low_worst = r.worst end
       elseif shown < 12 then
-        shown = shown + 1
-        out[#out + 1] = { (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name),
-                          r.on and { ms(r.avg), share(r.avg), fmt('%.1f', r.worst) } or { '', '', 'OFF' },
-                          r.on and (r.avg >= r.budget and 5 or 4) or 6 }
+        shown, k = shown + 1, k + 1
+        local left = (ctx.text_native and ctx.text_native()) and tostring(r.name):upper() or plain(r.name)
+        if r.on then
+          put(out, k, left, r.avg >= r.budget and 5 or 4, fmt('%.2f', r.avg),
+            fmt('%.1f%%', frame_ms > 0 and r.avg / frame_ms * 100 or 0), fmt('%.1f', r.worst))
+        else
+          put(out, k, left, 6, pm.OFF)
+        end
       end
     end
     if low_n > 0 then
-      out[#out + 1] = { fmt('MODS UNDER %g MS', budget), { ms(low), share(low), fmt('%.1f', low_worst) }, 6 }
+      k = k + 1
+      put(out, k, fmt('MODS UNDER %g MS', budget), 6, fmt('%.2f', low), fmt('%.1f%%', frame_ms > 0 and low / frame_ms * 100 or 0),
+        fmt('%.1f', low_worst))
     end
-    out[#out + 1] = { 'LOADER', { ms(loader), share(loader) }, 4 }
-    out[#out + 1] = { 'THIS MONITOR', { ms(self), share(self) }, 6 }
+    put(out, k + 1, 'LOADER', 4, fmt('%.2f', loader), fmt('%.1f%%', frame_ms > 0 and loader / frame_ms * 100 or 0))
+    put(out, k + 2, 'THIS MONITOR', 6, fmt('%.2f', self), fmt('%.1f%%', frame_ms > 0 and self / frame_ms * 100 or 0))
+    for i = #out, k + 3, -1 do out[i] = nil end
     return out
   end
   -- The panel, laid out once a second (when its numbers change) into a list of rects with a color index each; every
@@ -2008,6 +2112,17 @@ function M.install(ctx, L)
   -- over anything of mine, so the player picks a spot it leaves free
   -- the row's choices (Adjustable first) as my place numbers
   local PM_PLACE = { 8, 1, 2, 3, 4, 5, 6, 7 }
+  -- the layout's helpers, made once: a text put in the layout's next slot, a text's width at px, and the widest
+  -- number each column takes
+  function pm.txt(out, x, y, s, ci)
+    local n = out.n + 1
+    out.n = n
+    local e = out.texts[n]
+    if not e then e = {}; out.texts[n] = e end
+    e[1], e[2], e[3], e[4] = x, y, s, ci
+  end
+  function pm.width(t, px) return ctx.text_width and ctx.text_width(t, px) or #t * 6 * px - px end
+  pm.SAMPLES = { '00.00', '100.0%', '0000.0' }
   local function pm_layout(ls, w, h, place, fx, fy)
     local px = max(2, floor(h / 540 + 0.5))
     local rh, cols = 10 * px, 38
@@ -2026,20 +2141,29 @@ function M.install(ctx, L)
       y1 = (place <= 2 and floor(h * 0.96)) or (place <= 4 and floor((h + ph) / 2)) or (ph + floor(h * 0.04))
     end
     local b = max(1, floor(px * 0.75))
-    local out = { px = px, x0 = x0, y1 = y1, pw = pw, ph = ph, bar = rh + 2 * px, rects = {
-      { x0, y1 - ph, pw, ph, 7 },                                                   -- panel
-      { x0, y1 - ph, pw, b, 8 }, { x0, y1 - ph, b, ph, 8 }, { x0 + pw - b, y1 - ph, b, ph, 8 },   -- frame
-      { x0, y1 - 2 * px, pw, 2 * px, 1 },                                           -- the yellow bar on top
-    }, texts = {} }
-    local function txt(x, y, s, ci) out.texts[#out.texts + 1] = { x, y, s, ci } end
+    -- (one layout table, pm.lay, laid out again in place: its 5 rects and its texts, { x, y, text, color index },
+    -- each kept for the next layout; the texts past this layout's last are dropped)
+    local out = pm.lay
+    if not out then
+      out = { rects = { {}, {}, {}, {}, {} }, texts = {} }
+      pm.lay = out
+    end
+    out.px, out.x0, out.y1, out.pw, out.ph, out.bar, out.n = px, x0, y1, pw, ph, rh + 2 * px, 0
+    local R = out.rects
+    R[1][1], R[1][2], R[1][3], R[1][4], R[1][5] = x0, y1 - ph, pw, ph, 7                -- panel
+    R[2][1], R[2][2], R[2][3], R[2][4], R[2][5] = x0, y1 - ph, pw, b, 8                 -- frame
+    R[3][1], R[3][2], R[3][3], R[3][4], R[3][5] = x0, y1 - ph, b, ph, 8
+    R[4][1], R[4][2], R[4][3], R[4][4], R[4][5] = x0 + pw - b, y1 - ph, b, ph, 8
+    R[5][1], R[5][2], R[5][3], R[5][4], R[5][5] = x0, y1 - 2 * px, pw, 2 * px, 1        -- the yellow bar on top
+    local txt, width = pm.txt, pm.width
     local tx = 5 * px
-    txt(x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
+    txt(out, x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
     local y = y1 - 2 * rh - px
-    local function width(t) return ctx.text_width and ctx.text_width(t, px) or #t * 6 * px - px end
     -- three columns from the right edge, each as wide as its header or its widest number (measured), with a gap
     local gap = 5 * px
-    local right, cw = {}, {}
-    for c, sample in ipairs({ '00.00', '100.0%', '0000.0' }) do cw[c] = max(width(ls[1][2][c]), width(sample)) end
+    local right, cw = pm.right or {}, pm.cw or {}
+    pm.right, pm.cw = right, cw
+    for c = 1, 3 do cw[c] = max(width(ls[1][2][c], px), width(pm.SAMPLES[c], px)) end
     right[3] = x0 + pw - tx
     right[2] = right[3] - cw[3] - gap
     right[1] = right[2] - cw[2] - gap
@@ -2048,12 +2172,14 @@ function M.install(ctx, L)
       local cells = l[2]
       -- the name cut (measured) to the room left of the first column; the frame line may run over it (header row)
       local room = l[3] == 2 and (right[1] - cw[1] - (x0 + tx)) or name_room
-      txt(x0 + tx, y + px, ctx.text_fit and ctx.text_fit(l[1], px, room) or l[1]:sub(1, max(0, floor((room + px) / (6 * px)))), l[3])
+      txt(out, x0 + tx, y + px, ctx.text_fit and ctx.text_fit(l[1], px, room) or l[1]:sub(1, max(0, floor((room + px) / (6 * px)))), l[3])
       for c, t in ipairs(cells) do
-        if t ~= '' then txt(right[c] - width(t), y + px, t, l[3] == 2 and 6 or l[3]) end
+        if t ~= '' then txt(out, right[c] - width(t, px), y + px, t, l[3] == 2 and 6 or l[3]) end
       end
       y = y - rh
     end
+    local T = out.texts
+    for i = #T, out.n + 1, -1 do T[i] = nil end
     return out
   end
   -- The pause screen is the one time the game shows its own mouse cursor (Window.show_cursor: its map, the chat and
@@ -2143,9 +2269,9 @@ function M.install(ctx, L)
     -- "Monitor on pause screen only" (util.perf_pause: 1 Off, 2 Missions, 3 Always): drawn only while the game shows
     -- its cursor (the numbers are still added up, so they're there the moment it opens), in a mission or everywhere;
     -- Missions leaves the ship as always. No answer from the game: drawn all the time, said once. The game is asked
-    -- only when its answer is used (that row on, or the Adjustable position): every frame while I'm drawn (I'm gone
-    -- the frame its cursor goes, and a drag follows it), every 0.25 s while I wait hidden for the pause screen
-    -- (pm.cur_at: when to ask again, nil while I'm drawn).
+    -- only when its answer is used (that row on, or the Adjustable position): every frame while its cursor shows or a
+    -- drag is on (I'm gone the frame its cursor goes, and a drag follows it), else every 0.25 s, hidden waiting for the
+    -- pause screen or drawn Adjustable without it (pm.cur_at: when to ask again, nil to ask the next frame).
     local place = PM_PLACE[util.perf_place and tonumber(util.perf_place.value) or 2] or 1
     local pp = util.perf_pause and tonumber(util.perf_pause.value) or 1
     local pause_only = pp == 3 or (pp == 2 and world.mission == true)
@@ -2167,7 +2293,11 @@ function M.install(ctx, L)
         return
       end
     end
-    pm.cur_at = nil
+    if (pause_only or place == 8) and cursor ~= true and not pm.drag then
+      if not pm.cur_at then pm.cur_at = now + 0.25 end
+    else
+      pm.cur_at = nil
+    end
     local w, h = ctx.screen()
     if pm.fx == nil and util.perf_get then          -- (the dragged spot, read once)
       pm.fx, pm.fy = tonumber(util.perf_get('perf_x')), tonumber(util.perf_get('perf_y'))

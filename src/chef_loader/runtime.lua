@@ -4,8 +4,8 @@
 --   * mod(spec) -> a handle { id, engine, raw, on, log, state, switch_off, missing, request }; spec: id (letters,
 --     digits, _ . -), api (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources),
 --     needs (engine calls and grants it can't do without: what of them I lack is logged, shown and in handle.missing())
---   * handle.request('lobby' | 'files' | 'patches', why): mine; asks for a grant before the work that needs it
---     ('granted', or nil, why: not on my list)
+--   * handle.request('lobby', why): mine; asks for the lobby before the work that needs it ('granted', or nil, why:
+--     not on my list)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
 --     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
 --     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
@@ -14,21 +14,12 @@
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
 --     a world that's gone, or a runtime-built one, is refused), and a refused call returns nil and why
---   * live palette materials, as that runtime has them: Material.private_aliases (declared private ids and slots),
---     Material.set_private_texture, Material.reinitialize_shader and Mesh.refresh_instance_hash on a declared material
---     of a copy the mod spawned in this frame, and Unit.paint_private_cape / restore_private_cape (the game's medium
---     cape, bound by its slot, put back by it without a read); each only where the engine has what it calls
---   * what a mod made is undone when it stops: the game's capes it painted put back (first), its units destroyed, its
---     GUIs destroyed, units it hid shown, materials it swapped on units it didn't make put back, mouse dead zones it
---     changed put back
+--   * what a mod made is undone when it stops: its units destroyed, its GUIs destroyed, units it hid shown, materials
+--     it swapped on units it didn't make put back, mouse dead zones it changed put back
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
--- _G; never a name the game already has. A trusted mod's globals stay its own, but its TRUSTED entry may name one
--- (view) the others get as a read-only view: only the calls listed, plain arguments in, copies of plain values out.
--- A view whose calls take data (takes) is an inbox: every mod has it, and a call hands the trusted mod one plain table,
--- copied; one made before the trusted mod set its global is held and made once it has.
--- Of the others' globals, a trusted mod takes only the ones its entry accepts, each from the one mod named.
+-- _G; never a name the game already has. A trusted mod's globals stay its own, and it takes none of the others'.
 -- Plain Lua 5.1.
 
 local M = { version = '1.1.0', runtime_version = '0.1.0' }
@@ -56,7 +47,9 @@ local function int(v, lo, hi) return type(v) == 'number' and v == floor(v) and v
 local function finite(v, limit) return type(v) == 'number' and v == v and abs(v) <= limit end
 local function hex16(s) return type(s) == 'string' and #s == 16 and s:match('^%x+$') ~= nil end
 local EVENTS = { update = true, render = true, shutdown = true, stop = true }
--- what a mod may ask for (spec.needs, handle.request), as the log names it
+-- what a mod may ask for (spec.needs, handle.request), as the log names it. Only the lobby is ever given: files and
+-- patches (that runtime's own files and game patch files) are names a mod may still list, so it hears they're missing
+-- and starts, but no mod gets them
 local GRANTS = { lobby = 'the Steam lobby', files = 'its own files', patches = 'game patch files' }
 -- the fonts a GUI's text may use: the ones the game makes a material for itself (another name ends the game), each
 -- with that material; a locale's own UI font by its 16-hex id
@@ -66,23 +59,11 @@ local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
 local GUIS_PER_MOD, PRIMITIVES, SETS_PER_SECOND = 6, 12000, 10
 -- the resource types Application.can_get answers for (another string goes to the engine as a type name)
 local CAN_GET = { unit = true, material = true, texture = true, font = true, runtime_font = true, package = true }
--- the private palette ids and the native cape's resources: lower-case 16 hex, as HD2Runtime takes them
-local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
--- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
--- slot, the material the game gives it and how many mesh positions carry that slot (build 26088801: the medium cape,
--- and the shock-trooper cape that FS-05, B-27 and other armors bring), and the texture variables a paint sets, every
--- one of them each time
-local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 },
-                ['ea846ef460cc5ba0'] = { slot = '3d35eb9e', source = '38bd5d2916d3ab44', positions = 3 } }
-local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
-local CAPE_FIELD = {}
-for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
 
 -- ctx: log(line), mod_log(owner, text), guarded(owner, key, fn, ...), fn_of(name), G (the game's globals),
 -- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
 -- trusted(owner) -> its TRUSTED entry or nil, attach(owner, hooks) (the hooks the loader calls with the mod's own),
--- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list),
--- access(owner) -> its patches grant { scratch, marker } or nil
+-- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list)
 function M.install(ctx)
   local rt = {}
   local log, guarded, fn_of, util = ctx.log, ctx.guarded, ctx.fn_of, ctx.util
@@ -91,22 +72,6 @@ function M.install(ctx)
   local orphan = {}                                   -- name -> { by, v }: a stopped mod's shared value, until set again
   local shared, shared_by = {}, {}                    -- capitalized globals runtime mods set, shared between them; who
   local G = ctx.G or {}
-  -- a trusted mod's read-only view: global name -> { by, real, spec, on }; view.made: the views handed out (weak)
-  local view = { by_name = {}, made = setmetatable({}, { __mode = 'k' }), LIMIT = 4000, DEPTH = 8,
-                  reserved = ctx.reserved or {} }   -- view name -> its trusted mod (no one else shares under it)
-  -- what a view's takes calls hand in: 16,000 values a call (room for a large table of data), 64 calls per mod
-  -- and call, and 128 calls held for a trusted mod that hasn't set its global or call yet: name -> list, false once it
-  -- has
-  view.TAKE, view.TAKES, view.HELD, view.pending, view.took, view.told = 16000, 64, 128, {}, {}, {}
-  -- and 16 of the held ones a mod and call (so one mod can't fill the queue for the others): held_by, reader|call ->
-  -- how many it has held; held_n, how many are held in all
-  view.HELD_EACH, view.held_by, view.held_n = 16, {}, 0
-  -- an inbox whose held calls can never be made: shut, name -> true (nothing more is held for it until the trusted mod
-  -- sets its global again), and waits, name -> how many of the trusted mod's updates its held calls have waited
-  -- through for their call (view.WAIT at most)
-  view.shut, view.waits, view.WAIT = {}, {}, 300
-  -- the engine values a view passes on as they are (others, file handles say, are left out)
-  view.PASS = { Unit = true, IdString64 = true, Vector3 = true, Quaternion = true }
 
   -- ---------------------------------------------------------------- calls
   -- a binding's first call for this mod goes through guarded (breadcrumbed, keyed by the mod); later ones straight to
@@ -119,21 +84,6 @@ function M.install(ctx)
     if not (t == nil and why == 'skipped') then rec.seen[name] = true end
     if type(t) ~= 'table' then return nil, why end
     return unpack(t, 1, t.n)
-  end
-  -- a call whose answers are checked (the palette calls): protected every time, every answer packed ({ n = ... });
-  -- its first call for this mod breadcrumbed through guarded, as once() does. -> the answers, or nil, why
-  local function checked(rec, name, ...)
-    local fn = fn_of(name)
-    if fn == nil then return nil, name .. ' is not in this game build' end
-    if rec.seen[name] then
-      local ok, t = pcall(packed, fn, ...)
-      if ok then return t end
-      return nil, tostring(t)
-    end
-    local t, why = guarded(rec.owner, name, packed, fn, ...)
-    if not (t == nil and why == 'skipped') then rec.seen[name] = true end
-    if type(t) ~= 'table' then return nil, why end
-    return t
   end
   -- a refusal: nil, why; the first of each kind (binding and why, 30 a mod at most) goes to the log
   local function refuse(rec, binding, why)
@@ -183,19 +133,25 @@ function M.install(ctx)
   -- a unit this mod may query: a Unit not known gone (the loader's stamps: one from an engine world before this one
   -- is never touched), alive. A unit isn't refused only because the world hasn't settled yet: those mods ask from
   -- their first frame, as their own runtime lets them.
-  -- (Unit.alive itself is asked every time: a unit can be destroyed mid-frame. What a userdata is never changes, so
-  -- its kind, which costs a tostring, is worked out once a frame.)
+  -- (Unit.alive itself is asked every time: a unit can be destroyed mid-frame. memo.unit[u]: true for a Unit stamped
+  -- this frame (its kind costs a tostring, and what a userdata is never changes), false for anything else; the stamp
+  -- is made on the frame's first look only, as the engine world can't change before the next frame. gone is still
+  -- checked on every call, ahead of the memo.)
   local function alive(rec, u)
     if type(u) ~= 'userdata' or util.gone(u) then return false end   -- (before kind(): its tostring asks the engine)
     memo_frame()
     local k = memo.unit[u]
-    if k == nil then k = kind(u) == 'Unit'; memo.unit[u] = k end
-    if not k or util.unit_refused(rec.owner, 'Unit.alive', u) then return false end
+    if k == nil then
+      k = kind(u) == 'Unit' and not util.unit_refused(rec.owner, 'Unit.alive', u)
+      memo.unit[u] = k
+    end
+    if not k then return false end
     return once(rec, 'Unit.alive', u) == true
   end
+  -- (a unit alive() just passed is stamped and not gone: unit_refused is told so, and only checks the call itself)
   local function unit_ask(rec, name, u)
     if not alive(rec, u) then return 'not a live unit' end
-    return util.unit_refused(rec.owner, name, u)
+    return util.unit_refused(rec.owner, name, u, true)
   end
   -- the engine's value tables (IdString64, Vector3, Quaternion, Matrix4x4) as the mod gets them: each call goes through
   -- once(), and one with a nil among its arguments (the answer to a refused call, say) is refused instead of reaching
@@ -255,183 +211,13 @@ function M.install(ctx)
   local meshes = setmetatable({}, { __mode = 'k' })
   local materials = setmetatable({}, { __mode = 'k' })
   local versions = setmetatable({}, { __mode = 'k' })   -- unit -> how many times its materials were swapped
-  -- the frame a mod spawned each of its units in: the palette writes are for a copy in that frame only
-  local spawned = setmetatable({}, { __mode = 'k' })
-  -- the game's capes a mod painted with its private material (Unit.paint_private_cape): unit -> the mod that has it
-  -- painted, and unit -> its seed (slot, source and positions, as hex and numbers). A cape with a seed is never read
-  -- again outside a fresh paint: its meshes are a private instance's then, and reading those back is what faulted
-  local cape_owners = setmetatable({}, { __mode = 'k' })
-  local cape_seeds = setmetatable({}, { __mode = 'k' })
   local function mesh_ok(rec, m)
     local e = meshes[m]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit)
   end
   local function material_ok(rec, mat)
     local e = materials[mat]
-    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and not cape_seeds[e.unit]
-      and e.version == (versions[e.unit] or 0)
-  end
-
-  -- ---------------------------------------------------------------- the game's cape, painted live
-  -- (HD2Runtime's live cape paint, ported to my bookkeeping.) One mod's paints of the game's own capes (the ones in
-  -- CAPES: the medium cape and the shock-trooper cape) with their private material: the binding is replaced by the
-  -- cape's stable slot before any mesh or material is read (so what's read is the private instance, never the game's
-  -- shared one), and put back by that slot without reading the painted meshes. No engine value outlives a call: a record keeps hex strings and numbers.
-  local function cape_for(rec)
-    local self, records = {}, setmetatable({}, { __mode = 'k' })
-    -- inside a paint: an engine call that fails, or a read with no answer, raises (and the paint puts the cape back)
-    local function call(name, ...)
-      local r, why = checked(rec, name, ...)
-      if not r then error(tostring(why), 0) end
-      return r
-    end
-    local function get(name, ...)
-      local v = call(name, ...)[1]
-      if v == nil then error(name .. ' gave no answer', 0) end
-      return v
-    end
-    -- a write, with the answers it was seen to give: a binding the material it replaced, a mesh refresh the mesh,
-    -- the setters nothing
-    local function write(name, ...)
-      local r = call(name, ...)
-      if name == 'Unit.set_material' then
-        if not (r.n == 1 and kind(r[1]) == 'IdString64') then error('unexpected material binding return', 0) end
-        return get('IdString64.to_hex', r[1])
-      elseif name == 'Mesh.refresh_instance_hash' then
-        if not (r.n == 1 and kind(r[1]) == 'MeshObject') then error('unexpected mesh refresh return', 0) end
-      elseif r.n ~= 0 then error('unexpected private cape setter return', 0) end
-    end
-    local function loaded(what, hex) return hex16_lower(hex) and resource(rec, what, hex) ~= nil end
-    -- (the material handles anyone holds of this cape are stale from now on)
-    local function bind(u, r, id)
-      versions[u] = (versions[u] or 0) + 1
-      return write('Unit.set_material', u, get('IdString32.from_hex', r.slot), get('IdString64.from_hex', id))
-    end
-    local function snapshot(u, spec)
-      local positions = {}
-      for i = 1, get('Unit.num_meshes', u) do
-        local mesh = get('Unit.mesh', u, i)
-        for j = 1, get('Mesh.num_materials', mesh) do
-          if get('IdString32.to_hex', get('Mesh.material_slot_id', mesh, j)) == spec.slot then
-            if get('IdString64.to_hex', get('Material.id64', get('Mesh.material', mesh, j))) ~= spec.source then
-              error('cape source was replaced by another mod', 0)
-            end
-            positions[#positions + 1] = { i, j }
-          end
-        end
-      end
-      if #positions ~= spec.positions then error('cape material layout changed', 0) end
-      return { slot = spec.slot, source = spec.source, positions = positions }
-    end
-    -- a cape is this mod's to paint: the game's (not one the mod spawned), in a live world, not another mod's painted
-    -- one, and one my unit rules let a mod read
-    local function allowed(u)
-      if rec.owned[u] or (cape_owners[u] and cape_owners[u] ~= rec) or unit_ask(rec, 'Unit.mesh', u) then return false end
-      return listed(once(rec, 'Unit.world', u))
-    end
-    local function restored(u)
-      cape_seeds[u] = self.seed(u)
-      if cape_owners[u] == rec then cape_owners[u] = nil end
-    end
-    function self.restore(u)
-      local r = records[u]
-      if not r then return true end
-      if not r.active then restored(u); return true end
-      if alive(rec, u) then
-        local ok, why = pcall(bind, u, r, r.source)
-        if not ok then return nil, tostring(why) end
-      end
-      r.active = false
-      restored(u)
-      return true
-    end
-    function self.apply(u, alias, fields)
-      if not alive(rec, u) or not allowed(u) then return nil, 'Cape unit is unavailable' end
-      local name = once(rec, 'Unit.resource_name', u)
-      local spec = name ~= nil and CAPES[once(rec, 'IdString64.to_hex', name) or ''] or nil
-      if not spec then return nil, 'This cape geometry has no live-paint contract' end
-      local declared = rec.palette_aliases and rec.palette_aliases[alias]
-      if not declared or not loaded('material', alias) or alias == spec.source then return nil, 'Private cape material is unavailable' end
-      if type(fields) ~= 'table' then return nil, 'Invalid cape texture tuple' end
-      local wanted = {}
-      for field, value in pairs(fields) do
-        if not CAPE_FIELD[field] or not declared[field] then return nil, 'Undeclared cape texture slot' end
-        if not loaded('texture', value) then return nil, 'Cape texture is not loaded' end
-        wanted[field] = value
-      end
-      for _, field in ipairs(CAPE_FIELDS) do if not wanted[field] then return nil, 'Incomplete cape texture tuple' end end
-      local r = records[u]
-      if not r then
-        -- (a cape another mod painted before: its seed, so the painted meshes aren't read again)
-        local prior = cape_seeds[u]
-        if prior then
-          if prior.slot ~= spec.slot or prior.source ~= spec.source or #prior.positions ~= spec.positions then
-            return nil, 'Stored cape layout does not match this geometry'
-          end
-          r = { slot = prior.slot, source = prior.source, positions = {} }
-          for i, p in ipairs(prior.positions) do r.positions[i] = { p[1], p[2] } end
-        else
-          local ok, result = pcall(snapshot, u, spec)
-          if not ok then return nil, tostring(result) end
-          r = result
-        end
-        records[u] = r
-      end
-      local function transaction()
-        -- (the private instance painted before is retired without being read, the same alias again too)
-        if r.active then bind(u, r, r.source); r.active = false end
-        r.active = true
-        bind(u, r, alias)
-        local function material(pos)
-          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
-          local mesh = get('Unit.mesh', u, pos[1])
-          if pos[2] > get('Mesh.num_materials', mesh) then error('cape slot count changed', 0) end
-          local mat = get('Mesh.material', mesh, pos[2])
-          if get('IdString64.to_hex', get('Material.id64', mat)) ~= alias then error('private cape binding changed', 0) end
-          return mat
-        end
-        for _, pos in ipairs(r.positions) do
-          for _, field in ipairs(CAPE_FIELDS) do
-            write('Material.set_texture', material(pos), field, get('IdString64.from_hex', wanted[field]))
-          end
-        end
-        for _, pos in ipairs(r.positions) do write('Material.reinitialize_shader', material(pos)) end
-        for _, pos in ipairs(r.positions) do
-          if pos[1] > get('Unit.num_meshes', u) then error('cape mesh count changed', 0) end
-          write('Mesh.refresh_instance_hash', get('Unit.mesh', u, pos[1]))
-        end
-      end
-      local ok, why = pcall(transaction)
-      if not ok then
-        local reset, problem = self.restore(u)
-        return nil, tostring(why) .. (not reset and '; restore failed: ' .. tostring(problem) or '')
-      end
-      return true
-    end
-    function self.active(u) return records[u] ~= nil and records[u].active == true end
-    function self.known(u) return records[u] ~= nil end
-    function self.seed(u)
-      local r = records[u]
-      if not r then return nil end
-      local s = { slot = r.slot, source = r.source, positions = {} }
-      for i, p in ipairs(r.positions) do s.positions[i] = { p[1], p[2] } end
-      return s
-    end
-    -- every cape this mod painted put back (when it stops, before its units go)
-    function self.release()
-      local errors = {}
-      for u in pairs(records) do
-        local ok, why = self.restore(u)
-        if not ok then errors[#errors + 1] = why end
-      end
-      if #errors > 0 then return nil, concat(errors, '; ') end
-      return true
-    end
-    -- a new world: the capes of the one that's gone are let go untouched
-    function self.drop_gone()
-      for u in pairs(records) do if util.gone(u) then records[u] = nil end end
-    end
-    return self
+    return e ~= nil and e.frame == ctx.frame() and alive(rec, e.unit) and e.version == (versions[e.unit] or 0)
   end
 
   -- ---------------------------------------------------------------- the engine table one mod gets
@@ -479,7 +265,6 @@ function M.install(ctx)
     function N.Unit.mesh(u, i)
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, 'Unit.mesh', why) end
-      if cape_seeds[u] then return refuse(rec, 'Unit.mesh', 'native cape reads require a fresh private transaction') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, 'Unit.mesh', 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m ~= nil then
@@ -527,7 +312,6 @@ function M.install(ctx)
       local b = 'Unit.set_material_at'
       local why = unit_ask(rec, 'Unit.mesh', u)
       if why then return refuse(rec, b, why) end
-      if cape_seeds[u] then return refuse(rec, b, 'use the native cape transaction or restoration') end
       if not int(i, 1, once(rec, 'Unit.num_meshes', u) or 0) then return refuse(rec, b, 'no such mesh') end
       local m = once(rec, 'Unit.mesh', u, i)
       if m == nil or not int(j, 1, once(rec, 'Mesh.num_materials', m) or 0) then return refuse(rec, b, 'no such material position') end
@@ -613,109 +397,6 @@ function M.install(ctx)
       return true
     end
 
-    -- Live palette materials (HD2Runtime's checks for them, ported): a mod declares its private material ids and
-    -- their texture slots, then, in the frame it spawned a copy, writes those slots on the copy's private material,
-    -- reinitializes its shader and refreshes its mesh's instance hash. That recipe was seen to work only so; anything
-    -- else (a material another unit shares, the game's own, a copy from an earlier frame, an undeclared slot) is
-    -- refused before it reaches the engine. A declaration writes nothing.
-    -- list: { { id = 16 lower-case hex, slots = { texture variable names } }, ... }; replaces the mod's last one
-    function N.Material.private_aliases(list)
-      local b = 'Material.private_aliases'
-      if type(list) ~= 'table' then return refuse(rec, b, 'expected a private ID list') end
-      local set = {}
-      for _, entry in ipairs(list) do
-        if type(entry) ~= 'table' or not hex16_lower(entry.id) or type(entry.slots) ~= 'table' then
-          return refuse(rec, b, 'invalid private material declaration')
-        end
-        local slots = {}
-        for _, name in ipairs(entry.slots) do
-          if type(name) ~= 'string' or #name > 64 or not name:match('^[%w_]+$') then return refuse(rec, b, 'invalid texture slot name') end
-          slots[name] = true
-        end
-        set[entry.id] = slots
-      end
-      rec.palette_aliases = set
-      return true
-    end
-    -- the declared slots of a material, if it's one of the mod's private ones
-    local function private_of(mat)
-      local id = once(rec, 'Material.id64', mat)
-      local hex = id ~= nil and once(rec, 'IdString64.to_hex', id) or nil
-      return type(hex) == 'string' and rec.palette_aliases ~= nil and rec.palette_aliases[hex] or nil
-    end
-    -- an owned copy's material or mesh handle from this frame, the copy spawned in this frame
-    local function spawn_frame(e) return owned[e.unit] and spawned[e.unit] == ctx.frame() end
-    if type(fn_of('Material.set_texture')) == 'function' then
-      function N.Material.set_private_texture(mat, variable, texture)
-        local b = 'Material.set_private_texture'
-        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
-          return refuse(rec, b, 'not a registered owned spawn-frame material')
-        end
-        if type(variable) ~= 'string' then return refuse(rec, b, 'variable name is not a string') end
-        if not private_of(mat)[variable] then return refuse(rec, b, 'texture slot was not declared') end
-        local res = resource(rec, 'texture', texture)
-        if not res then return refuse(rec, b, 'texture is not loaded') end
-        local r, why = checked(rec, 'Material.set_texture', mat, variable, res)
-        if not r then return refuse(rec, b, tostring(why)) end
-        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
-        return true
-      end
-    end
-    if type(fn_of('Material.reinitialize_shader')) == 'function' then
-      function N.Material.reinitialize_shader(mat)
-        local b = 'Material.reinitialize_shader'
-        if not material_ok(rec, mat) or not spawn_frame(materials[mat]) or not private_of(mat) then
-          return refuse(rec, b, 'not an owned spawn-frame material')
-        end
-        local r, why = checked(rec, b, mat)
-        if not r then return refuse(rec, b, tostring(why)) end
-        if r.n ~= 0 then return refuse(rec, b, 'unobserved return shape') end
-        return true
-      end
-    end
-    if type(fn_of('Mesh.refresh_instance_hash')) == 'function' then
-      function N.Mesh.refresh_instance_hash(mesh)
-        local b = 'Mesh.refresh_instance_hash'
-        if not mesh_ok(rec, mesh) or not spawn_frame(meshes[mesh]) then return refuse(rec, b, 'not an owned spawn-frame mesh') end
-        local private, n = false, once(rec, 'Mesh.num_materials', mesh)
-        for i = 1, type(n) == 'number' and n or 0 do
-          local mat = once(rec, 'Mesh.material', mesh, i)
-          if mat ~= nil and private_of(mat) then private = true end
-        end
-        if not private then return refuse(rec, b, 'mesh has no registered private material') end
-        local r, why = checked(rec, b, mesh)
-        if not r then return refuse(rec, b, tostring(why)) end
-        if r.n ~= 1 or kind(r[1]) ~= 'MeshObject' then return refuse(rec, b, 'unobserved return shape') end
-        return true
-      end
-    end
-    -- one of the game's own capes (CAPES) painted with a declared private material (fields: texture variable ->
-    -- 16-hex texture, all five of CAPE_FIELDS), and put back; only where the engine has every call the paint makes
-    local function has(name) return type(fn_of(name)) == 'function' end
-    if has('IdString32.from_hex') and has('IdString32.to_hex') and has('Material.reinitialize_shader')
-      and has('Mesh.refresh_instance_hash') then
-      local cape = cape_for(rec)
-      rec.cape = cape
-      function N.Unit.paint_private_cape(u, alias, fields)
-        local ok, why = cape.apply(u, alias, fields)
-        if cape.known(u) then
-          cape_seeds[u] = cape.seed(u)
-          if cape.active(u) then cape_owners[u] = rec
-          elseif cape_owners[u] == rec then cape_owners[u] = nil end
-          -- (the cape is put back by its slot from now on, without a read: never by the rebound list, which reads it)
-          if rec.rebound then rec.rebound[u] = nil end
-        end
-        if not ok then return refuse(rec, 'Unit.paint_private_cape', why) end
-        return true
-      end
-      function N.Unit.restore_private_cape(u)
-        if cape_owners[u] and cape_owners[u] ~= rec then return refuse(rec, 'Unit.restore_private_cape', 'cape belongs to another mod') end
-        local ok, why = cape.restore(u)
-        if not ok then return refuse(rec, 'Unit.restore_private_cape', why) end
-        return true
-      end
-    end
-
     -- World
     for _, name in ipairs({ 'units', 'num_units' }) do
       local b = 'World.' .. name
@@ -744,7 +425,7 @@ function M.install(ctx)
       if rotation ~= nil then u = once(rec, b, w, res, position, rotation)
       elseif position ~= nil then u = once(rec, b, w, res, position)
       else u = once(rec, b, w, res) end
-      if kind(u) == 'Unit' then owned[u] = w; spawned[u] = ctx.frame(); util.fresh(u) end
+      if kind(u) == 'Unit' then owned[u] = w; util.fresh(u) end
       return u
     end
     local function own_in(w, u)
@@ -954,24 +635,29 @@ function M.install(ctx)
       return x0, y0, x1, y1, adv
     end
 
-    -- the game window: read only (its handle is never handed out)
-    function N.Window.ui_state()
-      local w = once(rec, 'Window.get_main_window')
-      if kind(w) ~= 'Window' then return refuse(rec, 'Window.ui_state', 'no main window') end
-      local out = {}
-      for _, name in ipairs({ 'has_focus', 'show_cursor', 'mouse_focus' }) do
-        local v = once(rec, 'Window.' .. name, w)
-        if type(v) ~= 'boolean' then return refuse(rec, 'Window.ui_state', 'unexpected answer') end
-        out[name] = v
+    -- the game window: read only (its handle is never handed out); its answers' names and calls listed once per mod
+    do
+      local names, calls = { 'has_focus', 'show_cursor', 'mouse_focus' }, {}
+      for i, name in ipairs(names) do calls[i] = 'Window.' .. name end
+      function N.Window.ui_state()
+        local w = once(rec, 'Window.get_main_window')
+        if kind(w) ~= 'Window' then return refuse(rec, 'Window.ui_state', 'no main window') end
+        local out = {}
+        for i = 1, 3 do
+          local v = once(rec, calls[i], w)
+          if type(v) ~= 'boolean' then return refuse(rec, 'Window.ui_state', 'unexpected answer') end
+          out[names[i]] = v
+        end
+        return out
       end
-      return out
     end
     -- the mouse: device counts checked before an index is used; a vector copied out (the engine's lives for a frame)
     for _, e in ipairs({ { 'num_axes', 64 }, { 'num_buttons', 512 } }) do
       local name, most = e[1], e[2]
+      local b = 'Mouse.' .. name
       N.Mouse[name] = function()
-        local c = once(rec, 'Mouse.' .. name)
-        if not int(c, 0, most) then return refuse(rec, 'Mouse.' .. name, 'unexpected answer') end
+        local c = once(rec, b)
+        if not int(c, 0, most) then return refuse(rec, b, 'unexpected answer') end
         return c
       end
     end
@@ -1162,7 +848,8 @@ function M.install(ctx)
       return resource(rec, what, id) ~= nil
     end
     for _, name in ipairs({ 'main_world', 'build', 'build_identifier', 'platform', 'time_since_launch', 'resolution', 'argv' }) do
-      N.Application[name] = function() return once(rec, 'Application.' .. name) end
+      local b = 'Application.' .. name
+      N.Application[name] = function() return once(rec, b) end
     end
     -- the game closed as its own Quit does: for a player's own choice
     function N.Application.quit() once(rec, 'Application.quit'); return true end
@@ -1186,17 +873,10 @@ function M.install(ctx)
   local function release(rec)
     local o = rec.owner
     local function g(name, ...) return guarded(o, name, fn_of(name), ...) end
-    -- the game's capes it painted, put back by their slot first (before anything reads them or its units go)
-    if rec.cape then
-      local ok, done, why = pcall(rec.cape.release)
-      if not (ok and done) then log(fmt('[%s] %s: putting back the capes it painted failed: %s', o, rec.id, tostring(ok and why or done))) end
-    end
     for i, v in pairs(rec.dead_zones or {}) do g('Mouse.set_dead_zone', i, v[1], v[2]) end
     rec.dead_zones = nil
-    -- (never a cape some mod has painted: its meshes are a private instance's, and reading those back is what faulted;
-    -- the cape is put back by its slot by the mod that painted it)
     for u, list in pairs(rec.rebound or {}) do
-      if type(u) == 'userdata' and not util.gone(u) and not cape_seeds[u] and kind(u) == 'Unit' and g('Unit.alive', u) == true then
+      if type(u) == 'userdata' and not util.gone(u) and kind(u) == 'Unit' and g('Unit.alive', u) == true then
         for key, previous in pairs(list) do
           local i, j = key:match('^(%d+):(%d+)$')
           i, j = tonumber(i), tonumber(j)
@@ -1233,10 +913,6 @@ function M.install(ctx)
     if rec.state ~= 'active' then return true end
     rec.state = 'off: ' .. why
     for ev in pairs(EVENTS) do rec.callbacks[ev] = {} end
-    -- (its view, if it has one, answers "not running" once none of its mods is active)
-    local any = false
-    for _, r in ipairs(owners[rec.owner] and owners[rec.owner].order or {}) do if r.state == 'active' then any = true end end
-    if not any then for _, vw in pairs(view.by_name) do if vw.by == rec.owner then vw.on = false end end end
     local ok, d, s = pcall(release, rec)
     log(fmt('[%s] %s switched off: %s (%s)', rec.owner, rec.id, why,
       ok and fmt('destroyed %d, shown %d', d or 0, s or 0) or ('undoing failed: ' .. tostring(d))))
@@ -1244,28 +920,6 @@ function M.install(ctx)
   end
   -- the loader stopped this mod (errors, a failed start, dev reload): everything it made is undone
   function rt.forget(owner)
-    -- (what it handed to an inbox and is still held: I drop it, never making a call for a mod that stopped; the lists
-    -- stay, so mods that start later still get the inbox)
-    for k, held in pairs(view.pending) do
-      if type(held) == 'table' then
-        local keep = {}
-        for _, h in ipairs(held) do if h.reader == owner then view.unheld(h) else keep[#keep + 1] = h end end
-        if #keep < #held then
-          view.pending[k] = keep
-          log(fmt('%s: %d held call(s) dropped: %s stopped', k, #held - #keep, owner))
-        end
-      end
-    end
-    -- (a trusted mod's inboxes: what's held for it goes; if it starts again, it's waited for afresh, and one it hadn't
-    -- set its global for is still handed to mods that start later)
-    for k, by in pairs(view.reserved) do
-      if by == owner then
-        local was = view.pending[k]
-        view.drop(k, owner .. ' stopped')
-        if type(was) == 'table' then view.pending[k] = {} end
-        view.shut[k] = nil
-      end
-    end
     local o = owners[owner]
     if not o then return end
     for _, rec in ipairs(o.order) do switch_off(rec, 'stopped by the loader') end
@@ -1275,10 +929,6 @@ function M.install(ctx)
     -- name its own, X = X or {})
     for k, by in pairs(shared_by) do
       if by == owner then orphan[k], shared[k], shared_by[k] = { by = owner, v = shared[k] }, nil, nil end
-    end
-    -- its read-only view answers "not running" from now on (the readers keep the table)
-    for k, vw in pairs(view.by_name) do
-      if vw.by == owner then vw.on, view.by_name[k] = false, nil end
     end
   end
   -- a new world: what belonged to a world that's gone is let go without being touched (any call on it ends the game)
@@ -1290,15 +940,11 @@ function M.install(ctx)
     for m in pairs(meshes) do meshes[m] = nil end
     for m in pairs(materials) do materials[m] = nil end
     for u in pairs(versions) do versions[u] = nil end
-    for u in pairs(spawned) do if util.gone(u) then spawned[u] = nil end end
-    for u in pairs(cape_seeds) do if util.gone(u) then cape_seeds[u] = nil end end
-    for u in pairs(cape_owners) do if util.gone(u) then cape_owners[u] = nil end end
     for _, o in pairs(owners) do
       for _, rec in ipairs(o.order) do
         for u, w in pairs(rec.owned) do if not listed(w) then rec.owned[u] = nil end end
         for u in pairs(rec.hidden) do if util.gone(u) then rec.hidden[u] = nil end end
         for u in pairs(rec.rebound or {}) do if util.gone(u) then rec.rebound[u] = nil end end
-        if rec.cape then rec.cape.drop_gone() end
         for gui, e in pairs(rec.guis) do
           if (ctx.instance and e.instance ~= ctx.instance()) or not listed(e.world) then rec.guis[gui] = nil end
         end
@@ -1308,11 +954,6 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
   local function dispatch(o, event, ...)
-    -- (a trusted mod that set its view's global with rawset, which I'm not told of: found before its first update)
-    local first_update = event == 'update' and not o.looked
-    if first_update then o.looked = true; view.look(o) end
-    -- (calls held for its inbox until it fills in their call: made as soon as it has; nothing to do once none is held)
-    if event == 'update' and view.held_n > 0 then view.tick(o) end
     local first
     for _, rec in ipairs(o.order) do
       if rec.state == 'active' then
@@ -1324,8 +965,6 @@ function M.install(ctx)
         end
       end
     end
-    -- (an inbox it still hasn't set its global for by the end of its first update: it never will)
-    if first_update then view.unset(o) end
     if first ~= nil then error(first, 0) end
   end
 
@@ -1338,14 +977,11 @@ function M.install(ctx)
     end
     return o
   end
-  -- what a mod has of a grant: 'granted' (its list entry gives it; for patches, the loader handed it the grant), or
-  -- nil (its entry doesn't give it, or it has none)
+  -- what a mod has of a grant: 'granted' (its list entry gives it), or nil (its entry doesn't give it, or it has none)
   local function grant_state(owner, what)
     local t = ctx.trusted(owner)
     if not t then return nil end
     if what == 'lobby' then return t.network and 'granted' or nil end
-    if what == 'files' then return t.files and 'granted' or nil end
-    if what == 'patches' then return t.patches and ctx.access and ctx.access(owner) and 'granted' or nil end
     return nil
   end
   local function new_mod(o, spec)
@@ -1363,9 +999,9 @@ function M.install(ctx)
       bones[h:lower()] = true
     end
     -- what the mod says it needs (spec.needs): engine calls by name ('Material.set_texture') and what my list may give
-    -- a trusted mod ('lobby', 'files', 'patches'). I check them here, once, so a mod made for a newer runtime or one
-    -- that isn't on my list hears what's missing (handle.missing) and the player sees it, instead of a mod that starts
-    -- and half works
+    -- a trusted mod ('lobby'; 'files' and 'patches' are never given). I check them here, once, so a mod made for a
+    -- newer runtime or one that isn't on my list hears what's missing (handle.missing) and the player sees it, instead
+    -- of a mod that starts and half works
     local needs = {}
     if spec.needs ~= nil then
       if type(spec.needs) ~= 'table' or #spec.needs > 64 then return nil, 'needs lists at most 64 names' end
@@ -1415,7 +1051,8 @@ function M.install(ctx)
       for i, n in ipairs(rec.missing) do out[i] = n end
       return out
     end
-    -- handle.request(what, why): ask for 'lobby', 'files' or 'patches' before doing the work that needs it.
+    -- handle.request(what, why): ask for 'lobby' before doing the work that needs it ('files' and 'patches' are
+    -- never given).
     -- -> 'granted' | nil, why (I don't give it to this mod; the log and a notice say so once, so the player knows what
     -- to report)
     function handle.request(what, why)
@@ -1425,8 +1062,10 @@ function M.install(ctx)
       if state then return state end
       if not rec.said['request ' .. what] then
         rec.said['request ' .. what] = true
-        log(fmt('[%s] %s asks for %s%s: I give that only to the mods on my list (TRUSTED); to ask for a place, open an issue on GitHub',
-          o.name, rec.name, GRANTS[what], type(why) == 'string' and ' (' .. why:sub(1, 200) .. ')' or ''))
+        log(fmt('[%s] %s asks for %s%s: %s', o.name, rec.name, GRANTS[what],
+          type(why) == 'string' and ' (' .. why:sub(1, 200) .. ')' or '', what == 'lobby'
+          and 'I give that only to the mods on my list (TRUSTED); to ask for a place, open an issue on GitHub'
+          or 'I give that to no mod (its own runtime\'s loader may)'))
         if ctx.notify then ctx.notify({ text = rec.name:upper():sub(1, 32) .. ' NEEDS ACCESS THIS LOADER DOESN\'T GIVE (SEE LOG)', dur = 20 }) end
       end
       return nil, 'not given to this mod'
@@ -1448,28 +1087,15 @@ function M.install(ctx)
     -- its environment shares the runtime mods' globals from now on
     if o.env and not envs[o.env] then
       envs[o.env] = o
-      -- (a trusted mod gets only the shared globals its TRUSTED entry accepts, each from the one mod it names, and the
-      -- other trusted mods' views like everyone: its environment otherwise holds only what it set itself)
-      local trusted = ctx.trusted(o.name)
-      -- the views already out, whichever started first (view.publish hands them to the mods already here)
-      for k, vw in pairs(view.by_name) do
-        if vw.on and vw.by ~= o.name and rawget(o.env, k) == nil then rawset(o.env, k, view.make(k, vw, o.name)) end
-      end
-      if not trusted then
+      -- (a trusted mod gets none of the shared globals, and what it sets stays its own: its environment holds only
+      -- what it set itself)
+      if not ctx.trusted(o.name) then
         for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
-      else
-        for k, v in pairs(shared) do
-          if view.accepts(trusted, k, shared_by[k]) then
-            if rawget(o.env, k) == nil then rawset(o.env, k, view.take(k, v, shared_by[k])) end
-          else
-            view.refused(trusted, k, shared_by[k], o.name)
-          end
-        end
+        -- and what it set before registering is shared now (a library mod defines its global, then calls mod())
+        local own = {}
+        for k, v in pairs(o.env) do own[k] = v end
+        for k, v in pairs(own) do if shared_by[k] == nil then rt.on_global(o.env, k, v) end end
       end
-      -- and what it set before registering is shared now (a library mod defines its global, then calls mod())
-      local own = {}
-      for k, v in pairs(o.env) do own[k] = v end
-      for k, v in pairs(own) do if shared_by[k] == nil or trusted then rt.on_global(o.env, k, v) end end
     end
     log(fmt('[%s] HD2 Lua Runtime look-alike: mod %s%s', o.name, rec.id, rec.lobby_key and ' (lobby key ' .. rec.lobby_key .. ')' or ''))
     if #rec.missing > 0 then
@@ -1512,375 +1138,28 @@ function M.install(ctx)
     rawset(env, 'HD2Runtime', pub)
     local pkg = rawget(env, 'package')
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
-    view.inboxes(env, owner)
     return true
   end
-  -- the view spec of global k in a TRUSTED entry (its view is one spec, or a list of them, each its own global)
-  function view.spec_of(t, k)
-    local v = type(t) == 'table' and t.view or nil
-    if type(v) ~= 'table' then return nil end
-    if v.global ~= nil then return v.global == k and v or nil end
-    for _, x in ipairs(v) do if type(x) == 'table' and x.global == k then return x end end
-    return nil
-  end
-  -- a view with takes calls is an inbox: every mod gets it from the start, runtime mod or not (a mod that only hands
-  -- in data needn't be a runtime mod), and before its trusted mod has set it, if that mod is installed, so a
-  -- mod that starts first doesn't have to wait for it; what it hands in then is held and handed over once it has
-  function view.inboxes(env, owner)
-    if ctx.trusted(owner) then return end                      -- (a trusted mod's environment: only its own globals)
-    for k, by in pairs(view.reserved) do
-      local spec = by ~= owner and view.spec_of(ctx.trusted(by), k)
-      if spec and type(spec.takes) == 'table' and rawget(env, k) == nil then
-        local vw = view.by_name[k]
-        if not (vw and vw.on) and view.pending[k] == nil and ctx.present and ctx.present(by) then view.pending[k] = {} end
-        if (vw and vw.on) or view.pending[k] then rawset(env, k, view.make(k, vw or { spec = spec }, owner)) end
-      end
-    end
-  end
-  function view.look(o)
-    if not o.env or not ctx.trusted(o.name) then return end
-    for k, by in pairs(view.reserved) do
-      if by == o.name and not view.by_name[k] then
-        local v = rawget(o.env, k)
-        if type(v) == 'table' then rt.on_global(o.env, k, v) end
-      end
-    end
-  end
-  -- a shared global a trusted mod takes: its TRUSTED entry's accepts names the global and the one mod it takes it from
-  -- (a library its own package carries, say)
-  function view.accepts(t, k, by)
-    return by ~= nil and type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k] == by
-  end
-  -- the trusted mod's copy of an accepted value: its top level copied when the named mod sets it (before any other
-  -- mod runs), so a change another mod makes to the shared table never reaches the trusted mod, nor the other way
-  -- round; one copy per name, mod and value set
-  view.taken, view.said = {}, {}
-  function view.take(k, v, by)
-    local key = k .. '|' .. tostring(by)
-    local t = view.taken[key]
-    if t and t.src == v then return t.v end
-    local c = v
-    if type(v) == 'table' then c = {}; for kk, x in next, v do c[kk] = x end end
-    view.taken[key] = { src = v, v = c }
-    return c
-  end
-  -- an accepted name another mod set first: the trusted mod goes without it (said once, so a missing feature of the
-  -- trusted mod has a line in the log)
-  function view.refused(t, k, by, name)
-    local want = type(t) == 'table' and type(t.accepts) == 'table' and t.accepts[k]
-    if not want or view.said[k] then return end
-    view.said[k] = true
-    log(fmt('[%s] %s is set by %s, not %s: not given to it', name, k, tostring(by), want))
-  end
-  -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet
-  -- A trusted mod's globals stay its own: what it sets could let another mod use what only it was given (its game
-  -- patch files, say).
-  -- ---------------------------------------------------------------- a trusted mod's read-only view
-  -- spec (its TRUSTED entry's view): global = the name, fields = { plain values, read when asked }, calls = { name =
-  -- true (every answer copied) or { keys } (the first answer's top-level keys kept, the rest left out) }.
-  -- Copies: tables are new tables of plain keys, functions and threads left out, engine handles (units) as they are,
-  -- 8 deep and 4,000 values a call at most; cycles cut. Nothing a reader gets leads back into the trusted mod.
-  function view.copy(v, keep, depth, budget, seen)
-    local t = type(v)
-    if t == 'function' or t == 'thread' then return nil end
-    if t == 'userdata' then                            -- (a handle from a gone world is never asked its kind:
-      if util.gone(v) then return nil end              -- its tostring asks the engine)
-      return view.PASS[kind(v)] and v or nil
-    end
-    if t ~= 'table' then return v end
-    if depth > view.DEPTH or seen[v] then return nil end
-    seen[v] = true
-    local out = {}
-    for k, x in next, v do                             -- (raw: a metatable on the answer never runs)
-      if budget.n <= 0 then break end
-      local tk = type(k)
-      if (tk == 'string' or tk == 'number' or tk == 'boolean') and (keep == nil or keep[k]) then
-        budget.n = budget.n - 1
-        local c = view.copy(x, nil, depth + 1, budget, seen)
-        if c ~= nil then out[k] = c end
-      end
-    end
-    seen[v] = nil
-    return out
-  end
-  -- arguments a reader may hand in: nil, booleans, numbers, strings up to 256 characters (no tables or functions that
-  -- the trusted mod's code would run or keep)
-  function view.plain(...)
-    local n = select('#', ...)
-    if n > 4 then return false end
-    for i = 1, n do
-      local a = (select(i, ...))
-      local t = type(a)
-      if not (a == nil or t == 'boolean' or (t == 'number' and a == a) or (t == 'string' and #a <= 256)) then return false end
-    end
-    return true
-  end
-  -- the one table a takes call hands in, copied all the way down before the trusted mod sees it, so nothing it gets
-  -- runs code or leads back into the caller: keys strings, numbers or booleans, values those (strings up to 256
-  -- characters, no NaN) or tables of them, 8 deep and view.TAKE values at most; a function, a userdata or a table
-  -- inside itself refuses the whole call. Read raw: a metatable on it never runs. -> the copy, or nil, why
-  function view.data(v)
-    local budget, seen = view.TAKE, {}
-    local function copy(t, depth)
-      if depth > view.DEPTH then error('more than ' .. view.DEPTH .. ' tables deep', 0) end
-      if seen[t] then error('a table inside itself', 0) end
-      seen[t] = true
-      local out = {}
-      for k, x in next, t do
-        budget = budget - 1
-        if budget < 0 then error('more than ' .. view.TAKE .. ' values', 0) end
-        local tk, tx = type(k), type(x)
-        if not (tk == 'string' or (tk == 'number' and k == k) or tk == 'boolean') or (tk == 'string' and #k > 256) then
-          error('a key that isn\'t a short string or a number', 0)
-        end
-        if tx == 'table' then out[k] = copy(x, depth + 1)
-        elseif tx == 'boolean' or (tx == 'number' and x == x) or (tx == 'string' and #x <= 256) then out[k] = x
-        else error('a value that isn\'t plain data (' .. tx .. ')', 0) end
-      end
-      seen[t] = nil
-      return out
-    end
-    local ok, c = pcall(copy, v, 1)
-    if not ok then return nil, tostring(c) end
-    return c
-  end
-  -- a takes call made (now, or for a held one when the trusted mod set its global): under the caller's own crash key,
-  -- the answers copied as a call's are
-  function view.hand(cur, reader, key, name, data)
-    local fn = rawget(cur.real, name)
-    if type(fn) ~= 'function' then return nil, 'not there' end
-    local r, why = guarded(reader, key, packed, fn, data)
-    if type(r) ~= 'table' then return nil, why end
-    local budget, out = { n = view.LIMIT }, { n = r.n }
-    for i = 1, r.n do out[i] = view.copy(r[i], nil, 1, budget, {}) end
-    return unpack(out, 1, out.n)
-  end
-  -- one reader's view: each call guarded under the reader's own crash key (<global>.<call>), so a call that ends the
-  -- game is skipped for that reader from then on, not for the trusted mod
-  function view.make(k, vw, reader)
-    local pub, fields = {}, {}
-    for _, f in ipairs(type(vw.spec.fields) == 'table' and vw.spec.fields or {}) do fields[f] = true end
-    for name, keep in pairs(type(vw.spec.calls) == 'table' and vw.spec.calls or {}) do
-      local keys = nil
-      if type(keep) == 'table' then keys = {}; for _, f in ipairs(keep) do keys[f] = true end end
-      local key = k .. '.' .. name
-      -- (the trusted mod's current view looked up each call: a reader that kept this table in a local still reaches
-      -- the trusted mod after it set its global again)
-      pub[name] = function(...)
-        local cur = view.by_name[k]
-        if not cur or not cur.on then return nil, 'not running' end
-        if not view.plain(...) then return nil, 'arguments must be plain values' end
-        local fn = rawget(cur.real, name)
-        if type(fn) ~= 'function' then return nil, 'not there' end
-        local r, why = guarded(reader, key, packed, fn, ...)
-        if type(r) ~= 'table' then return nil, why end
-        local budget, out = { n = view.LIMIT }, { n = r.n }
-        for i = 1, r.n do out[i] = view.copy(r[i], i == 1 and keys or nil, 1, budget, {}) end
-        return unpack(out, 1, out.n)
-      end
-    end
-    -- takes calls: one table of plain data in (copied, view.data), held while the trusted mod hasn't set its global yet
-    for name in pairs(type(vw.spec.takes) == 'table' and vw.spec.takes or {}) do
-      local key = k .. '.' .. name
-      pub[name] = function(...)
-        local tell = function(why)
-          local said = reader .. '|' .. key .. '|' .. why
-          if not view.told[said] then view.told[said] = true; log(fmt('[%s] %s refused: %s', reader, key, why)) end
-          return nil, why
-        end
-        if select('#', ...) ~= 1 or type((...)) ~= 'table' then return tell('it takes one table of plain data') end
-        local count = reader .. '|' .. key
-        if (view.took[count] or 0) >= view.TAKES then return tell(view.TAKES .. ' calls at most') end
-        -- (made now once the trusted mod has the call; held while it's coming: not up yet, or up and its call not
-        -- filled in yet; a refused call doesn't count against the mod's calls; every refusal before the copy, which
-        -- reads up to view.TAKE values, so a mod that asks again each frame costs nothing)
-        local cur = view.by_name[k]
-        local now = cur and cur.on and type(rawget(cur.real, name)) == 'function'
-        if not now then
-          local by = view.reserved[k]
-          if not (cur and cur.on) and not (ctx.present and ctx.present(by)) then
-            view.drop(k, by .. ' isn\'t running')
-            return nil, 'not running'
-          end
-          if view.shut[k] then return tell((cur and cur.on) and 'not there' or 'not running') end
-          if (view.held_by[count] or 0) >= view.HELD_EACH then return tell(view.HELD_EACH .. ' held calls a mod at most') end
-          local held = view.pending[k]
-          if type(held) == 'table' and #held >= view.HELD then return tell(view.HELD .. ' held calls at most') end
-        end
-        local data, why = view.data((...))
-        if data == nil then return tell(why) end
-        if now then
-          view.took[count] = (view.took[count] or 0) + 1
-          view.drain(k)
-          return view.hand(cur, reader, key, name, data)
-        end
-        local held = view.pending[k]
-        if type(held) ~= 'table' then held = {}; view.pending[k] = held end
-        held[#held + 1] = { reader = reader, key = key, name = name, data = data }
-        view.held_by[count] = (view.held_by[count] or 0) + 1
-        view.held_n = view.held_n + 1
-        view.took[count] = (view.took[count] or 0) + 1
-        return 'held'
-      end
-    end
-    -- (fields read when asked: the trusted mod may fill its table after making it; plain values only)
-    local t = setmetatable({}, { __metatable = 'locked',
-      __index = function(_, key)
-        local f = pub[key]
-        if f ~= nil then return f end
-        local cur = view.by_name[k]
-        if fields[key] and cur and cur.on then
-          local x = rawget(cur.real, key)
-          local tx = type(x)
-          if tx == 'string' or tx == 'number' or tx == 'boolean' then return x end
-        end
-      end,
-      __newindex = function() error(k .. ' is read-only', 2) end })
-    view.made[t] = true
-    return t
-  end
-  -- the trusted mod set its view's global: every other runtime mod gets its own view (in place of nothing, of a copy
-  -- another mod shared under that name, or of an older view)
-  function view.publish(o, env, k, real, spec)
-    local old = view.by_name[k]
-    if old and old.by ~= o.name then return end
-    if view.reserved[k] ~= o.name then return end                 -- (only the mod the list names)
-    if real == shared[k] or (orphan[k] and orphan[k].v == real) then return end   -- (never another mod's value)
-    local vw = { by = o.name, real = real, spec = spec, on = true }
-    if old then old.on = false end
-    view.by_name[k] = vw
-    local fake, faker = shared[k], shared_by[k]
-    for e, r in pairs(envs) do
-      if e ~= env and r.name ~= o.name and r.name ~= faker then
-        local cur = rawget(e, k)
-        if cur == nil or (fake ~= nil and cur == fake) or view.made[cur] then rawset(e, k, view.make(k, vw, r.name)) end
-      end
-    end
-    shared[k], shared_by[k] = nil, nil
-    local calls = {}
-    for name in pairs(type(spec.calls) == 'table' and spec.calls or {}) do calls[#calls + 1] = name end
-    for name in pairs(type(spec.takes) == 'table' and spec.takes or {}) do calls[#calls + 1] = name .. ' (takes data)' end
-    table.sort(calls)
-    log(fmt('[%s] %s: a read-only view for the other %s (%s)', o.name, k,
-      type(spec.takes) == 'table' and 'mods' or 'runtime mods', concat(calls, ', ')))
-    -- what other mods handed in before it set its global, handed over now, in their order (those whose call it has
-    -- filled in already; the rest at its next update, or the next call to it); a shut inbox opens again
-    view.shut[k], view.waits[k] = nil, nil
-    if type(view.pending[k]) == 'table' then view.drain(k) else view.pending[k] = false end
-  end
-  -- a held call let go (made or dropped)
-  function view.unheld(h)
-    local c = h.reader .. '|' .. h.key
-    view.held_by[c] = (view.held_by[c] or 1) - 1
-    view.held_n = view.held_n - 1
-  end
-  -- the calls held for an inbox made now, those whose call the trusted mod has filled in, in their order; the rest stay
-  -- held until it has. -> how many were made
-  function view.drain(k)
-    local held, cur = view.pending[k], view.by_name[k]
-    if type(held) ~= 'table' or not (cur and cur.on) then return 0 end
-    -- (I take the list out first: a call made here may set the global again, and the drain that runs then has only
-    -- what's held after this one started, so each call is made once; I look its view up each time, as that may
-    -- replace it)
-    view.pending[k] = {}
-    local left, who = {}, {}
-    for _, h in ipairs(held) do
-      cur = view.by_name[k]
-      if cur and cur.on and type(rawget(cur.real, h.name)) == 'function' then
-        view.unheld(h)
-        local ok, a, b = pcall(view.hand, cur, h.reader, h.key, h.name, h.data)
-        who[#who + 1] = h.reader .. ' ' .. h.name .. ': ' .. (ok and (a ~= nil and tostring(a) or 'nil, ' .. tostring(b)) or tostring(a))
-      else
-        left[#left + 1] = h
-      end
-    end
-    -- (what was held while these were made comes after the ones left)
-    local new = view.pending[k]
-    if type(new) == 'table' then for _, h in ipairs(new) do left[#left + 1] = h end end
-    view.pending[k] = #left > 0 and left or false
-    if #who > 0 then log(fmt('[%s] %s: the %d calls held for it, made now (%s)', view.reserved[k], k, #who, concat(who, '; '))) end
-    return #who
-  end
-  -- an inbox whose trusted mod won't run (kept off, stopped, or never started), or whose held calls can never be
-  -- made: what's held for it goes, said once
-  function view.drop(k, why)
-    local held = view.pending[k]
-    view.pending[k], view.waits[k] = false, nil
-    if type(held) == 'table' and #held > 0 then
-      for _, h in ipairs(held) do view.unheld(h) end
-      log(fmt('%s: %d held call(s) dropped: %s', k, #held, why))
-    end
-  end
-  -- a trusted mod's update while calls are held: those whose call it has filled in made now; the rest wait through
-  -- view.WAIT of its updates at most (with none made), then I drop them and hold nothing more for that inbox
-  function view.tick(o)
-    for k, by in pairs(view.reserved) do
-      local held = view.pending[k]
-      if by == o.name and type(held) == 'table' and #held > 0 then
-        local made = view.drain(k)
-        local left = view.pending[k]
-        if made > 0 or type(left) ~= 'table' or #left == 0 then view.waits[k] = nil
-        else
-          view.waits[k] = (view.waits[k] or 0) + 1
-          if view.waits[k] >= view.WAIT then
-            view.shut[k] = true
-            view.drop(k, fmt('%s hasn\'t taken them in %d of its updates', o.name, view.WAIT))
-          end
-        end
-      end
-    end
-  end
-  -- the end of a trusted mod's first update: an inbox it still hasn't set its global for (it sets it as it starts)
-  -- won't get it; I drop what's held for it and hold nothing more for it, until it does set it
-  function view.unset(o)
-    view.look(o)
-    for k, by in pairs(view.reserved) do
-      local vw = view.by_name[k]
-      if by == o.name and not (vw and vw.on) then
-        view.shut[k] = true
-        view.drop(k, o.name .. ' didn\'t set it by the end of its first update')
-      end
-    end
-  end
-  -- after start-up: the inboxes of trusted mods that didn't start hold nothing more
-  function rt.settle()
-    for k, by in pairs(view.reserved) do
-      local vw = view.by_name[k]
-      if view.pending[k] ~= false and not (vw and vw.on) and not (ctx.present and ctx.present(by)) then
-        view.drop(k, by .. ' isn\'t running')
-      end
-    end
-  end
+  -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet.
+  -- A trusted mod's globals stay its own (what it sets could let another mod use what only it was given: its lobby
+  -- key, say), and it gets none of the others'.
   function rt.on_global(env, k, v)
     local o = envs[env]
     if not o or type(k) ~= 'string' or not k:match('^%u[%w_]*$') or rawget(G, k) ~= nil or k == 'HD2Runtime' then return end
     if v == nil then return end
-    local trust = ctx.trusted(o.name)
-    if trust then
-      local spec = view.spec_of(trust, k)
-      if spec and type(v) == 'table' then view.publish(o, env, k, v, spec) end
-      return
-    end
-    if view.by_name[k] or view.reserved[k] then return end            -- a view's name: this copy is its own
+    if ctx.trusted(o.name) then return end
     if shared_by[k] ~= nil and shared_by[k] ~= o.name then return end   -- another mod's name: this one's copy is its own
     local prev = shared[k]
     -- after its mod stopped: only that mod setting it again (a reload) replaces the old copies
     if prev == nil and orphan[k] and orphan[k].by == o.name then prev = orphan[k].v end
     orphan[k] = nil
     shared[k], shared_by[k] = v, o.name
-    -- the others get it where they have nothing, or still the value it had before (set to nil and back)
-    -- (a trusted mod only when its TRUSTED entry accepts this name from this mod, and then its own copy, made now)
-    local old = view.taken[k .. '|' .. o.name]           -- (this mod's own earlier copy: the one a trusted mod may still hold)
+    -- the others get it where they have nothing, or still the value it had before (set to nil and back); never a
+    -- trusted mod
     for e, r in pairs(envs) do
-      local t = e ~= env and ctx.trusted(r.name)
-      if e ~= env and not t then
+      if e ~= env and not ctx.trusted(r.name) then
         local cur = rawget(e, k)
         if cur == nil or (prev ~= nil and cur == prev) then rawset(e, k, v) end
-      elseif t and view.accepts(t, k, o.name) then
-        local cur = rawget(e, k)
-        if cur == nil or (old ~= nil and cur == old.v) then rawset(e, k, view.take(k, v, o.name)) end
-      elseif t then
-        view.refused(t, k, o.name, r.name)
       end
     end
   end
