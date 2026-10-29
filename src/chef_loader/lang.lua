@@ -36,6 +36,10 @@ local sort, concat = table.sort, table.concat
 local MAX_TEXTS, MAX_PATTERNS, MAX_LEN, MAX_NAME, MAX_SRC, MAX_LANGS = 20000, 200, 300, 40, 4 * 1024 * 1024, 31
 local MAX_FILES, LOAD_BUDGET, TIME_BUDGET, AFTER_WILD, FILE_SLOW = 64, 2, 0.1, 24, 5
 local CACHE, MISSING, DONE, PAT_KEY, WILD, OPT, BUDGET, PAT_COST = 4096, 3000, 4096, 160, 2, 3, 0.001, 0.00025
+-- my own texts I renamed: a language's entry for the old text translates the new one too, until it has its own (the
+-- old texts as released, in capitals as a language's keys are taken: the compact look's rows are under its own
+-- heading now)
+local RENAMED = { ['MENU OPACITY % (COMPACT LOOK)'] = 'MENU OPACITY (%)', ['MENU POSITION (COMPACT LOOK)'] = 'MENU POSITION' }
 
 -- a language file's code with its strings and comments taken out (each string as one '"', each comment as a space)
 -- -> code, or nil, why
@@ -297,7 +301,12 @@ function M.install(ctx)
         else
           local key = s_upper(k)
           if not lang.text[key] then lang.ntext = lang.ntext + 1 end
-          lang.text[key] = v
+          lang.text[key], lang.alias[key] = v, nil
+          local new = RENAMED[key]
+          if new and (not lang.text[new] or lang.alias[new]) then
+            if not lang.text[new] then lang.ntext = lang.ntext + 1 end
+            lang.text[new], lang.alias[new] = v, true
+          end
         end
       end
     end
@@ -337,7 +346,7 @@ function M.install(ctx)
     if name == '' or name == 'English' then name = rec.name end
     local lang = L.by[name]
     if not lang then
-      lang = { name = name, text = {}, ntext = 0, patterns = {}, files = {} }
+      lang = { name = name, text = {}, ntext = 0, patterns = {}, files = {}, alias = {} }
       L.by[name] = lang
       L.langs[#L.langs + 1] = lang
     end

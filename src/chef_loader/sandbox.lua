@@ -16,15 +16,19 @@
 -- below use functions taken before any mod runs, so no mod can bend them.
 -- Engine tables that aren't for mods are out of its view too (stingray and the globals alike): native code
 -- (PluginManager), other network routes (Http, WebSocket), the Localizer (it ends the game), the lobby (joining one and
--- writing what other players read: every *Lobby* table and Network's lobby calls) and GameSession's writes.
+-- writing what other players read: every *Lobby* table and Network's lobby calls), GameSession's writes, the engine's
+-- console and save files (Console, CommandWindow, ConsoleHelp, SaveSystem, Cloud, CloudToken), and Application's
+-- calls that write files, change the player's saved settings or open a browser (save_render_target,
+-- set_user_setting, open_url_in_browser ...). A function left out stays out by identity too: reached through another
+-- table, a metatable or a function __index, a mod finds nothing there (and chef.call refuses it by any name).
 -- A mod the loader trusts by name (loader.lua, TRUSTED) can get more through sb.grant: files of its own in
--- %LOCALAPPDATA%, and game patch files in data\ (with the player's yes) that are checked before they take a patch's
+-- %LOCALAPPDATA%, and game patch files in data\ (part of its grant) that are checked before they take a patch's
 -- name, so they never carry code. The lobby, for those mods, goes through the HD2Runtime look-alike (runtime.lua).
 -- A mod that replaces the game's boot script itself isn't a loader mod: the game hands it everything, with or without
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.2.2' }
+local M = { version = '1.4.0' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset, newproxy = rawset, newproxy
@@ -49,12 +53,46 @@ local OS_KEEP = { 'clock', 'time', 'date', 'difftime', 'getenv' }
 local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'math', coroutine = 'coroutine' }
 -- engine tables that aren't for mods (M.engine_off), and calls left out of engine tables mods otherwise keep
 -- (M.CALLS_OFF): Network, GameSession and UnitSynchronizer keep only their reads (no lobby, connection or writes to
--- what other players see). (utilities.lua refuses the same through chef.call.)
+-- what other players see); Application loses what reaches the disk or past the game.
+-- (utilities.lua refuses the same through chef.call.) engine_off answers why (a text) or false; a CALLS_OFF rule
+-- answers true, or a text saying why, for a call that's left out.
+-- Whole tables: Console, CommandWindow and ConsoleHelp run the engine's own commands (and CommandWindow opens a window
+-- of its own, which can crash the game); SaveSystem, Cloud and CloudToken keep save files that outlast the game. No mod
+-- I know of uses any of them.
+M.TABLES_OFF = { PluginManager = 'native code', Http = 'the network', WebSocket = 'the network',
+  Localizer = 'it ends the game', Console = "the engine's commands", CommandWindow = "the engine's commands",
+  ConsoleHelp = "the engine's commands", SaveSystem = 'files on disk', Cloud = 'files on disk', CloudToken = 'files on disk' }
+-- The real functions left out (below and in CALLS_OFF), by identity: function -> why. Filled as I install (the tables
+-- are the game's), so chef.call refuses one whatever table it's reached through (utilities.lua asks engine_off with
+-- the function a name resolves to). Weak keys: a function the game drops isn't kept alive here.
+M.OFF_FNS = setmetatable({}, { __mode = 'k' })
 function M.engine_off(k)
-  return k == 'PluginManager' or k == 'Http' or k == 'WebSocket' or k == 'Localizer' or s_find(k, 'Lobby', 1, true) ~= nil
-    or s_find(k, 'GameServer', 1, true) ~= nil
+  if type(k) ~= 'string' then return M.OFF_FNS[k] or false end
+  local why = M.TABLES_OFF[k]
+  if why then return why end
+  if s_find(k, 'Lobby', 1, true) or s_find(k, 'GameServer', 1, true) then return 'the lobby' end
+  return false
+end
+-- Application keeps everything but what leaves the game: files the engine writes (a render target saved as a picture,
+-- a mesh exported, its own log restarted), the player's settings changed, applied or saved (user_settings.config), a
+-- browser opened, and the performance HUD's command line. The names are the 7.2 game's (my engine probe 0.2.0 listed
+-- all 70); the pattern (M.writes) catches one a game update adds that saves, writes, dumps, exports or captures. A deny
+-- list, not an allow list like Network's: Application is mostly reads and in-memory calls mods use (worlds,
+-- resolution, can_get, main_world, user_setting ...), and a read a game update renames mustn't vanish from mods.
+-- (chef.capture, utilities.lua, is how a mod with the grant saves a picture: the loader picks the file.)
+M.APP_OFF = { save_render_target = true, save_user_settings = true, save_win32_user_settings = true,
+  set_user_setting = true, set_win32_user_setting = true, apply_user_settings = true, apply_win32_user_settings = true,
+  open_url_in_browser = true, export_mesh_geometry = true, restart_file_log = true, performance_hud_command = true }
+M.WRITES = "files on disk, the game's saved settings or programs outside the game"
+function M.writes(f)
+  f = s_lower(f)
+  return (s_find(f, 'save', 1, true) or s_find(f, 'write', 1, true) or s_find(f, 'dump', 1, true)
+    or s_find(f, 'export', 1, true) or s_find(f, 'capture', 1, true) or s_find(f, 'screenshot', 1, true)
+    or s_find(f, 'url', 1, true) or s_find(f, 'browser', 1, true) or s_match(f, '^set_.*user_setting')
+    or s_match(f, '^apply_.*user_setting')) ~= nil
 end
 M.CALLS_OFF = {
+  Application = function(f) return (M.APP_OFF[s_lower(f)] or M.writes(f)) and M.WRITES or false end,
   -- Network keeps only what reads like a read (peer_id, game_session, is_ / has_ / get_ / num_ ...), and never a name
   -- that mentions the lobby or a connection: a new call in a game update is left out until it's known to be a read
   Network = function(f)
@@ -67,7 +105,8 @@ M.CALLS_OFF = {
       or s_find(f, 'send', 1, true) or s_find(f, 'dump', 1, true)) ~= nil
   end,
   -- GameSession the same way: its reads stay (in_session, peers, game_session_host, game_object_field / _exists /
-  -- _owner / _is_type, objects_owned_by, other_peers, unit_synchronizer, is_ / has_ / get_ / num_), every write to what
+  -- _owner / _is_type, objects_owned_by, other_peers, synchronizing_peers (the players still joining),
+  -- unit_synchronizer, is_ / has_ / get_ / num_), every write to what
   -- other players see is left out, and so is a call a game update adds. (Network.object_info, a game object type's
   -- field list, is a read too.) unit_synchronizer hands out the session's unit <-> game object map (UnitSynchronizer
   -- below keeps only its lookups). game_object_field_batched (every field of an object at once) is a read too; it has
@@ -75,7 +114,8 @@ M.CALLS_OFF = {
   -- exist, and the loader learns from a crash in it (ctx.guard_read), so it can end the game once, not every launch.
   GameSession = function(f)
     f = s_lower(f)
-    local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'unit_synchronizer'
+    local read = f == 'in_session' or f == 'peers' or f == 'other_peers' or f == 'synchronizing_peers'
+      or f == 'unit_synchronizer'
       or f == 'game_session_host' or f == 'game_object_field' or f == 'game_object_field_batched'
       or f == 'game_object_exists' or f == 'game_object_owner' or f == 'game_object_is_type' or f == 'objects_owned_by'
       or s_match(f, '^is_') or s_match(f, '^has_') or s_match(f, '^get_') or s_match(f, '^num_')
@@ -127,13 +167,21 @@ end
 
 -- ctx: G, io, os, debug, log, DIR (the loader's folder, with a trailing \), GAME_DIR (the game's settings folder,
 -- %APPDATA%\Arrowhead\Helldivers2\, or nil), OLD_DIR (%LOCALAPPDATA%\, my files' old folder, or nil),
--- FILES ('chef_loader'), LOADER (its name, for messages), overrides (compat's xpcall and load)
+-- FILES ('chef_loader'), overrides (compat's xpcall and load)
 function M.install(ctx)
   local G, io_, os_, dbg = ctx.G, ctx.io, ctx.os, ctx.debug
   local real_open = type(io_) == 'table' and io_.open or nil
   local io_type = type(io_) == 'table' and io_.type or function() return nil end
   local overrides = ctx.overrides or {}
-  local sb = { denied = 0 }        -- (the loader sets sb.module_of and sb.on_global once I'm installed)
+  -- (the loader sets sb.module_of and sb.on_global once I'm installed; sb.claims: '<owner>|<file>' for each .log a mod
+  -- opened to write in my folder this launch, the logs it may read back)
+  local sb = { denied = 0, claims = {} }
+  -- sb.chunk: my own chunk name. Spliced into loader.lua it's the loader's, the name its hang watchdog never stops code
+  -- in (starter.dog.me), so a mod's loadstring and load can't give its code that name.
+  if type(dbg) == 'table' and type(dbg.getinfo) == 'function' then
+    local ok, info = pcall(dbg.getinfo, M.install, 'S')
+    if ok and type(info) == 'table' and type(info.source) == 'string' then sb.chunk = info.source end
+  end
   local envs = setmetatable({}, { __mode = 'k' })        -- every mod environment I made -> its mod's name
   local full = setmetatable({}, { __mode = 'k' })        -- environments with the game's whole Lua (other boot scripts)
 
@@ -186,8 +234,8 @@ function M.install(ctx)
   end
   sb.show = show
 
-  -- May a mod open this path in this mode? Returns true, or nil and why.
-  function sb.check(path, mode)
+  -- May a mod (owner: its name; nil reads as no mod's) open this path in this mode? Returns true, or nil and why.
+  function sb.check(path, mode, owner)
     if mode == nil then mode = 'r' end
     if type(path) ~= 'string' or path == '' or #path > 400 or s_find(path, '%z') then return nil, 'not a file path' end
     if type(mode) ~= 'string' or not (s_match(mode, '^[rwa]%+?b?$') or s_match(mode, '^[rwa]b%+$')) then
@@ -213,7 +261,34 @@ function M.install(ctx)
       return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini .marker '
         .. '.fatal files'
     end
-    if not writes then return true, root, names, ext end
+    if not writes then
+      -- My folder is the game's settings folder, shared by every mod: a read there (or in my old folder) never gets the
+      -- loader's own files (the settings, the crash state, the trace), another mod's saved tables or another mod's
+      -- log. A mod's own saved tables start chef_data_<its name, as M.data_name writes it>__ (no other mod's can: "__"
+      -- only ever stands after the name), and its own logs are the ones it opened to write this launch. Below the
+      -- game's folder (crash reports, dumps) a mod reads only the game's own settings, saves\<id>_user_settings.config.
+      if root ~= 'data\\' then
+        if #names == 1 then
+          if s_sub(file, 1, #OWN) == OWN or s_sub(file, 1, 11) == 'chef_loader' then
+            return nil, 'the loader\'s own files are off limits'
+          end
+          if s_sub(file, 1, 10) == 'chef_data_' then
+            local mine = type(owner) == 'string' and s_sub(owner, 1, 5) == 'mods/' and #owner > 5 and 'chef_data_'
+              .. s_gsub(s_sub(owner, 6), '[^a-z0-9%-]', function(ch) return s_format('_%02x', s_byte(ch)) end) .. '__'
+            if not (mine and s_sub(file, 1, #mine) == mine) then
+              return nil, 'another mod\'s saved tables are off limits (chef.load_table reads a mod\'s own)'
+            end
+          end
+          if ext == 'log' and not (type(owner) == 'string' and sb.claims[owner .. '|' .. file]) then
+            return nil, 'mods read only the logs they write themselves'
+          end
+        elseif GDIR and s_sub(p, 1, #GDIR) == GDIR
+          and not (#names == 2 and names[1] == 'saves' and s_find(file, '_user_settings%.config$')) then
+          return nil, 'below the game\'s settings folder mods read only saves\\<id>_user_settings.config'
+        end
+      end
+      return true, root, names, ext
+    end
     if root ~= WDIR then return nil, 'mods write only in the loader\'s folder' end
     if #names ~= 1 then return nil, 'mods write only straight into the loader\'s folder, not below it' end
     if not (ext and MOD_EXT[ext]) then
@@ -255,6 +330,9 @@ function M.install(ctx)
     if not off or type(t) ~= 'table' then return t end
     local c = {}
     for f, fn in pairs(t) do if type(f) ~= 'string' or not off(f) then c[f] = fn end end
+    -- (an __index that's another table, not the table itself, would hand the calls left out straight back: the copy's
+    -- own __index is the copy. One that's the table itself reaches the copy anyway: as_seen, below)
+    if type(c.__index) == 'table' and c.__index ~= t then c.__index = c end
     return c
   end
   local S = rawget(G, 'stingray')
@@ -275,16 +353,21 @@ function M.install(ctx)
   setmetatable(base, base_mt)
   -- an engine object's metatable whose __index is one of those tables: a mod gets the table as it sees it
   -- (trimmed, or nothing), so the calls left out aren't a method call away
+  -- (and so is a table of the real one's own __index that isn't the table itself: an object whose methods are there)
   local as_seen = {}
   for k, v in pairs(G) do
     if type(k) == 'string' and type(v) == 'table' and s_match(k, '^%u') and (engine_off(k) or M.CALLS_OFF[k]) then
       as_seen[v] = base[k]
+      local i = rawget(v, '__index')
+      if type(i) == 'table' and i ~= v and i ~= G and as_seen[i] == nil then as_seen[i] = base[k] end
     end
   end
   if type(S) == 'table' then
     for k, v in pairs(S) do
       if type(k) == 'string' and type(v) == 'table' and (engine_off(k) or M.CALLS_OFF[k]) then
         as_seen[v] = base.stingray[k] or false
+        local i = rawget(v, '__index')
+        if type(i) == 'table' and i ~= v and i ~= G and as_seen[i] == nil then as_seen[i] = base.stingray[k] or false end
       end
     end
   end
@@ -336,6 +419,39 @@ function M.install(ctx)
         if type(mt) == 'table' and is_engine[mt] == nil then is_engine[mt] = true; nextl[#nextl + 1] = mt end
       end
       level = nextl
+    end
+  end
+  -- The real functions left out, by identity (a call off in a table mods keep, or any call of a table that's off):
+  -- as_seen[fn] = false, so a mod's copy of anything that holds one (another engine table, a metatable, what a function
+  -- __index answers: own, in sb.env) has nothing there, and M.OFF_FNS for chef.call. Never one mods also have under a
+  -- name that's theirs (a function two tables share stays where it's allowed), and never a metamethod (engine tables
+  -- may share one).
+  do
+    local off, kept = {}, {}
+    for _, src in ipairs({ G, S }) do                -- (S may be nil: ipairs stops there)
+      if type(src) == 'table' then
+        for k, t in pairs(src) do
+          -- (a table that's off or trimmed under another name too, an alias, counts by its real name only)
+          if type(k) == 'string' and type(t) == 'table' and (src == S or s_match(k, '^%u'))
+            and (as_seen[t] == nil or engine_off(k) or M.CALLS_OFF[k]) then
+            local whole, rule = engine_off(k), M.CALLS_OFF[k]
+            -- (and the methods behind a table __index of its own, as as_seen takes them above)
+            local i = rawget(t, '__index')
+            for _, part in ipairs({ t, type(i) == 'table' and i ~= t and i ~= G and i or nil }) do
+              for f, fn in pairs(part) do
+                if type(fn) == 'function' and type(f) == 'string' and s_sub(f, 1, 2) ~= '__' then
+                  local why = whole or (rule and rule(f))
+                  if why then off[fn] = type(why) == 'string' and why or "the lobby or other players' game"
+                  else kept[fn] = true end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    for fn, why in pairs(off) do
+      if not kept[fn] then M.OFF_FNS[fn] = why; as_seen[fn] = false end
     end
   end
   -- (the engine's names in base read as false from now on: a mod that sets its stingray or Unit to nil finds nothing
@@ -411,12 +527,16 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- what a trusted mod gets beyond that
   -- grants[owner] = { files = { { dir, name } ... } (its own files in %LOCALAPPDATA%: below dir, names starting with
-  -- name; both lower case), patches = { scratch = file name prefix, marker = text, consent = fn() -> true when the
-  -- player said yes, asked = fn(why) } }. Set before the mod's environment is made (its os gets remove and rename).
+  -- name; both lower case), patches = { scratch = file name prefix, marker = text or a list of texts }, capture = true
+  -- (chef.capture's pictures, which the loader saves itself: the mod's own Application still has no
+  -- save_render_target) }. Set before
+  -- the mod's environment is made (its os gets remove and rename).
   local grants = {}
   function sb.grant(owner, g) if type(owner) == 'string' and type(g) == 'table' then grants[owner] = g end end
   -- is this mod one the loader trusts (granted more)?
   function sb.trusted(owner) return grants[owner] ~= nil end
+  -- does its grant carry this flag (capture: chef.capture's pictures)? Being trusted for something else isn't enough.
+  function sb.granted(owner, what) local g = grants[owner]; return g ~= nil and g[what] == true end
   local function own_file(g, p)
     if not (LDIR and g.files) or s_sub(p, 1, #LDIR) ~= LDIR then return false end
     local names = names_of(s_sub(p, #LDIR + 1))
@@ -449,8 +569,8 @@ function M.install(ctx)
   end
   -- What a patch main file holds: its table of contents read, and every Lua resource in it read too. A patch passes
   -- when it replaces neither the game's boot script nor my core and each Lua resource in it is only comment lines (so
-  -- nothing in it can run; a long comment, --[[ ]], can end mid-line before code, so those are refused). -> true, has_marker
-  -- (a Lua resource starting with marker) | nil, why
+  -- nothing in it can run; a long comment, --[[ ]], can end mid-line before code, so those are refused). -> true,
+  -- has_marker (a Lua resource starting with the marker, a text or one of a list of texts) | nil, why
   local BOOT_ID, LUA_TYPE = '\250\149\024\105\147\223\118\244', '\226\023\209\044\250\141\078\161'
   -- my core (mods/chef_shared_loader/core_1): the game's require loads the copy in the highest patch, so a patch
   -- carrying one would take the loader's place
@@ -465,6 +585,16 @@ function M.install(ctx)
     return true
   end
   local function read_patch(f, marker)
+    -- the marker texts I look for: an empty one would start every text and one that isn't text starts none, so
+    -- neither is kept (a list of only those marks nothing)
+    local marks = {}
+    if type(marker) == 'string' then marker = { marker } end
+    if type(marker) == 'table' then
+      for i = 1, #marker do
+        local m = marker[i]
+        if type(m) == 'string' and m ~= '' then marks[#marks + 1] = m end
+      end
+    end
     local h = f:read(72)
     if type(h) ~= 'string' or #h < 72 or u32(h, 1) ~= 0xF0000011 then return nil, 'not a patch file' end
     local types, count = u32(h, 5), u32(h, 9)
@@ -509,7 +639,9 @@ function M.install(ctx)
           local text = len > 0 and f:read(len) or ''
           if type(text) ~= 'string' or #text ~= len then return nil, 'a cut-off patch file' end
           if not only_comments(text) then return nil, 'a Lua resource with code in it' end
-          if marker and s_sub(text, 1, #marker) == marker then marked = true end
+          for k = 1, #marks do
+            if s_sub(text, 1, #marks[k]) == marks[k] then marked = true; break end
+          end
         end
       end
     end
@@ -607,11 +739,6 @@ function M.install(ctx)
   local function data_ok(g, p, what, path)
     local kind, n = data_file(g, p)
     if not kind then return false end
-    if not g.patches.consent() then
-      local why = 'writing game patch files waits for the player\'s yes (options menu, ' .. (ctx.LOADER or 'the loader') .. ')'
-      pcall(g.patches.asked, why)
-      return nil, why
-    end
     if kind == 'scratch' then return true end
     if kind == 'main' and what == 'write' then return nil, 'a patch main file is only made by renaming a checked file to it' end
     if not patch_ours(g, s_sub(path, 1, 5) .. '9ba626afa44a3aa3.patch_' .. n) then return nil, 'that patch number is another mod\'s' end
@@ -710,8 +837,16 @@ function M.install(ctx)
       end
       if type(m) == 'table' then setmetatable(c, m) end
     end
+    -- (a function __index in a table I copy: called with the real table of a copy, and what it answers goes through own,
+    -- so a call left out, or a table that's off, isn't one __index(nil, name) away)
+    local function screened(fn)
+      return function(s, k) return own((fn(real_by_copy[s] or s, k))) end
+    end
     function own(t, any, d)
-      if type(t) ~= 'table' then return t end
+      if type(t) ~= 'table' then
+        if as_seen[t] == false then return nil end   -- (a real function left out, by identity)
+        return t
+      end
       local c = mine[t]
       if c ~= nil then return c end
       if is_engine[t] == false then return nil end
@@ -723,14 +858,19 @@ function M.install(ctx)
       c = {}
       mine[t], real_by_copy[c] = c, t
       if d and d > 200 then later[#later + 1] = t; return c end
-      for k, v in pairs(t) do c[k] = own(v, true, (d or 0) + 1) end
+      for k, v in pairs(t) do
+        if k == '__index' and type(v) == 'function' then c[k] = screened(v) else c[k] = own(v, true, (d or 0) + 1) end
+      end
       own_mt(t, c, d or 0)
       if not d then
         -- (the copies left empty down a long chain, filled now, each from the top again)
         while later[1] do
           local q = table.remove(later)
           local cq = mine[q]
-          for k, v in pairs(q) do if not (k == '__call' and fwd[cq]) then cq[k] = own(v, true, 1) end end
+          for k, v in pairs(q) do
+            if k == '__index' and type(v) == 'function' then cq[k] = screened(v)
+            elseif not (k == '__call' and fwd[cq]) then cq[k] = own(v, true, 1) end
+          end
           own_mt(q, cq, 0)
         end
       end
@@ -829,8 +969,14 @@ function M.install(ctx)
       open = function(path, mode)
         local asked, moved_name = path, nil
         path, moved_name = redirect(path)
-        local ok, root, names, ext = sb.check(path, mode)
-        if ok then said_moved(moved_name) end
+        local ok, root, names, ext = sb.check(path, mode, owner)
+        if ok then
+          said_moved(moved_name)
+          -- (a log it writes is one it may read back: sb.check)
+          if ext == 'log' and mode and s_find(mode, '[wa%+]') and type(owner) == 'string' then
+            sb.claims[owner .. '|' .. names[1]] = true
+          end
+        end
         if not ok then
           local g = grants[owner]
           local mode_ok = mode == nil or (type(mode) == 'string' and (s_match(mode, '^[rwa]%+?b?$') or s_match(mode, '^[rwa]b%+$')))
@@ -869,10 +1015,10 @@ function M.install(ctx)
         path, moved_name = redirect(path)
         if moved_name then
           -- (not in my folder yet: read where it was; only a path my check passes is ever opened)
-          local f = sb.check(path, 'r') and real_open and real_open(path, 'r')
+          local f = sb.check(path, 'r', owner) and real_open and real_open(path, 'r')
           if f then f:close(); said_moved(moved_name) else path = asked end
         end
-        local ok, why = sb.check(path, 'r')
+        local ok, why = sb.check(path, 'r', owner)
         if not ok then deny('read', path, 'r', why); error(why, 2) end
         return io_.lines(path)
       end,
@@ -921,9 +1067,30 @@ function M.install(ctx)
       end
     end
 
-    -- code it loads: text only, and it lands in this environment (or one the mod hands load)
+    -- code it loads: text only, and it lands in this environment (or one the mod hands load); never under my own chunk
+    -- name (sb.chunk: the loader's, whose code the hang watchdog leaves running)
+    local NAMED = 'that chunk name is the loader\'s own (off limits to Chef Shared Loader mods)'
+    -- Nor under another mod's: my menu finds the mod a label function belongs to by its chunk name minus the first
+    -- character (text_of in services.lua: '@mods/<author>/<name>', and '=' or any other first character reads the
+    -- same), runs it under the watchdog as that mod and skips it once that mod is off. So a name whose rest starts
+    -- with mods/ or boot: (my owner keys) is this mod's only when the rest is its own name, or its name followed by
+    -- a character no mod name goes on with ('/' for a piece of its own, ' (part)', ':part'); anything else (plain
+    -- names, '=piece') stays open. Mod names nest (mods/<author>/<name>/<more> is one too), so a piece under its own
+    -- name can only stand for a mod under that name in its own author's folder, never someone else's.
+    local function named(n)
+      if type(n) ~= 'string' then return nil end
+      if sb.chunk and n == sb.chunk then return NAMED end
+      local tail = s_sub(n, 2)
+      if not (s_find(tail, '^mods/') or s_find(tail, '^boot:')) then return nil end
+      if type(owner) == 'string' and s_sub(tail, 1, #owner) == owner and not s_find(tail, '^[%w_%-]', #owner + 1) then
+        return nil
+      end
+      return 'that chunk name is another mod\'s (a mod names its code after itself only)'
+    end
     env.loadstring = function(s, name)
       if type(s) == 'string' and s_byte(s, 1) == 27 then return nil, 'compiled Lua (bytecode) is off limits' end
+      local bad = named(name == nil and s or name)
+      if bad then return nil, bad end
       local f, err = real_loadstring(s, name)
       if f then real_setfenv(f, env) end
       return f, err
@@ -942,6 +1109,8 @@ function M.install(ctx)
       if type(chunk) ~= 'string' then return nil, 'bad argument #1 to \'load\' (string or function expected)' end
       if mode == 'b' then return nil, 'attempt to load a text chunk (mode is \'b\')' end
       if s_byte(chunk, 1) == 27 then return nil, 'compiled Lua (bytecode) is off limits' end
+      local bad = named(name == nil and chunk or name)
+      if bad then return nil, bad end
       if e ~= nil and type(e) ~= 'table' then return nil, 'bad argument #4 to \'load\' (table expected)' end
       local f, err = real_loadstring(chunk, name)
       if f then real_setfenv(f, e or env) end

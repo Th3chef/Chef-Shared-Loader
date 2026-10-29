@@ -5,7 +5,7 @@
 --     digits, _ . -), api (1 or nil), name, lobby_key (letters, digits, _; 32 at most), bones (16-hex unit resources),
 --     needs (engine calls and grants it can't do without: what of them I lack is logged, shown and in handle.missing())
 --   * handle.request('lobby' | 'files' | 'patches', why): mine; asks for a grant before the work that needs it
---     ('granted', 'asked': the player was told to say yes in my options menu, or nil, why: not on my list)
+--     ('granted', or nil, why: not on my list)
 --   * handle.on('update' | 'render' | 'shutdown', fn): called by the loader with the mod's own hooks, each in its own
 --     pcall; and handle.on('stop', fn), mine, not that API's: called once when the loader stops the mod (errors, a
 --     failed start, a dev reload), before anything of it is undone, so it can put back what only it knows (textures
@@ -66,12 +66,14 @@ local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
 local GUIS_PER_MOD, PRIMITIVES, SETS_PER_SECOND = 6, 12000, 10
 -- the resource types Application.can_get answers for (another string goes to the engine as a type name)
 local CAN_GET = { unit = true, material = true, texture = true, font = true, runtime_font = true, package = true }
--- the private palette ids and the native cape's resources: lower-case 16 hex, as the HD2 Lua Runtime takes them
+-- the private palette ids and the native cape's resources: lower-case 16 hex, as HD2Runtime takes them
 local function hex16_lower(s) return type(s) == 'string' and #s == 16 and s:match('^[0-9a-f]+$') ~= nil end
 -- the game's capes whose own material a mod may paint live (Unit.paint_private_cape), by unit resource: the material
--- slot, the material the game gives it and how many mesh positions carry that slot (the medium cape, build 26088801),
--- and the texture variables a paint sets, every one of them each time
-local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 } }
+-- slot, the material the game gives it and how many mesh positions carry that slot (build 26088801: the medium cape,
+-- and the shock-trooper cape that FS-05, B-27 and other armors bring), and the texture variables a paint sets, every
+-- one of them each time
+local CAPES = { ['3c33cf10a26cbb3e'] = { slot = 'ffcdb65b', source = '7531dea9b2a2b888', positions = 3 },
+                ['ea846ef460cc5ba0'] = { slot = '3d35eb9e', source = '38bd5d2916d3ab44', positions = 3 } }
 local CAPE_FIELDS = { 'material_lut', 'cape_lut', 'cape_gradient', 'decal_sheet', 'cape_scalar_fields' }
 local CAPE_FIELD = {}
 for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
@@ -80,7 +82,7 @@ for _, f in ipairs(CAPE_FIELDS) do CAPE_FIELD[f] = true end
 -- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
 -- trusted(owner) -> its TRUSTED entry or nil, attach(owner, hooks) (the hooks the loader calls with the mod's own),
 -- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list),
--- access(owner) -> its patches grant { consent() -> boolean, asked(why) } or nil
+-- access(owner) -> its patches grant { scratch, marker } or nil
 function M.install(ctx)
   local rt = {}
   local log, guarded, fn_of, util = ctx.log, ctx.guarded, ctx.fn_of, ctx.util
@@ -178,7 +180,7 @@ function M.install(ctx)
     memo.listed[w] = v
     return v
   end
-  -- a unit this mod may ask things: a Unit not known gone (the loader's stamps: one from an engine world before this one
+  -- a unit this mod may query: a Unit not known gone (the loader's stamps: one from an engine world before this one
   -- is never touched), alive. A unit isn't refused only because the world hasn't settled yet: those mods ask from
   -- their first frame, as their own runtime lets them.
   -- (Unit.alive itself is asked every time: a unit can be destroyed mid-frame. What a userdata is never changes, so
@@ -271,10 +273,10 @@ function M.install(ctx)
   end
 
   -- ---------------------------------------------------------------- the game's cape, painted live
-  -- (the HD2 Lua Runtime's cape_palette.lua, ported to my bookkeeping.) One mod's paints of the game's own medium cape
-  -- with its private material: the binding is replaced by the cape's stable slot before any mesh or material is read
-  -- (so what's read is the private instance, never the game's shared one), and put back by that slot without reading
-  -- the painted meshes. No engine value outlives a call: a record keeps hex strings and numbers.
+  -- (HD2Runtime's live cape paint, ported to my bookkeeping.) One mod's paints of the game's own capes (the ones in
+  -- CAPES: the medium cape and the shock-trooper cape) with their private material: the binding is replaced by the
+  -- cape's stable slot before any mesh or material is read (so what's read is the private instance, never the game's
+  -- shared one), and put back by that slot without reading the painted meshes. No engine value outlives a call: a record keeps hex strings and numbers.
   local function cape_for(rec)
     local self, records = {}, setmetatable({}, { __mode = 'k' })
     -- inside a paint: an engine call that fails, or a read with no answer, raises (and the paint puts the cape back)
@@ -611,7 +613,7 @@ function M.install(ctx)
       return true
     end
 
-    -- Live palette materials (the HD2 Lua Runtime's guard.lua, ported): a mod declares its private material ids and
+    -- Live palette materials (HD2Runtime's checks for them, ported): a mod declares its private material ids and
     -- their texture slots, then, in the frame it spawned a copy, writes those slots on the copy's private material,
     -- reinitializes its shader and refreshes its mesh's instance hash. That recipe was seen to work only so; anything
     -- else (a material another unit shares, the game's own, a copy from an earlier frame, an undeclared slot) is
@@ -687,8 +689,8 @@ function M.install(ctx)
         return true
       end
     end
-    -- the game's own medium cape painted with a declared private material (fields: texture variable -> 16-hex texture,
-    -- all five of CAPE_FIELDS), and put back; only where the engine has every call the paint makes
+    -- one of the game's own capes (CAPES) painted with a declared private material (fields: texture variable ->
+    -- 16-hex texture, all five of CAPE_FIELDS), and put back; only where the engine has every call the paint makes
     local function has(name) return type(fn_of(name)) == 'function' end
     if has('IdString32.from_hex') and has('IdString32.to_hex') and has('Material.reinitialize_shader')
       and has('Mesh.refresh_instance_hash') then
@@ -1336,20 +1338,14 @@ function M.install(ctx)
     end
     return o
   end
-  -- what a mod has of a grant: 'granted', 'asked' (its list entry gives it once the player says yes; with why, the
-  -- player is told now), or nil (its entry doesn't give it, or it has none)
-  local function grant_state(owner, what, why)
+  -- what a mod has of a grant: 'granted' (its list entry gives it; for patches, the loader handed it the grant), or
+  -- nil (its entry doesn't give it, or it has none)
+  local function grant_state(owner, what)
     local t = ctx.trusted(owner)
     if not t then return nil end
     if what == 'lobby' then return t.network and 'granted' or nil end
     if what == 'files' then return t.files and 'granted' or nil end
-    if what == 'patches' then
-      local p = t.patches and ctx.access and ctx.access(owner)
-      if not p then return nil end
-      if p.consent() then return 'granted' end
-      if why then p.asked(why) end
-      return 'asked'
-    end
+    if what == 'patches' then return t.patches and ctx.access and ctx.access(owner) and 'granted' or nil end
     return nil
   end
   local function new_mod(o, spec)
@@ -1420,12 +1416,12 @@ function M.install(ctx)
       return out
     end
     -- handle.request(what, why): ask for 'lobby', 'files' or 'patches' before doing the work that needs it.
-    -- -> 'granted' | 'asked' (the player has to say yes in my options menu; they've been told, ask again later) |
-    -- nil, why (I don't give it to this mod; the log and a notice say so once, so the player knows what to report)
+    -- -> 'granted' | nil, why (I don't give it to this mod; the log and a notice say so once, so the player knows what
+    -- to report)
     function handle.request(what, why)
       if not GRANTS[what] then return nil, 'unknown request ' .. tostring(what) end
       if rec.state ~= 'active' then return nil, rec.state end
-      local state = grant_state(o.name, what, type(why) == 'string' and why:sub(1, 200) or nil)
+      local state = grant_state(o.name, what)
       if state then return state end
       if not rec.said['request ' .. what] then
         rec.said['request ' .. what] = true
@@ -1438,6 +1434,8 @@ function M.install(ctx)
     rec.handle = handle
     o.mods[rec.id] = rec
     o.order[#o.order + 1] = rec
+    -- (the file's first mod with a name of its own, not just its id: that name titles the file's entry in my menu)
+    if #o.order == 1 and ctx.named and type(spec.name) == 'string' and spec.name ~= spec.id then ctx.named(o.name, spec.name) end
     if not o.attached then
       o.attached = true
       ctx.attach(o.name, {
@@ -1578,8 +1576,8 @@ function M.install(ctx)
   -- A trusted mod's globals stay its own: what it sets could let another mod use what only it was given (its game
   -- patch files, say).
   -- ---------------------------------------------------------------- a trusted mod's read-only view
-  -- spec (its TRUSTED entry's view): global = the name, fields = { plain values, read when asked }, calls = { name = true
-  -- (every answer copied) or { keys } (the first answer's top-level keys kept, the rest left out) }.
+  -- spec (its TRUSTED entry's view): global = the name, fields = { plain values, read when asked }, calls = { name =
+  -- true (every answer copied) or { keys } (the first answer's top-level keys kept, the rest left out) }.
   -- Copies: tables are new tables of plain keys, functions and threads left out, engine handles (units) as they are,
   -- 8 deep and 4,000 values a call at most; cycles cut. Nothing a reader gets leads back into the trusted mod.
   function view.copy(v, keep, depth, budget, seen)
