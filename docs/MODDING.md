@@ -5,7 +5,8 @@ Anti-Cheat), for any mod author. Your mod ships a Lua file with a one-line heade
 
 - finds it in the installed mods and runs it;
 - keeps it apart from every other mod;
-- guards its engine calls, so a call that crashes the game the first time it's made is skipped from then on;
+- guards its engine calls, so a call that crashes the game the first time it's made is skipped once two launches in
+  a row have ended in it;
 - merges its Arsenal options;
 - hands it helpers for units, the camera, keys and drawing.
 
@@ -320,20 +321,25 @@ it stops, and no mod can replace another's. When nothing else defines them, they
 ### Mods written for the HD2 Lua Runtime
 
 The HD2 Lua Runtime (0.1.0) is another loader's boot script, shipped inside the mods made for it. Chef Shared Loader
-runs those mods on a look-alike of it, so they work without it (its own boot isn't run; the log says it isn't needed):
+runs those mods on a look-alike of it, so they work without it (its own boot isn't run; the log says it isn't needed).
+The one exception: when a loader that bundles the HD2 Lua Runtime handed off to this one, the mods that `@requires` or
+`@after` its core (`mods/hd2rt/core`) are left to that loader, which runs them on the real runtime (state
+`left to its loader`, see The mod list). On the look-alike:
 
 - **`HD2Runtime` and `require('hd2rt')`:** `version` (`'0.1.0'`), `api` (1), `mod(spec)`, `status()` (with
   `log_dir`, the loader's folder) and `frame()`.
 - **`HD2Runtime.mod(spec)`:** `spec.id` (letters, digits, `_ . -`), `api` (1 or nil), `name`, `lobby_key` and `bones`
   (16-hex unit resources). It returns a handle: `id`, `engine`, `raw` (your own `stingray`, as locked down as the rest), `on(event, fn)` (`update`,
   `render`, `shutdown`, and `stop`: see below), `log(...)`, `state()`, `switch_off(why)`.
-- **Saying what you need:** `spec.needs` lists the engine calls (`'Material.set_texture'`) and the grants (`'lobby'`,
-  `'files'`, `'patches'`; see Trusted mods) your mod can't do without, 64 at most. The loader checks them when you call
+- **Saying what you need:** `spec.needs` lists the engine calls (`'Material.set_texture'`) and the grants (`'lobby'`;
+  see Trusted mods) your mod can't do without, 64 at most. `'files'` and `'patches'` (that runtime's own files and game
+  patch files) are taken as names but never given: no mod here gets them. The loader checks them when you call
   `mod()`: whatever it lacks is in `handle.missing()` (a new list, empty when everything is there), in the log, in a
   notice for the player and in `chef.mods()` / `chef_loader_health.txt` (`missing`). The mod still starts, so it can
   carry on without those parts and say so itself.
-- **Asking for access:** `handle.request(what, why)` with `'lobby'`, `'files'` or `'patches'` and a short reason, before
-  the work that needs it. It answers `'granted'` (your mod's entry on the loader's list gives it) or
+- **Asking for access:** `handle.request(what, why)` with `'lobby'` and a short reason, before the work that needs
+  it (`'files'` and `'patches'` are always refused). It answers `'granted'` (your mod's entry on the loader's list
+  gives it) or
   `nil, 'not given to this mod'` (the loader doesn't give it to your mod: the log and a notice say so once, so the
   player knows what to report). From 1.4.0 it never answers `'asked'`: no grant waits for the player's yes. Asking
   first means a mod never does a long job only to have its result refused.
@@ -351,89 +357,32 @@ runs those mods on a look-alike of it, so they work without it (its own boot isn
   - its first call is breadcrumbed for it;
   - a unit is checked before it's asked anything (with the loader's unit rules);
   - a refused call returns `nil, why`.
-- **Live palette materials** (that runtime's private-material calls, with its rules and refusals, word for word): a
-  mod recolors its own copies during play, without a restart.
-  - `Material.private_aliases(list)` declares the mod's private materials, `{ { id = '<16 lower-case hex>', slots =
-    { 'material_lut', ... } }, ... }` (slot names letters, digits and `_`, 64 at most). It replaces the mod's last
-    declaration and writes nothing.
-  - `Material.set_private_texture(mat, variable, texture)`, `Material.reinitialize_shader(mat)` and
-    `Mesh.refresh_instance_hash(mesh)` work only on a material (or a mesh with one) that is declared, of a unit the mod
-    spawned **in this frame**, read in this frame. Anything else is refused before it reaches the engine: the game's
-    own materials (shared by every unit that wears them), a copy from an earlier frame, an undeclared slot, a texture
-    that isn't loaded. The recipe that works is the order above: every slot's texture, then the shader, then the
-    mesh. Each call is protected and its answers checked (`'unobserved return shape'` if the engine answers otherwise).
-  - `Unit.paint_private_cape(u, alias, fields)` paints the game's own cape (the two whose layout is known: the medium
-    cape, and the shock-trooper cape that FS-05, B-27 and other armors bring) with a declared private material: `fields` gives all five of `material_lut`, `cape_lut`, `cape_gradient`,
-    `decal_sheet` and `cape_scalar_fields` (16-hex loaded textures). The loader binds the material by the cape's slot
-    first and reads only the new private instance; `Unit.restore_private_cape(u)` binds the game's material back by
-    that slot without reading the painted meshes. A painted cape is one mod's at a time (another's paint or restore is
-    refused), and once painted it can't be read or swapped through `Unit.mesh` / `Unit.set_material_at` again
-    (`'native cape reads require a fresh private transaction'`): paint it again instead.
-  - A call the game build lacks the engine functions for isn't there (`handle.missing()` names it, with
-    `spec.needs`).
-- **What it made is undone when it stops:** the game's capes it painted (put back by their slot first, before anything
-  else), its units, its GUIs, the units it hid, the materials it swapped on the game's units and the mouse dead zones
-  it changed. Textures it set with `Material.set_texture` can't be: the engine
+- **No live palette calls:** that runtime's private-material calls (`Material.private_aliases`,
+  `Material.set_private_texture`, `Material.reinitialize_shader`, `Mesh.refresh_instance_hash`,
+  `Unit.paint_private_cape`, `Unit.restore_private_cape`) aren't in the look-alike; `handle.missing()` names any your
+  mod lists in `spec.needs`. A mod built on them (HD2 Transmog and its packs) runs on its own runtime's loader.
+- **What it made is undone when it stops:** its units, its GUIs, the units it hid, the materials it swapped on the
+  game's units and the mouse dead zones it changed. Textures it set with `Material.set_texture` can't be: the engine
   can't tell what a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
   once when it stops your mod (errors, a failed start, a dev reload), before it undoes anything, while your engine
   calls still work. (`stop` is Chef Shared Loader's own; the HD2 Lua Runtime itself never calls it.) A mod that
   switches itself off (`handle.switch_off`) gets no `stop` afterwards: put things back before you call it.
 - **Shared globals:** a capitalized global one runtime mod sets (`MyLibrary`, say) reaches the other runtime
   mods, as in that runtime, where they share one `_G` (one set before `HD2Runtime.mod()` too). A name the game
-  already has never does. A trusted mod's globals stay its own, except the ones its place on the list names as its
-  views (below), and it takes only the shared globals its place on the list names, each from one named mod (another
-  trusted mod's views reach it like everyone, whichever starts first). When a
+  already has never does. A trusted mod's globals stay its own, and it takes none of the others'. When a
   mod stops, what it shared isn't handed to mods that start later; mods that have it keep their copy. A stopped mod's `HD2Runtime.mod()` is refused.
 - **The Steam lobby** (`Steam.user_id`, `Friends.playing_game`, `Network.join_steam_lobby`, `SteamLobby.*`) is only
   for mods the loader trusts with it (below): the lobby the game reports this player in (`Friends.playing_game` takes only the player's own id), the mod's own
   `lobby_key` (the one the loader's list gives it), values up to
-  1 KB and 10 writes a second.
+  1 KB and 10 writes a second. These are the loader's own calls: the mod's own `Steam` has no `user_id` and its
+  `Friends` is off, as for every mod.
 
 ### Trusted mods
 
 A short list in the loader (`TRUSTED` in `src/loader.lua`) names mods that get more than the locked-down space,
-each only what its entry gives. What an entry can give:
+each only what its entry gives. No entry opens a file: a trusted mod reads and writes what every mod does (nothing in
+the game's `data\` folder, no `os.remove` or `os.rename`). What an entry can give:
 - **The Steam lobby** through the HD2 Lua Runtime look-alike, under the one `lobby_key` the entry names.
-- **Its own files in `%LOCALAPPDATA%`:** names starting with the prefixes the entry lists.
-- **Game patch files** (as part of the entry; from 1.4.0 there's no options-menu row for it):
-  - its scratch file in `data\`, and patches carrying its marker (an entry may list several marker texts);
-  - a file only takes a patch's name by being renamed to it, and it's checked first: its table of contents must be
-    the layout the loader knows (the type counts add up to the rows), it must not replace the game's `boot` script,
-    and every Lua resource in it must be comment lines only, the size the row gives, with no stream or GPU data;
-  - a file still open for writing is never renamed or removed: close it first (a handle you drop is closed for you
-    when it's collected).
-- **Read-only views for the other runtime mods:** globals of its own the entry names, each with only the fields and
-  calls the entry lists (what they answer is that mod's own business: see its docs). Nothing reaches the mod but
-  those calls.
-  - Each answer is a copy: tables are new tables (functions left out, units as they are, 8 deep and 4,000 values at
-    most), so changing one changes nothing in the trusted mod.
-  - Arguments are plain values only (nil, booleans, numbers, strings up to 256 characters).
-  - Each call is guarded under the reading mod's own crash key (`<Global>.<call>`): one that ends the game is
-    skipped for that mod from then on.
-  - When the trusted mod stops, the calls answer `nil, 'not running'`; when it starts again (a dev-mode reload), the
-    same view reaches it again, so keeping a view in a local is fine.
-  - Each call costs what the trusted mod takes to answer plus the copy: call them a few times a second at most, not
-    every frame.
-  - No other mod's value is ever shared under a view's name. The trusted mod's module (what it returns) isn't handed
-    to other mods through `package.loaded` either.
-- **Inboxes:** a view whose calls take data. Any mod (a runtime mod or not) hands the trusted mod one table of plain
-  data per call.
-  - The trusted mod gets a copy made all the way down: keys strings, numbers or booleans; values those (strings up to
-    256 characters) or tables of them, 8 deep and 16,000 values at most. A function, a userdata or a table inside
-    itself refuses the whole call (`nil, why`, and the log says why once). Nothing the trusted mod gets leads back into
-    your mod, and your table stays yours.
-  - When the trusted mod is installed, every mod that isn't trusted has the inbox from the start. Another trusted mod
-    gets it once the trusted mod is up. A call made before the trusted mod has set it up answers `'held'`: it's kept
-    (16 per mod and call, 128 in all for that inbox) and made, in order, as soon as it has, with the answers in the
-    log. After that a call answers what the trusted mod answers (`true`, or `nil, why`). Held calls that can't be
-    made are dropped, with a line in the log: the trusted mod hasn't set its global by the end of its first update,
-    hasn't filled in the call in 300 of its updates, or stops. From then on a call answers `nil, 'not running'` or
-    `nil, 'not there'` until the trusted mod sets it up. If your mod stops, its held calls are dropped and never made.
-  - Each call is guarded under your mod's own crash key (`<Global>.<call>`); 64 calls per mod and call.
-- **What a trusted mod takes from the others:** only the shared globals its entry names, each from one named mod, as
-  its own copy (made when that mod sets it, so a change another mod makes to the shared table never reaches it). If
-  another mod sets that name first, the trusted mod goes without it and the log says so. Another trusted mod's views
-  reach it like everyone, whichever starts first.
 - **Screenshots** (`capture`, from 1.4.0): `chef.capture()` saves a picture of the screen. The loader makes the
   engine call itself (`Application.save_render_target`, which no mod's own `Application` has); the mod hands in
   nothing.
@@ -461,8 +410,8 @@ convenience. What earns a place:
   on its own and only does more with it (syncs when it can, saves a step) is a convenience, not a need.
 - **The code that uses it is readable:** plain Lua, not obfuscated, so the code that uses the capability can be read
   and checked.
-- **It asks only for what it uses:** the narrowest entry that works (one lobby key, its own file prefixes, the
-  globals it really shares).
+- **It asks only for what it uses:** the narrowest entry that works (one lobby key, screenshots only if it takes
+  them).
 
 What never earns one:
 - anything that changes another player's game, character or files, or sends data to a server of its own;
@@ -631,14 +580,17 @@ the engine, in these helpers and in `chef.call` / `chef.call_kind` too (each ref
 - `Unit.has_camera` without a camera name;
 - those same unit calls on a unit from an engine world that's gone. Units are stamped with the engine world they were
   seen in: within one engine world (the ship is loaded into the mission's) a unit stays usable; one from the world
-  before is refused.
+  before is refused, and stays refused in later worlds as long as it's asked about at least once in each world (a
+  handle nobody asks about for a whole world is forgotten after it).
 
 Also refused, because quality-of-life mods have no business with them: everything in `PluginManager` (native code),
 `Http` and `WebSocket` (the network), `Network.write_dump_tag`, and writing other players' game
 (`GameSession.set_game_object_field`, `create_game_object`, `destroy_game_object`, `migrate_game_object`,
 `migrate_game_session_host`), and from 1.4.0 the engine's console and save files (`Console`, `CommandWindow`,
-`ConsoleHelp`, `SaveSystem`, `Cloud`, `CloudToken`) and the Application calls that reach past the game (see "Engine
-tables that aren't for mods" below).
+`ConsoleHelp`, `SaveSystem`, `Cloud`, `CloudToken`) and the Application calls that reach past the game, and from
+1.4.1 the Steam overlay and the player's Steam id (`Steam.open_url`, `Steam.user_id`, `Steam.install_event`), the
+friend list and its invites (all of `Friends`), the lobby browser (`SteamClient`) and Steam voice chat (all of
+`SteamVoip`, `SteamVoipClient` and `SteamVoipRoom`) (see "Engine tables that aren't for mods" below).
 
 The unit calls above are refused only through `chef`: your mod's `Unit` still has them, and calling them
 directly skips this safety net. (The tables and calls in the paragraph above are gone from your mod's own
@@ -690,7 +642,7 @@ jobs made inside a timer or job start on the next frame.
 
 | Helper | What it does |
 |---|---|
-| `chef.setting(path)` | A value from the game's settings file (`user_settings.config`), e.g. `'render_settings.render_resolution'` (a table), `'screen_resolution'`, `'fullscreen'`. The loader reads the file again on a world change or a new screen size, else at most every 30 s. |
+| `chef.setting(path)` | A value from the game's settings file (`user_settings.config`), e.g. `'render_settings.render_resolution'` (a table), `'screen_resolution'`, `'fullscreen'`. The loader reads the file again on a world change or a new screen size, else at most every 90 s. |
 | `chef.in_session()`, `chef.is_host()`, `chef.players()`, `chef.joining()`, `chef.peer_id()` | In an online session; this game is the host (true when not in a session); how many players (you too); how many of them are still joining (from 1.4.0, `chef.has('joining')`; 0 when not in a session); my peer id. Checked at most once a second. For a change, listen to the `players` event instead of asking every frame. |
 
 ### More drawing
@@ -731,8 +683,12 @@ why, errors, ms_avg, ms_max, requires, missing, start_ms, start_kb }`. `version`
 started, as text (the one its switch row shows; nil for a mod that never started or has none). `missing` lists what a HD2 Lua Runtime mod said it needs
 (`spec.needs`) and the loader doesn't have. `state` is `running`, `off`, `kept off` (it crashed the game), `not started`
 (a requirement, a compile error ...; `why` says which), `stopped` (too many errors), `started elsewhere` (another
-loader started it first; `why` names it) or, for a boot entry, `handed off` (the loader that handed the game to this
-one). `ms_avg` / `ms_max` are its time
+loader started it first; `why` names it), `left to its loader` (when a loader that bundles the HD2 Lua Runtime handed
+off to this one: that runtime's own core, `mods/hd2rt/core`, and every mod announcing `-- @requires mods/hd2rt/core`
+or `-- @after mods/hd2rt/core`. That loader runs them on the real runtime. With no handoff the core is `not started`
+and those mods run on this loader's look-alike) or, for a boot
+entry, `handed off`
+(the loader that handed the game to this one). `ms_avg` / `ms_max` are its time
 a frame over the last status minute (nil before the first). `start_ms` / `start_kb` (from 1.4.0) are its start (its
 compile and its file's first run) in ms, and how much the Lua heap grew over it in KB, also on its `started` line in
 the log; nil for a mod that never ran. The KB figure is approximate: the heap is shared with the game, so a garbage
@@ -809,11 +765,14 @@ back). A subheading is drawn indented and in a dimmer yellow, its rows indented 
 - **Guard engine calls.** Make engine calls through `chef.call` / `chef.call_kind`. Some engine calls end the whole
   game when given the wrong thing (a destroyed unit, a unit kind without a state machine, a value of the wrong type);
   Lua can't catch that.
-  - Chef Shared Loader writes a breadcrumb before each guarded call's first use. After a crash, the next launch skips that
-    call for your mod (it gets `nil, 'skipped'`) and your mod stays on. If it ends 3 launches in a row, it's turned
-    off, with a notice on screen and in the log; a launch it doesn't end starts the count over.
-  - A crash in your mod's start code (the file running before it returns) is different: your mod isn't started from
-    the next launch on, until its file changes.
+  - Chef Shared Loader writes a breadcrumb before each guarded call's first use. A launch that ends while that call
+    is running only makes it suspected (the game closed from outside, from Task Manager say, leaves the same trace as
+    a crash): nothing changes for your mod. If the next launch ends in the same call too, that call is skipped for your
+    mod from then on (it gets `nil, 'skipped'`), both launches count as its crashes and your mod stays on. If it ends
+    3 launches in a row, it's turned off, with a notice on screen and in the log; a launch it doesn't end starts the
+    count over.
+  - A crash in your mod's start code (the file running before it returns) is different: once two launches in a row
+    end in it, your mod isn't started from then on, until its file changes.
   - Updating the mod turns it back on, and the calls that crashed are tried again.
   - A call on one kind of unit (`chef.call_kind`) made with only the unit, that crashed, is refused for every mod on
     that kind: yours gets `nil, 'skipped'` and stays on. It is tried again after a loader or game update. (A call with
@@ -896,11 +855,19 @@ Off limits, with an error or a `nil, why` (and the first 10 refusals of each mod
     `has_*`, `get_*`, `num_*`, and since 1.2.2 `game_object_field_batched`): no writes to what other players see.
     `game_object_field_batched` has crashed the game on other players' objects, so it answers only for an object that
     exists (a whole number id, else nil), and the loader learns from a crash in it: its first call on each object is
-    breadcrumbed, so a game that ends there skips that call for your mod from then on (one crash, not one every
-    launch; the mod itself stays on, as after any crash of its own, and is turned off only after it ends 3 launches
-    in a row);
+    breadcrumbed, so a game that ends there two launches in a row skips that call for your mod from then on (two
+    crashes, not one every launch; the mod itself stays on, as after any crash of its own, and is turned off only
+    after it ends 3 launches in a row);
   - all of UnitSynchronizer but its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`,
     `get_*`, `num_*`): no spawns or destroys every player sees;
+  - from 1.4.1, all of Steam but what it says about this game and this client (`app_id`, `client_running`,
+    `connected`, `is_installed`, `language`, `overlay_active`, `owns_app`, and `user_name`, the player's own name):
+    no `open_url` (a page in the Steam overlay), `install_event` or `user_id` (an id that names the player outside the
+    game), and a call a game update adds stays out until it's known to be a read;
+  - from 1.4.1, `Friends` (the friend list, other people's Steam ids, names and status, and invites), `SteamClient`
+    (the lobby browser), and `SteamVoip`, `SteamVoipClient` and `SteamVoipRoom` (Steam voice chat: creating, joining
+    and leaving rooms, selecting the voice in and out, adding and removing other players in a room). A trusted lobby mod still gets its own Steam id and lobby through the HD2 Lua Runtime
+    look-alike (see Trusted mods);
   - the same through an engine object's metatable (`getmetatable` gives the trimmed table).
 
   `chef.call` refuses the same.
@@ -1003,7 +970,10 @@ if type(chef) ~= 'table' then return end
 
 - A mod that only works on Chef Shared Loader should say so in its header lines, right after the first:
   `-- HD2-Requires: chef-shared-loader` (or `-- HD2-Requires: chef-shared-loader >= 1.2.0` when it needs a version). A loader that finds `\n-- HD2-Requires: chef-shared-loader` in a mod's first lines
-  can skip it with a log line ("needs Chef Shared Loader").
+  can skip it with a log line ("needs Chef Shared Loader"). Put it in every addon that uses `chef`: without it, another
+  loader deployed above this one (Rat's Shared Loader does this) starts the addon itself with a plain `require`, where
+  `...` is the mod's name instead of `chef`, and lists it as failed on its own screen, even though this loader then
+  starts it as usual.
 - `-- HD2-Boot:` mods are only started by Chef Shared Loader.
 
 ## Compatibility with mods that still replace `boot`

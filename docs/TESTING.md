@@ -28,6 +28,7 @@ Then tell the editor what `chef` is. In an addon:
 
 ```lua
 -- HD2-Addon: mods/you/my_mod
+-- HD2-Requires: chef-shared-loader
 ---@type Chef
 local chef = ...
 ```

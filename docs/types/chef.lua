@@ -89,7 +89,7 @@
 ---| 'bind_combos'
 ---| 'option_folds'
 
----@alias ChefModState 'running' | 'off' | 'kept off' | 'not started' | 'stopped' | 'started elsewhere' | 'handed off'
+---@alias ChefModState 'running' | 'off' | 'kept off' | 'not started' | 'stopped' | 'started elsewhere' | 'left to its loader' | 'handed off'
 
 ---Read-only. `api` is the helper level; every other field is true when the loader has that capability.
 ---@class ChefCapabilities
@@ -329,7 +329,7 @@ function ChefIndex.conflicts() end
 ---The helpers each mod gets.
 ---@class Chef
 ---@field loader string                 the loader's name, 'Chef Shared Loader'
----@field loader_version string         the loader's version, e.g. '1.4.0'
+---@field loader_version string         the loader's version, e.g. '1.4.1'
 ---@field api integer                   the helper level (3); it only goes up when something is added
 ---@field name string                   your mod's name, 'mods/<author>/<name>'
 ---@field options table                 your merged Arsenal options ({} when none is ticked)

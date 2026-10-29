@@ -1,4 +1,5 @@
 -- HD2-Addon: mods/example/hello_addon
+-- HD2-Requires: chef-shared-loader
 -- A Chef Shared Loader addon, the smallest useful one: it logs once a mission starts and draws a small label in missions.
 -- Chef Shared Loader runs this file in its own environment and hands it `chef` (the helpers) as its argument; the file
 -- returns a table whose update(dt) is called every frame and shutdown() when the game closes.
