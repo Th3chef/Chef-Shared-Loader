@@ -51,7 +51,7 @@ def write_archive(path, entries, header_from=None):
     ents = sorted(entries, key=lambda e: types.index(e['tid']))
     head = struct.pack('<IIII', MAGIC, len(types), len(ents), unknown) + unk56
     for t in types: head += struct.pack('<QQQII', 0, t, sum(e['tid'] == t for e in ents), 16, 64)
-    cursor = len(head) + 80 * len(ents); rows = body = b''; gpu = bytearray()
+    cursor = len(head) + 80 * len(ents); rows, body, gpu = bytearray(), bytearray(), bytearray()   # (grown in place)
     for i, e in enumerate(ents, 1):
         goff = 0
         if e.get('gpu'):

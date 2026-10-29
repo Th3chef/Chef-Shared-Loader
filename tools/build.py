@@ -40,6 +40,41 @@ assert '--header-from' in args, 'pass --header-from <a Lua patch that works on t
 HEADER = open(args[args.index('--header-from') + 1], 'rb').read()[12:72]
 assert len(HEADER) == 60
 
+# Test builds only, opt in: with CSL_BUILD_CACHE=<dir> (a test runner sets one per run, for the dozens of suites that each
+# build the same Test 1), a build is made once per set of inputs into <dir> and copied from there into <out dir>. The
+# key is every input of the output: the src files, this script and its helpers, the header bytes and the test number.
+# A release build (no --test) never uses it.
+CACHE = os.environ.get('CSL_BUILD_CACHE')
+if CACHE and TEST:
+    import fcntl, zlib
+    key = hashlib.sha256()
+    ins = sorted(os.path.relpath(os.path.join(r, f), HERE).replace(os.sep, '/')
+                 for r, ds, fs in os.walk(os.path.join(HERE, 'src')) for f in fs)
+    ins += ['tools/build.py', 'tools/hd2_patch.py', 'tools/splice.py', 'tools/thumbnail.png']
+    for rel in ins:
+        key.update(rel.encode() + b'\0' + open(os.path.join(HERE, rel), 'rb').read() + b'\0')
+    key.update(HEADER + b'%d\0' % TEST + sys.version.encode() + zlib.ZLIB_RUNTIME_VERSION.encode())
+    built = os.path.join(CACHE, key.hexdigest()[:32])
+    os.makedirs(CACHE, exist_ok=True)
+    with open(built + '.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)              # (suites building at once: one builds, the others wait for it)
+        if not os.path.exists(os.path.join(built, '.done')):
+            shutil.rmtree(built, ignore_errors=True)
+            env = dict(os.environ); del env['CSL_BUILD_CACHE']
+            p = subprocess.run([sys.executable, os.path.abspath(__file__), built] + args[1:], env=env,
+                               capture_output=True, text=True)
+            if p.returncode:
+                sys.stdout.write(p.stdout); sys.stderr.write(p.stderr); sys.exit(p.returncode)
+            open(os.path.join(built, '.done'), 'w').close()
+    d = os.path.join(OUT, 'loader')
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(OUT, exist_ok=True)
+    shutil.copytree(os.path.join(built, 'loader'), d)
+    for f in sorted(os.listdir(built)):
+        if f not in ('loader', '.done'): shutil.copyfile(os.path.join(built, f), os.path.join(OUT, f))
+    print(os.path.join(OUT, next(f for f in os.listdir(built) if f.endswith('.zip'))))
+    sys.exit(0)
+
 if subprocess.call([sys.executable, os.path.join(HERE, 'tools', 'splice.py'), '--check']) != 0:
     sys.exit('loader.lua is out of step with src/chef_loader/*.lua: run tools/splice.py first')
 
