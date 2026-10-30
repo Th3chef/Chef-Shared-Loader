@@ -9,9 +9,6 @@
   in the same call too, it's a crash: the call is skipped and both launches count against the mod. A mod's start code
   and `game_object_field_batched` follow the same rule. So a mod that crashes the game in a new call every launch is
   now turned off at its 4th crash in a row, not its 3rd.
-- A trusted mod no longer gets files of its own or game patch file writes: it reads and writes files as every other
-  mod does (nothing in `data\`, no `os.remove` or `os.rename`). Trusted entries now carry the lobby and screenshots
-  only.
 
 **New for mods**
 - Works beside a loader that bundles the HD2 Lua Runtime. When that loader handed off to this one and the runtime's
@@ -53,7 +50,7 @@
 - Start-up writes the crash state once, and only when something in it changed.
 - Removed from the HD2 Lua Runtime look-alike: the live palette and cape calls (`Material.private_aliases`,
   `Material.set_private_texture`, `Material.reinitialize_shader`, `Mesh.refresh_instance_hash`,
-  `Unit.paint_private_cape`, `Unit.restore_private_cape`), the read-only views and inboxes a trusted mod could offer
+  `Unit.paint_private_cape`, `Unit.restore_private_cape`), the read-only views and inboxes a mod could offer
   the other mods, and the shared globals it could take from a named mod. `handle.request('files')` and
   `handle.request('patches')` are always refused; `spec.needs` still takes those names, so `handle.missing()` lists
   them. A mod built on these calls runs on its own runtime's loader.
