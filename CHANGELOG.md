@@ -9,11 +9,6 @@
   in the same call too, it's a crash: the call is skipped and both launches count against the mod. A mod's start code
   and `game_object_field_batched` follow the same rule. So a mod that crashes the game in a new call every launch is
   now turned off at its 4th crash in a row, not its 3rd.
-- Mods can no longer open Steam overlay pages, read the player's Steam id, see the friend list, send invites, use the
-  lobby browser or use Steam voice chat. `Steam` keeps its reads about the game and the client (`app_id`,
-  `client_running`, `connected`, `is_installed`, `language`, `overlay_active`, `owns_app`, `user_name`), and a call a
-  game update adds stays out until it's known to be a read. `Friends`, `SteamClient`, `SteamVoip`, `SteamVoipClient`
-  and `SteamVoipRoom` read as `false`. `chef.call` refuses the same.
 - A trusted mod no longer gets files of its own or game patch file writes: it reads and writes files as every other
   mod does (nothing in `data\`, no `os.remove` or `os.rename`). Trusted entries now carry the lobby and screenshots
   only.
@@ -62,7 +57,6 @@
   the other mods, and the shared globals it could take from a named mod. `handle.request('files')` and
   `handle.request('patches')` are always refused; `spec.needs` still takes those names, so `handle.missing()` lists
   them. A mod built on these calls runs on its own runtime's loader.
-- The mod manager's description of the loader now ends "Mod Source: github.com/Th3chef/Chef-Shared-Loader".
 
 **Fixes**
 - A unit kept from an earlier world could pass as usable again two worlds later, and a call on it ended the game. It
