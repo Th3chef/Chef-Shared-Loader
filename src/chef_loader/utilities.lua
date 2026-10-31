@@ -536,6 +536,11 @@ function M.install(ctx, L)
   local util = {}
   local log, guarded, fn_of, api, xyz = ctx.log, ctx.guarded, ctx.fn_of, L.api, L.xyz
   local world = ctx.world
+  local mod_records = setmetatable({}, { __mode = 'v' })
+  function util.disabled(owner)
+    local a = mod_records[owner]
+    return a ~= nil and a.unsafe_unit == true and not a.cleaning_unsafe
+  end
 
   -- the calls known to end the game, refused before they reach the engine:
   -- runtime-built units (not a unit file; e.g. #ID[46cab355bd8d4d37], about 1,400 a mission): asking their position,
@@ -616,34 +621,35 @@ function M.install(ctx, L)
   end
   -- Units are stamped with the engine world they were seen in. Within one engine world every unit stays usable (the
   -- ship loaded into the mission's world is the same engine world: the same units, re-stamped as they're seen). A
-  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Only two
-  -- worlds are kept, so the stamps can't pile up. A mod can keep a handle longer than that, though: refused in the
-  -- second world, it would be unknown in the third and pass as new. So a unit refused as gone (by current() or
-  -- util.gone()) goes in this world's carry set, and the next world's before is this world's stamps plus the carry
-  -- set, which then starts empty. The limit: a gone unit stays refused in every later world as long as something asks
-  -- about it at least once in each engine world; one nobody asks about for a whole world drops off after it, like any
-  -- other stamp. The carry set holds only units asked about in this world, so it can't pile up either.
-  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }),
-    carry = setmetatable({}, { __mode = 'k' }) }
+  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Keep stamps
+  -- from every earlier world, even if a mod leaves a retained handle unused for an entire intervening world. Both
+  -- sets have weak keys: they do not keep unit handles alive, and garbage collection removes their stamps once mods
+  -- release them. Memory use follows the handles still referenced, rather than every unit ever seen.
+  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }) }
   local function roll()
     if seen.inst ~= world.instance then
-      for u in pairs(seen.carry) do seen.now[u] = true end
-      seen.inst, seen.before, seen.now = world.instance, seen.now, setmetatable({}, { __mode = 'k' })
-      seen.carry = setmetatable({}, { __mode = 'k' })
+      for u in pairs(seen.now) do seen.before[u] = true end
+      seen.inst, seen.now = world.instance, setmetatable({}, { __mode = 'k' })
     end
   end
-  local function current(u)
-    if u == nil or not world.stable then return false end
+  local function stale(u, owner)
+    if seen.before[u] == nil or seen.now[u] then return false end
+    local a = owner and mod_records[owner]
+    if a and ctx.disable_uaf then ctx.disable_uaf(a) end
+    return true
+  end
+  local function current(u, owner)
+    if u == nil then return false end
     roll()
+    if stale(u, owner) or not world.stable then return false end
     if seen.now[u] then return true end
-    if seen.before[u] then seen.carry[u] = true; return false end
     seen.now[u] = true
     return true
   end
   -- a unit I know is new in this world (one a mod just spawned)
   local function fresh(u)
     roll()
-    seen.now[u], seen.before[u], seen.carry[u] = true, nil, nil
+    seen.now[u], seen.before[u] = true, nil
   end
   local said = {}
   local function once(key, line) if not said[key] then said[key] = true; log(line) end end
@@ -656,7 +662,7 @@ function M.install(ctx, L)
     if not c then return nil end
     if c == 'unit' then
       local u = ...
-      if not current(u) then return GONE end
+      if not current(u, owner) then return GONE end
       local k = unit_kind(u, owner)
       if k and BAD_KINDS[k] then
         local why = bad_why[k]
@@ -675,11 +681,10 @@ function M.install(ctx, L)
   util.current, util.fresh, util.unit_kind = current, fresh, unit_kind
   -- a unit stamped in an engine world before this one (calling anything on it ends the game); a unit not stamped yet,
   -- in a world that hasn't settled, isn't known gone
-  function util.gone(u)
+  function util.gone(u, owner)
     if u == nil then return true end
     roll()
-    if seen.before[u] ~= nil and not seen.now[u] then seen.carry[u] = true; return true end
-    return false
+    return stale(u, owner)
   end
   -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
   -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those.
@@ -687,7 +692,7 @@ function M.install(ctx, L)
   -- the call is checked
   function util.unit_refused(owner, name, u, stamped)
     if not stamped then
-      if util.gone(u) then return GONE end
+      if util.gone(u, owner) then return GONE end
       seen.now[u] = true                  -- stamped even before the world settles (the instance is already this one)
     end
     if class(name) ~= 'unit' then return nil end
@@ -765,6 +770,7 @@ function M.install(ctx, L)
   -- (ctx.dog: the loader's hang watchdog, told which mod's call runs; see loader.lua. ctx.color_scope: the frame's
   -- color cache emptied first, so no mod's callback gets a Color asked for in an earlier one)
   local function run(a, what, fn, ...)
+    if util.disabled(a.name) then return false end
     if ctx.color_scope then ctx.color_scope() end
     local t0 = L.clock()
     local D = ctx.dog
@@ -779,6 +785,7 @@ function M.install(ctx, L)
   -- for services: a mod's callback (an event, on_change, after_startup) timed as that mod's own; and a mod's own
   -- call that ran other mods' callbacks, whose time already went to them
   function util.timed(a, fn, ...)
+    if util.disabled(a.name) then return false, a.why end
     if ctx.color_scope then ctx.color_scope() end
     local t0 = L.clock()
     local D = ctx.dog
@@ -906,6 +913,7 @@ function M.install(ctx, L)
         local po, ps, pl, pn
         if D then po, ps, pl, pn = D.enter(j.a, t0) end
         for x = j.i + 1, last do
+          if util.disabled(j.a.name) then j.on = false; break end
           local ok, err = pcall(fn, list[x], x)
           if not ok then j.errors = j.errors + 1; failed(j.a, 'spread', err) end
           if j.errors >= 20 then j.on = false; break end
@@ -1500,6 +1508,7 @@ function M.install(ctx, L)
   function util.nearest_first(p, q) return p.d < q.d end      -- (chef.units_near's order)
   function util.extend(chef, a)
     local owner = a.name
+    mod_records[owner] = a
     local base_call, base_call_kind = chef.call, chef.call_kind
     -- chef.call and chef.call_kind refuse the known game-ending calls and the ones mods shouldn't make (each refusal
     -- logged once per mod; no strings built for one already logged). said_refused[0]: how many names; past CLASS_CAP
@@ -1546,13 +1555,13 @@ function M.install(ctx, L)
     end
 
     -- 1 units
-    function chef.unit_kind(u) if current(u) then return unit_kind(u, owner) end end
+    function chef.unit_kind(u) if current(u, owner) then return unit_kind(u, owner) end end
     function chef.unit_alive(u)
-      if not current(u) then return false end
+      if not current(u, owner) then return false end
       return base_call('Unit.alive', u) == true
     end
     local function asked(name, u, ...)
-      if not current(u) then return nil end
+      if not current(u, owner) then return nil end
       local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call('Unit.alive', u) ~= true then return nil end
@@ -1568,7 +1577,7 @@ function M.install(ctx, L)
       return fx, fy, fz, math.atan2(fx, fy)
     end
     function chef.unit_node(u, name)
-      if type(name) ~= 'string' or not current(u) then return nil end
+      if type(name) ~= 'string' or not current(u, owner) then return nil end
       local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call_kind('Unit.has_node', k, u, name) ~= true then return nil end
@@ -1653,7 +1662,7 @@ function M.install(ctx, L)
     end
     -- child's node (default 1, its root) onto parent's node (a name or an index; default 1)
     function chef.link(child, parent, parent_node, child_node)
-      if not (world.stable and current(child) and current(parent)) then return nil, 'not in this world' end
+      if not (world.stable and current(child, owner) and current(parent, owner)) then return nil, 'not in this world' end
       local pn = parent_node or 1
       if type(pn) == 'string' then
         pn = chef.unit_node(parent, pn)
@@ -1664,7 +1673,7 @@ function M.install(ctx, L)
       return true
     end
     function chef.unlink(child)
-      if not (world.stable and current(child)) then return nil, 'not in this world' end
+      if not (world.stable and current(child, owner)) then return nil, 'not in this world' end
       local _, err = base_call('World.unlink_unit', world.main, child)
       if err then return nil, err end
       return true
@@ -1694,7 +1703,7 @@ function M.install(ctx, L)
     -- a unit's lights: chef.lights(u) -> how many; chef.light(u, i) -> { set_color(r, g, b) (0-255), set_intensity(v),
     -- set_enabled(on), set_falloff(start, end), set_shadows(on) }, each asked fresh (no handle kept)
     function chef.lights(u)
-      local k = current(u) and unit_kind(u, owner)
+      local k = current(u, owner) and unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return 0 end
       local n = base_call_kind('Unit.num_lights', k, u)
       return type(n) == 'number' and n or 0
@@ -1702,7 +1711,7 @@ function M.install(ctx, L)
     function chef.light(u, i)
       local L2 = {}
       local function get()
-        local k = current(u) and unit_kind(u, owner)
+        local k = current(u, owner) and unit_kind(u, owner)
         if not k or BAD_KINDS[k] then return nil end
         return base_call_kind('Unit.light', k, u, i or 1)
       end

@@ -782,7 +782,9 @@ back). A subheading is drawn indented and in a dimmer yellow, its rows indented 
 - **Engine values live one frame.** `Color`, `Vector3` and the like only last the frame they're made in: make them
   in the frame that uses them.
 - **Handles belong to one world.** Units, GUIs and cameras belong to the world they came from. When
-  `chef.world_id()` changes, drop what you kept.
+  `chef.world_id()` changes, drop what you kept. Attempting to use a unit known to belong to a destroyed world is
+  blocked and disables your mod for the session. The log and stopped status say "use-after-free prevented"; the
+  loader runs your stop cleanup and removes your timers, watches and listeners.
 - **Keep `update` cheap, and idle when there's nothing to do.** The log's `status:` line shows each mod's average
   and worst milliseconds a frame (written when the numbers move, else every 10 minutes). A mod that raises 20 Lua
   errors is turned off for the session: its timers, watches, listeners and spawned things go with it.

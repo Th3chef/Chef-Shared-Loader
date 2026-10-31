@@ -5708,6 +5708,11 @@ function M.install(ctx, L)
   local util = {}
   local log, guarded, fn_of, api, xyz = ctx.log, ctx.guarded, ctx.fn_of, L.api, L.xyz
   local world = ctx.world
+  local mod_records = setmetatable({}, { __mode = 'v' })
+  function util.disabled(owner)
+    local a = mod_records[owner]
+    return a ~= nil and a.unsafe_unit == true and not a.cleaning_unsafe
+  end
 
   -- the calls known to end the game, refused before they reach the engine:
   -- runtime-built units (not a unit file; e.g. #ID[46cab355bd8d4d37], about 1,400 a mission): asking their position,
@@ -5788,34 +5793,35 @@ function M.install(ctx, L)
   end
   -- Units are stamped with the engine world they were seen in. Within one engine world every unit stays usable (the
   -- ship loaded into the mission's world is the same engine world: the same units, re-stamped as they're seen). A
-  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Only two
-  -- worlds are kept, so the stamps can't pile up. A mod can keep a handle longer than that, though: refused in the
-  -- second world, it would be unknown in the third and pass as new. So a unit refused as gone (by current() or
-  -- util.gone()) goes in this world's carry set, and the next world's before is this world's stamps plus the carry
-  -- set, which then starts empty. The limit: a gone unit stays refused in every later world as long as something asks
-  -- about it at least once in each engine world; one nobody asks about for a whole world drops off after it, like any
-  -- other stamp. The carry set holds only units asked about in this world, so it can't pile up either.
-  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }),
-    carry = setmetatable({}, { __mode = 'k' }) }
+  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Keep stamps
+  -- from every earlier world, even if a mod leaves a retained handle unused for an entire intervening world. Both
+  -- sets have weak keys: they do not keep unit handles alive, and garbage collection removes their stamps once mods
+  -- release them. Memory use follows the handles still referenced, rather than every unit ever seen.
+  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }) }
   local function roll()
     if seen.inst ~= world.instance then
-      for u in pairs(seen.carry) do seen.now[u] = true end
-      seen.inst, seen.before, seen.now = world.instance, seen.now, setmetatable({}, { __mode = 'k' })
-      seen.carry = setmetatable({}, { __mode = 'k' })
+      for u in pairs(seen.now) do seen.before[u] = true end
+      seen.inst, seen.now = world.instance, setmetatable({}, { __mode = 'k' })
     end
   end
-  local function current(u)
-    if u == nil or not world.stable then return false end
+  local function stale(u, owner)
+    if seen.before[u] == nil or seen.now[u] then return false end
+    local a = owner and mod_records[owner]
+    if a and ctx.disable_uaf then ctx.disable_uaf(a) end
+    return true
+  end
+  local function current(u, owner)
+    if u == nil then return false end
     roll()
+    if stale(u, owner) or not world.stable then return false end
     if seen.now[u] then return true end
-    if seen.before[u] then seen.carry[u] = true; return false end
     seen.now[u] = true
     return true
   end
   -- a unit I know is new in this world (one a mod just spawned)
   local function fresh(u)
     roll()
-    seen.now[u], seen.before[u], seen.carry[u] = true, nil, nil
+    seen.now[u], seen.before[u] = true, nil
   end
   local said = {}
   local function once(key, line) if not said[key] then said[key] = true; log(line) end end
@@ -5828,7 +5834,7 @@ function M.install(ctx, L)
     if not c then return nil end
     if c == 'unit' then
       local u = ...
-      if not current(u) then return GONE end
+      if not current(u, owner) then return GONE end
       local k = unit_kind(u, owner)
       if k and BAD_KINDS[k] then
         local why = bad_why[k]
@@ -5847,11 +5853,10 @@ function M.install(ctx, L)
   util.current, util.fresh, util.unit_kind = current, fresh, unit_kind
   -- a unit stamped in an engine world before this one (calling anything on it ends the game); a unit not stamped yet,
   -- in a world that hasn't settled, isn't known gone
-  function util.gone(u)
+  function util.gone(u, owner)
     if u == nil then return true end
     roll()
-    if seen.before[u] ~= nil and not seen.now[u] then seen.carry[u] = true; return true end
-    return false
+    return stale(u, owner)
   end
   -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
   -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those.
@@ -5859,7 +5864,7 @@ function M.install(ctx, L)
   -- the call is checked
   function util.unit_refused(owner, name, u, stamped)
     if not stamped then
-      if util.gone(u) then return GONE end
+      if util.gone(u, owner) then return GONE end
       seen.now[u] = true                  -- stamped even before the world settles (the instance is already this one)
     end
     if class(name) ~= 'unit' then return nil end
@@ -5937,6 +5942,7 @@ function M.install(ctx, L)
   -- (ctx.dog: the loader's hang watchdog, told which mod's call runs; see loader.lua. ctx.color_scope: the frame's
   -- color cache emptied first, so no mod's callback gets a Color asked for in an earlier one)
   local function run(a, what, fn, ...)
+    if util.disabled(a.name) then return false end
     if ctx.color_scope then ctx.color_scope() end
     local t0 = L.clock()
     local D = ctx.dog
@@ -5951,6 +5957,7 @@ function M.install(ctx, L)
   -- for services: a mod's callback (an event, on_change, after_startup) timed as that mod's own; and a mod's own
   -- call that ran other mods' callbacks, whose time already went to them
   function util.timed(a, fn, ...)
+    if util.disabled(a.name) then return false, a.why end
     if ctx.color_scope then ctx.color_scope() end
     local t0 = L.clock()
     local D = ctx.dog
@@ -6078,6 +6085,7 @@ function M.install(ctx, L)
         local po, ps, pl, pn
         if D then po, ps, pl, pn = D.enter(j.a, t0) end
         for x = j.i + 1, last do
+          if util.disabled(j.a.name) then j.on = false; break end
           local ok, err = pcall(fn, list[x], x)
           if not ok then j.errors = j.errors + 1; failed(j.a, 'spread', err) end
           if j.errors >= 20 then j.on = false; break end
@@ -6672,6 +6680,7 @@ function M.install(ctx, L)
   function util.nearest_first(p, q) return p.d < q.d end      -- (chef.units_near's order)
   function util.extend(chef, a)
     local owner = a.name
+    mod_records[owner] = a
     local base_call, base_call_kind = chef.call, chef.call_kind
     -- chef.call and chef.call_kind refuse the known game-ending calls and the ones mods shouldn't make (each refusal
     -- logged once per mod; no strings built for one already logged). said_refused[0]: how many names; past CLASS_CAP
@@ -6718,13 +6727,13 @@ function M.install(ctx, L)
     end
 
     -- 1 units
-    function chef.unit_kind(u) if current(u) then return unit_kind(u, owner) end end
+    function chef.unit_kind(u) if current(u, owner) then return unit_kind(u, owner) end end
     function chef.unit_alive(u)
-      if not current(u) then return false end
+      if not current(u, owner) then return false end
       return base_call('Unit.alive', u) == true
     end
     local function asked(name, u, ...)
-      if not current(u) then return nil end
+      if not current(u, owner) then return nil end
       local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call('Unit.alive', u) ~= true then return nil end
@@ -6740,7 +6749,7 @@ function M.install(ctx, L)
       return fx, fy, fz, math.atan2(fx, fy)
     end
     function chef.unit_node(u, name)
-      if type(name) ~= 'string' or not current(u) then return nil end
+      if type(name) ~= 'string' or not current(u, owner) then return nil end
       local k = unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return nil end
       if base_call_kind('Unit.has_node', k, u, name) ~= true then return nil end
@@ -6825,7 +6834,7 @@ function M.install(ctx, L)
     end
     -- child's node (default 1, its root) onto parent's node (a name or an index; default 1)
     function chef.link(child, parent, parent_node, child_node)
-      if not (world.stable and current(child) and current(parent)) then return nil, 'not in this world' end
+      if not (world.stable and current(child, owner) and current(parent, owner)) then return nil, 'not in this world' end
       local pn = parent_node or 1
       if type(pn) == 'string' then
         pn = chef.unit_node(parent, pn)
@@ -6836,7 +6845,7 @@ function M.install(ctx, L)
       return true
     end
     function chef.unlink(child)
-      if not (world.stable and current(child)) then return nil, 'not in this world' end
+      if not (world.stable and current(child, owner)) then return nil, 'not in this world' end
       local _, err = base_call('World.unlink_unit', world.main, child)
       if err then return nil, err end
       return true
@@ -6866,7 +6875,7 @@ function M.install(ctx, L)
     -- a unit's lights: chef.lights(u) -> how many; chef.light(u, i) -> { set_color(r, g, b) (0-255), set_intensity(v),
     -- set_enabled(on), set_falloff(start, end), set_shadows(on) }, each asked fresh (no handle kept)
     function chef.lights(u)
-      local k = current(u) and unit_kind(u, owner)
+      local k = current(u, owner) and unit_kind(u, owner)
       if not k or BAD_KINDS[k] then return 0 end
       local n = base_call_kind('Unit.num_lights', k, u)
       return type(n) == 'number' and n or 0
@@ -6874,7 +6883,7 @@ function M.install(ctx, L)
     function chef.light(u, i)
       local L2 = {}
       local function get()
-        local k = current(u) and unit_kind(u, owner)
+        local k = current(u, owner) and unit_kind(u, owner)
         if not k or BAD_KINDS[k] then return nil end
         return base_call_kind('Unit.light', k, u, i or 1)
       end
@@ -8763,7 +8772,7 @@ function M.install(ctx)
   -- is made on the frame's first look only, as the engine world can't change before the next frame. gone is still
   -- checked on every call, ahead of the memo.)
   local function alive(rec, u)
-    if type(u) ~= 'userdata' or util.gone(u) then return false end   -- (before kind(): its tostring asks the engine)
+    if type(u) ~= 'userdata' or util.gone(u, rec.owner) then return false end   -- (before kind(): its tostring asks the engine)
     memo_frame()
     local k = memo.unit[u]
     if k == nil then
@@ -9579,14 +9588,16 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
   local function dispatch(o, event, ...)
+    if util.disabled(o.name) then return end
     local first
     for _, rec in ipairs(o.order) do
+      if util.disabled(o.name) then break end
       if rec.state == 'active' then
         local list = rec.callbacks[event]
         for i = 1, #list do
           local ok, err = pcall(list[i], ...)
           if not ok and first == nil then first = err end
-          if rec.state ~= 'active' then break end
+          if rec.state ~= 'active' or util.disabled(o.name) then break end
         end
       end
     end
@@ -11463,7 +11474,10 @@ end
 -- ------------------------------------------------------------------ unit watching (spread over frames)
 -- Addons say which unit kinds they want (resource id -> anything) and how often; one shared scan serves them
 -- all, and it only runs while somebody is watching, in a stable world.
-local watchers = { next_at = 0 }         -- next_at: no watcher is due before then (0: look again)
+-- addon: each watch's mod, kept off the watch itself (a mod can hand its watch to another mod). Weak both ways: the mod
+-- can reach its own watch (an exported module), and Lua 5.1 never collects a weak-keyed entry whose value reaches its
+-- key; addons holds every running mod's record, so no entry goes while its mod runs
+local watchers = { next_at = 0, addon = setmetatable({}, { __mode = 'kv' }) }   -- next_at: no watcher is due before then (0: look again)
 local job = nil
 local scan_off_noted = false
 local pos_keys = {}               -- kind -> "Unit.world_position:<kind>", built once
@@ -13358,16 +13372,16 @@ local function make_api(a)
     if type(kinds) ~= 'table' then return nil end
     -- PERF: at most a list every 0.5 s (every = 0, or w.refresh() each frame, would keep the full scan running all the
     -- time: 1,500 units a frame and two trace writes a scan, every frame in a small world)
-    local w = { owner = owner, a = a, kinds = kinds, every = max(0.5, tonumber(every) or 5), next = 0, items = {}, generation = 0,
+    local w = { owner = owner, kinds = kinds, every = max(0.5, tonumber(every) or 5), next = 0, items = {}, generation = 0,
                 active = true, want_now = true, owner_on = function() return a.on end, scan_ms = 0 }
-    watchers[#watchers + 1] = w
+    watchers[#watchers + 1], watchers.addon[w] = w, a
     watchers.next_at = 0
     function w.pause() w.active = false end
     function w.resume() if not w.active then w.active, w.want_now, watchers.next_at = true, true, 0 end end
     function w.refresh() w.next, watchers.next_at = min(w.next, max(elapsed, w.next - w.every + 0.5)), 0 end
     -- for good: it leaves the scan's list
     function w.stop()
-      w.active, w.items = false, {}
+      w.active, w.items, watchers.addon[w] = false, {}, nil
       for i = #watchers, 1, -1 do if watchers[i] == w then table.remove(watchers, i) end end
     end
     return w
@@ -13481,7 +13495,7 @@ function starter.off(a)
   a.game_env = nil                                   -- (its environment isn't kept for the session)
   if a.forgotten then return end
   a.forgotten = true
-  for i = #watchers, 1, -1 do if watchers[i].a == a then table.remove(watchers, i) end end
+  for i = #watchers, 1, -1 do if watchers.addon[watchers[i]] == a then watchers.addon[table.remove(watchers, i)] = nil end end
   for i = #kinds_from, 1, -1 do if kinds_from[i] == a then table.remove(kinds_from, i) end end
   local ok, err = pcall(svc.forget, a.name)
   if not ok then log('forgetting ' .. a.name .. ' failed: ' .. tr.why(err)) end
@@ -13777,6 +13791,7 @@ function starter.set_game_hooks(a)
 end
 -- What a mod is doing and why, for chef.mods() and chef_loader_health.txt (written at most every 5 s after a change).
 function starter.state(a, state, why)
+  if a.unsafe_unit and state ~= 'stopped' then return end
   local was = a.state
   a.state, a.why = state, why
   if state == 'running' then starter.publish(a.name) end
@@ -13788,6 +13803,30 @@ end
 function starter.stopped(name, why)
   local ok, err = pcall(svc.emit, 'mod_stopped', name, why)
   if not ok then log('the mod_stopped event failed: ' .. tr.why(err)) end
+end
+-- Stop scheduling the mod immediately; undo and forget it after its active callback returns.
+starter.unsafe_units = {}
+function starter.disable_uaf(a)
+  if a.unsafe_unit then return end
+  a.unsafe_unit, a.on = true, false
+  a.state, a.why = 'stopped', 'attempted to use a unit from a destroyed world (use-after-free prevented)'
+  svc.ctx.health_dirty = true
+  starter.unsafe_units[#starter.unsafe_units + 1] = a
+  log(fmt('Disabled %s: %s; disabled for this session', a.name, a.why))
+  notices[#notices + 1] = { text = svc.mod_title(a.name):upper() .. ' DISABLED: USE-AFTER-FREE PREVENTED', dur = 20 }
+end
+svc.ctx.disable_uaf = starter.disable_uaf
+function starter.flush_unsafe_units()
+  local list = starter.unsafe_units
+  if #list == 0 then return end
+  starter.unsafe_units = {}
+  for _, a in ipairs(list) do
+    a.cleaning_unsafe = true
+    starter.off(a)
+    a.cleaning_unsafe = nil
+    starter.state(a, 'stopped', a.why)
+    starter.stopped(a.name, a.why)
+  end
 end
 -- A boot-style mod or another mod's boot script that never started (it never reaches the boots list): listed too
 starter.unstarted = {}
@@ -14039,6 +14078,11 @@ function starter.addon(r)
       D.leave(po, ps, pl, pn)
       crumb('< ' .. a.name .. '|start')
       local took = starter.took(a, t0, k0)
+      if a.unsafe_unit then
+        if ok and type(m) == 'table' then starter.read_module(a, m) end
+        starter.flush_unsafe_units()
+        return a
+      end
       if ok and type(m) == 'table' then
         starter.read_module(a, m)
         if next(a.hooks) == nil and not a.hooks_mt and starter.data_only(m) then a.game_env = env end
@@ -14660,6 +14704,11 @@ function starter.named_one(r)
   D.leave(po, ps, pl, pn)
   starter.unseed(env)
   local took = starter.took(a, t0, k0)
+  if a.unsafe_unit then
+    boots[#boots + 1] = a
+    starter.flush_unsafe_units()
+    return
+  end
   if err ~= nil and ok == nil then
     starter.off(a)                     -- it may have set up timers, watches or events before it failed
     starter.never(r.name, r.file, 'not started', 'failed to run: ' .. tr.why(err))
@@ -14990,6 +15039,7 @@ function update(dt)
 end
 function starter.update_body(dt)
   if type(dt) == 'number' and dt > 0 and dt < 10 then elapsed = elapsed + dt end
+  starter.flush_unsafe_units()
   local okd, errd = pcall(starter.dog.frame)     -- (mods that hung since the last update: switched off)
   if not okd then log('the hang watchdog: ' .. tr.why(errd)) end
   -- the performance monitor: the mods' time so far, so my own share of this update is what's left
@@ -15046,6 +15096,7 @@ function shutdown()
   if st.down then return end
   st.down = true
   if starter.handoff then pcall(starter.dog.take) end
+  pcall(starter.flush_unsafe_units)
   for _, a in ipairs(addons) do pcall(run_hook, a, 'shutdown') end
   -- the other boot scripts' shutdown before the services close the mods' own logs and my trace closes (the file-mod
   -- installer does its work here)
@@ -15327,6 +15378,8 @@ ok, err = pcall(starter.updated_notice)
 if not ok then log('telling which mods were updated failed: ' .. tr.why(err)) end
 ok, err = pcall(svc.startup_done)
 if not ok then log('after startup failed: ' .. tr.why(err)) end
+ok, err = pcall(starter.flush_unsafe_units)
+if not ok then log('stopping unsafe mods failed: ' .. tr.why(err)) end
 svc.ctx.health_dirty = false
 ok, err = pcall(starter.health)
 if not ok then log('writing the health file failed: ' .. tr.why(err)) end
