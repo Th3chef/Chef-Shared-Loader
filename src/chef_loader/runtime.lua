@@ -138,7 +138,7 @@ function M.install(ctx)
   -- is made on the frame's first look only, as the engine world can't change before the next frame. gone is still
   -- checked on every call, ahead of the memo.)
   local function alive(rec, u)
-    if type(u) ~= 'userdata' or util.gone(u) then return false end   -- (before kind(): its tostring asks the engine)
+    if type(u) ~= 'userdata' or util.gone(u, rec.owner) then return false end   -- (before kind(): its tostring asks the engine)
     memo_frame()
     local k = memo.unit[u]
     if k == nil then
@@ -954,14 +954,16 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
   local function dispatch(o, event, ...)
+    if util.disabled(o.name) then return end
     local first
     for _, rec in ipairs(o.order) do
+      if util.disabled(o.name) then break end
       if rec.state == 'active' then
         local list = rec.callbacks[event]
         for i = 1, #list do
           local ok, err = pcall(list[i], ...)
           if not ok and first == nil then first = err end
-          if rec.state ~= 'active' then break end
+          if rec.state ~= 'active' or util.disabled(o.name) then break end
         end
       end
     end
