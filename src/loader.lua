@@ -5788,34 +5788,29 @@ function M.install(ctx, L)
   end
   -- Units are stamped with the engine world they were seen in. Within one engine world every unit stays usable (the
   -- ship loaded into the mission's world is the same engine world: the same units, re-stamped as they're seen). A
-  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Only two
-  -- worlds are kept, so the stamps can't pile up. A mod can keep a handle longer than that, though: refused in the
-  -- second world, it would be unknown in the third and pass as new. So a unit refused as gone (by current() or
-  -- util.gone()) goes in this world's carry set, and the next world's before is this world's stamps plus the carry
-  -- set, which then starts empty. The limit: a gone unit stays refused in every later world as long as something asks
-  -- about it at least once in each engine world; one nobody asks about for a whole world drops off after it, like any
-  -- other stamp. The carry set holds only units asked about in this world, so it can't pile up either.
-  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }),
-    carry = setmetatable({}, { __mode = 'k' }) }
+  -- unit seen in the engine world before this one is never touched again (any call on one ends the game). Keep stamps
+  -- from every earlier world, even if a mod leaves a retained handle unused for an entire intervening world. Both
+  -- sets have weak keys: they do not keep unit handles alive, and garbage collection removes their stamps once mods
+  -- release them. Memory use follows the handles still referenced, rather than every unit ever seen.
+  local seen = { inst = -1, now = setmetatable({}, { __mode = 'k' }), before = setmetatable({}, { __mode = 'k' }) }
   local function roll()
     if seen.inst ~= world.instance then
-      for u in pairs(seen.carry) do seen.now[u] = true end
-      seen.inst, seen.before, seen.now = world.instance, seen.now, setmetatable({}, { __mode = 'k' })
-      seen.carry = setmetatable({}, { __mode = 'k' })
+      for u in pairs(seen.now) do seen.before[u] = true end
+      seen.inst, seen.now = world.instance, setmetatable({}, { __mode = 'k' })
     end
   end
   local function current(u)
     if u == nil or not world.stable then return false end
     roll()
     if seen.now[u] then return true end
-    if seen.before[u] then seen.carry[u] = true; return false end
+    if seen.before[u] then return false end
     seen.now[u] = true
     return true
   end
   -- a unit I know is new in this world (one a mod just spawned)
   local function fresh(u)
     roll()
-    seen.now[u], seen.before[u], seen.carry[u] = true, nil, nil
+    seen.now[u], seen.before[u] = true, nil
   end
   local said = {}
   local function once(key, line) if not said[key] then said[key] = true; log(line) end end
@@ -5850,8 +5845,7 @@ function M.install(ctx, L)
   function util.gone(u)
     if u == nil then return true end
     roll()
-    if seen.before[u] ~= nil and not seen.now[u] then seen.carry[u] = true; return true end
-    return false
+    return seen.before[u] ~= nil and not seen.now[u]
   end
   -- refused() without the settled-world rule, for a mod that asks about units before the world settles (the HD2Runtime
   -- look-alike): only a unit known gone or a runtime-built one, for the calls known to end the game on those.
