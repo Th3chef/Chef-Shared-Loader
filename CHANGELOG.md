@@ -58,7 +58,7 @@
   them anew.
 - A `chef` helper handed a unit from a world that's gone now says so in the log, once per mod for each helper:
   `[mod] refused chef.unit_position: a unit from a world that is gone`. Its answer doesn't change, and `chef.unit_alive`
-  stays quiet, so checking a unit first is still the clean way.
+  stays quiet, so checking a unit first is still the clean way. (thanks sscoolqaz)
 - `chef.mods()` and `chef_loader_health.txt` have `skipped` (how many of a mod's calls the crash guard skips) and
   `timer_errors`: errors in timers and spread jobs now count in the mod list, the health file and the status line.
 - `mod_stopped` also comes for a mod stopped to be tried again from CRASH RECOVERY, and for a dev-mode reload.
