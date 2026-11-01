@@ -8,10 +8,10 @@ Condensed caps), with made-up mods open in them, and the loader's core features 
 Pillow, and Edge or Chrome to screenshot.
 
 How I build the set (from the repo root, the browser on the same system as the out dir):
-1. python3 art/make_art.py <out dir> [version, default 1.4.0]
+1. python3 art/make_art.py <out dir> [version, default 1.5.0]
    writes one self-contained page per picture into <out dir>, named after the PNG it becomes (thumbnail_1254.html
    and so on; the fonts, the menu's title picture from src/menu_banner.png and the background are all embedded),
-   then prints each page's screenshot size. The badge is the version's x.y; the menus are always the 1.4 menus.
+   then prints each page's screenshot size. The badge is the version's x.y; the menus are the current menus.
    (--mod <name> is still taken and ignored: the menus always show the made-up Example Mod.)
 2. Screenshot each page at its own size with a headless Edge or Chrome (both Chromium, same flags), e.g. on Windows:
      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --headless=new --disable-gpu
@@ -31,7 +31,7 @@ import base64, io, os, sys
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = ['1.4.0']                     # (the one the art is made for, from the command line)
+VERSION = ['1.5.0']                     # (the one the art is made for, from the command line)
 # the full screen look's title picture, the loader's own (src/menu_banner.png)
 BANNER = base64.b64encode(open(os.path.join(HERE, '..', 'src', 'menu_banner.png'), 'rb').read()).decode()
 FONTS = {'Anton': 'anton-latin-400-normal.woff2', 'BC': 'barlow-condensed-latin-600-normal.woff2',
@@ -40,11 +40,11 @@ TAGLINE = 'One Lua mod loader for Helldivers 2, and one F9 menu for every mod.'
 # The core features: a headline, its line under it, and the short tag the small pictures use. Each one says only what
 # README.md says (the section it comes from after it).
 FEATURES = [
-    ('One loader, every Lua mod', 'Loader addons and HD2 Lua Runtime mods, side by side', 'EVERY LUA MOD'),   # intro, Other mods' boot scripts
-    ('One F9 menu for every mod', 'Two looks; keyboard, mouse or controller', 'ONE F9 MENU'),                   # Running mods > Options menu
-    ('On/off for every mod', 'Off stops a mod at once and keeps it off', 'ON/OFF PER MOD'),                     # Crash guard > Switching a mod off
-    ('Crash guard + hang watchdog', 'Crashing calls skipped, hung mods stopped, Crash Recovery in F9', 'CRASH GUARD'),  # Crash guard, Known limits
-    ('Locked-down sandbox', "Mods can't change game settings or run console commands", 'LOCKED DOWN'),          # Security model
+    ('Switch mods on, no restart', 'A mod you switch on in F9 starts when the menu closes, if it can', 'ON WITH NO RESTART'),  # Crash guard > Switching a mod off
+    ('Try Again Now in Crash Recovery', 'A held mod starts again in the same launch', 'TRY AGAIN NOW'),         # Crash guard > Trying a mod again from the menu
+    ("Works beside Rat's Shared Loader", 'In either deploy order', "RAT'S SHARED LOADER"),                     # intro, and its section on working beside another loader
+    ('Safer saved data', 'Mod settings survive odd bytes and locked files', 'SAFER SAVED DATA'),               # Files on the player's computer
+    ('Smarter crash guard + hang watchdog', 'Learns crashes in more calls, stops more endless loops', 'SMARTER CRASH GUARD'),  # Crash guard, Known limits
     ('Performance monitor', "Every mod's milliseconds a frame, live", 'PERFORMANCE MONITOR'),                  # Running mods > Performance monitor
 ]
 # the made-up mods in the menus: the open one (its name, version and its status on the title bar) and the others in
@@ -53,7 +53,7 @@ MOD = ('EXAMPLE MOD', '1.0.0')
 STATUS = ('RUNNING', ' - STARTED IN 3.0 MS', ', +913 KB')
 OTHERS = [('RUNTIME MOD', '2.0.1'), ('YOUR MOD', '0.3.0')]
 # the switch's hint, as the loader shows it on the selected switch row
-SWITCH_HINT = 'OFF: STOPS NOW AND STAYS OFF. ON: STARTS AGAIN THE NEXT TIME YOU LAUNCH THE GAME.'
+SWITCH_HINT = 'OFF: TURNS OFF MOD. ON: TURNS ON MOD AFTER MENU IS CLOSED (IF POSSIBLE).'
 SIZE_HINT = 'HOW BIG THE MARKERS ARE ON SCREEN.'
 # the key hints (services.lua HINTS.value: a toggle, a choice, a slider or a color selected), ARROWS MOVE optional
 HINTS_VALUE = [(['ARROWS'], 'MOVE', True), (['<', '>'], 'CHANGE', False), (['DEL'], 'DEFAULT', False),
@@ -110,7 +110,7 @@ body { width:%(W)dpx; height:%(H)dpx; overflow:hidden; background:#0b0c0b; posit
 .title { font-family:'Anton'; color:var(--y); letter-spacing:0.015em; line-height:0.94; text-transform:uppercase;
   text-shadow:0 0.035em 0 #000, 0 0 0.1em rgba(0,0,0,.9), 0 0 0.45em rgba(255,214,40,.28); white-space:nowrap; }
 .badge { display:inline-block; font-family:'BCB'; text-transform:none; background:var(--y); color:var(--ink); padding:0.02em 0.3em 0;
-  line-height:1.05; letter-spacing:0.03em; box-shadow:0 0.08em 0.25em rgba(0,0,0,.7), 0 0 0.6em rgba(255,231,16,.5); }
+  line-height:1.05; letter-spacing:0.03em; text-shadow:none; box-shadow:0 0.08em 0.25em rgba(0,0,0,.7), 0 0 0.6em rgba(255,231,16,.5); }
 .tag { font-family:'BC'; color:#efe8d8; line-height:1.18;
   text-shadow:0 0.05em 0.05em #000, 0 0 0.3em rgba(0,0,0,.95); }
 /* the features: each with a lit row's yellow edge */
@@ -215,7 +215,7 @@ body { width:%(W)dpx; height:%(H)dpx; overflow:hidden; background:#0b0c0b; posit
 .pm .r { display:flex; align-items:center; height:1.6em; padding:0 0.8em; color:#dcded8; }
 .pm .r .n { flex:1 1 auto; }
 .pm .r .c { width:3.7em; text-align:right; }
-.pm .r.hd { color:#96ffb4; } .pm .r.al { color:#fff; } .pm .r.dm { color:var(--gy); }
+.pm .r.hd { color:#96ffb4; } .pm .r.al { color:#fff; } .pm .r.dm { color:var(--gy); } .pm .r.hv { color:#ff965a; }
 """
 
 
@@ -387,11 +387,11 @@ def compactview(x, y, w, size, pick=None, lit=5, note=SIZE_HINT, more=True, extr
 
 
 def perf(x, y, w, size, extra=''):
-    """the performance monitor (utilities.lua): the frame, all mods, each mod's ms, share and worst call, the loader"""
-    rows = [('FRAME 16.7 MS  60 FPS', ['MS', 'SHARE', 'WORST'], 'hd'), ('ALL MODS', ['0.92', '5.5%', ''], 'al'),
-            (MOD[0], ['0.61', '3.7%', '2.4'], ''), (OTHERS[0][0], ['0.24', '1.4%', '0.9'], ''),
-            (OTHERS[1][0], ['0.02', '0.1%', '0.3'], ''), ('LOADER', ['0.05', '0.3%', ''], ''),
-            ('THIS MONITOR', ['0.01', '0.1%', ''], 'dm')]
+    """the performance monitor (utilities.lua) with "Hide mods under 1 ms" on: the frame, all mods, the one mod over its
+    budget in orange, the other two on the shared line (their sum and the worst call among them), the loader"""
+    rows = [('FRAME 16.7 MS  60 FPS', ['MS', 'SHARE', 'WORST'], 'hd'), ('ALL MODS', ['1.43', '8.6%', ''], 'al'),
+            (MOD[0], ['1.12', '6.7%', '2.4'], 'hv'), ('MODS UNDER 1 MS', ['0.26', '1.6%', '0.9'], 'dm'),
+            ('LOADER', ['0.05', '0.3%', ''], ''), ('THIS MONITOR', ['0.01', '0.1%', ''], 'dm')]
     body = ''.join('<div class="r %s"><span class="n">%s</span>%s</div>' % (
         c, n, ''.join('<span class="c">%s</span>' % v for v in vs)) for n, vs, c in rows)
     return ('<div class="pm" style="left:%dpx;top:%dpx;width:%dpx;font-size:%.2fpx%s"><div class="tt">PERFORMANCE MONITOR</div>'
@@ -443,7 +443,7 @@ def main():
     if '--mod' in args:
         i = args.index('--mod'); del args[i:i + 2]
     out = args[0]
-    ver_ = args[1] if len(args) > 1 else '1.4.0'
+    ver_ = args[1] if len(args) > 1 else '1.5.0'
     VERSION[0] = ver_
     badge = 'v' + '.'.join(ver_.split('.')[:2])
     os.makedirs(out, exist_ok=True)
@@ -473,7 +473,7 @@ def main():
         ('gallery_1920x1080.png', 1920, 1080,
          glow(1250, 470, 760, 520)
          + title2(70, 64, 108, 46, TAGLINE, 31, 520)
-         + feats(72, 430, 560, 33)
+         + feats(72, 430, 600, 33)
          + label(650, 50, 28, 'FULLSCREEN', 'ON THE SHIP')
          + fullview(650, 92, 960, 18, pick=FP)
          + label(1392, 300, 28, 'COMPACT', 'IN MISSIONS')
@@ -489,13 +489,13 @@ def main():
          + fullview(44, 310, 960, 19.5, pick=FP, note=False)
          + label(764, 676, 34, 'COMPACT')
          + compactview(764, 724, 450, 15, pick=CPK, note=None)
-         + chips(44, 880, 690, 38, range(6))),
-        # GitHub (1280x640, 40 px kept clear all round): the title and four features on the left, the two looks right,
+         + chips(44, 880, 690, 34, range(6))),
+        # GitHub (1280x640, 40 px kept clear all round): the title and five features on the left, the two looks right,
         # the monitor under the full look
         ('GitHub-Social-1280x640.png', 1280, 640,
          glow(880, 300, 480, 340)
          + title2(44, 44, 74, 32, TAGLINE, 22, 400)
-         + feats(46, 318, 420, 25, which=[0, 1, 3, 4], sub=False)
+         + feats(46, 318, 430, 25, which=[0, 1, 2, 3, 4], sub=False)
          + label(486, 42, 19, 'FULLSCREEN', 'ON THE SHIP')
          + fullview(486, 72, 590, 10.9, pick=FP, note=False)
          + label(962, 196, 19, 'COMPACT', 'IN MISSIONS')
@@ -518,7 +518,7 @@ def main():
          glow(880, 110, 420, 200)
          + title1(30, 26, 58, 24)
          + '<div class="tag" style="position:absolute;left:32px;top:104px;width:540px;font-size:20px">%s</div>' % TAGLINE
-         + chips(32, 144, 570, 14, [0, 1, 2, 3, 4])
+         + chips(32, 144, 550, 13, [0, 1, 2, 4])
          + label(596, 4, 13, 'FULLSCREEN', 'ON THE SHIP')
          + fullview(596, 24, 460, 8.6, pick=[1, 3, 5, 7], note=False, stat=False)
          + label(1000, 50, 13, 'COMPACT', 'IN MISSIONS')
