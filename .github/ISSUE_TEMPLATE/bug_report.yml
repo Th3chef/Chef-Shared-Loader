@@ -9,8 +9,8 @@ body:
     id: version
     attributes:
       label: Loader version
-      description: The first line of chef_loader.log says it.
-      placeholder: 1.4.1
+      description: The newest start line in chef_loader.log (the last one reading "==== Chef Shared Loader ... starting") says it.
+      placeholder: 1.5.0
     validations:
       required: true
   - type: input
@@ -45,7 +45,7 @@ body:
     id: options
     attributes:
       label: Loader options
-      description: Anything you changed in F9 > Chef Shared Loader (Compact look, Controls, Language, the performance monitor), and whether you used CRASH RECOVERY, a mod's on/off switch or "Reset every option to its default" before it happened.
+      description: Anything you changed in F9 > Chef Shared Loader (Menu look, Language, Compact look, Controls, the performance monitor), and whether you used CRASH RECOVERY, a mod's on/off switch or "Reset every option to its default" before it happened.
   - type: textarea
     id: logs
     attributes:

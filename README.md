@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.4.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.5.0.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -10,11 +10,23 @@ the bottom), then Purge and Deploy. If a mod that replaces the game's `boot` scr
 loader's place and no loader mod runs, unless that mod's `boot` is the loader's start-up stub (see
 [Other mods' boot scripts](#other-mods-boot-scripts)).
 
+**Update:** replace the old zip with the new one in your mod manager, keep it at the highest priority, then Purge and Deploy.
+
 **With Rat's Shared Loader** (HD2 Transmog Foundation 1.1.2 and its Cache and Style Library need it): keep Rat's Shared
-Loader above Chef Shared Loader, as Transmog asks. Rat's Shared Loader then runs Transmog and the other HD2 Lua Runtime
-mods on its own runtime, and Chef Shared Loader runs below it with every Chef Shared Loader mod. Those mods then run
-without this loader's lockdown and trusted-mod permissions. The other order works too: then nothing hands off to Chef
-Shared Loader, so it runs those mods itself, on its look-alike of the HD2 Lua Runtime, locked down like its other mods.
+Loader above Chef Shared Loader, as Transmog asks. Rat's Shared Loader then runs Transmog and the other mods marked for
+it on its own runtime, and Chef Shared Loader runs below it with every Chef Shared Loader mod. Those mods then run
+without this loader's lockdown and trusted-mod permissions. Either order works: with Chef Shared Loader on top it runs
+Rat's Shared Loader as one of its boot scripts, Rat's Shared Loader still runs those mods on its own runtime, and its
+loading screen shows READY WITH WARNINGS because it asks to be on top. A mod made for the HD2 Lua Runtime that isn't
+marked for Rat's Shared Loader (no `-- @loader rat` line) runs on this loader's look-alike in both orders, locked down
+like its other mods. In both orders each mod Rat's Shared Loader runs is listed in F9 as a read-only row, "Run by Rat's
+Shared Loader", with no switch and no reset (its own HD2 Lua Runtime core is part of it, so that isn't listed), and mods it runs from one patch file share one row, the main mod's. While Rat's Shared Loader is deployed any addon can choose this by adding the
+`-- @loader rat` header line: it then runs under that loader, outside this loader's lockdown, F9 switch and crash guard.
+With Rat's Shared Loader on top, this loader starts its mods at its first `init` call, once Rat's Shared Loader has finished
+loading it (see [How it starts](#how-it-starts)), so a mod whose start ends the game goes to this loader's crash guard and
+isn't counted against this loader by Rat's Shared Loader. If Rat's Shared Loader already blocked this loader (`blocked: the
+game crashed while it loaded`), add the line its message gives, `allow boot@patch_N`, to `SharedLoader-choices.txt` in
+`%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs`, or redeploy so this loader's patch number changes.
 
 **Mods that need memory access won't work:** since the October 20, 2026 update (7.2.0) the game runs plain Lua 5.1, with
 no `ffi`, so no Lua mod can read or write game memory. No loader can bring that back.
@@ -24,7 +36,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.4.1
+- **Version:** 1.5.0
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -85,6 +97,12 @@ The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
    6. The Bingus look-alikes and the locked-down space are set up.
    7. Addons start, then `HD2-Boot` scripts, then other mods' boot scripts.
    8. `after_startup` callbacks run.
+7. **Under a hand-off** (another loader on top: see "Handing off to it" in [docs/MODDING.md](docs/MODDING.md)) steps 7
+   and 8 above wait for the loader's first `init` call, or its first `update` with a host that never calls `init`; steps
+   1 to 6 still run while the host loads it. Rat's Shared Loader counts a launch that ended while a boot loaded and refuses
+   that boot after two in a row, so with the mods started during the load a mod's start would count against this loader,
+   and block it, before the crash guard's second launch came. From `init` on that load is over, and the crash guard
+   settles it as it does with the loader on top. With the loader as the game's boot nothing waits.
 
 ## Discovery
 
@@ -98,14 +116,16 @@ The loader reads the deployed archives itself with `io`, from the game folder (t
   remaining fields (u32).
 
 **What it looks for:** Lua resources only (type `0xa14e8dfa2cd117e2`). Each one's data is `u32 length`, `u32 flag`
-(2 = source text), then the text. Only source text is accepted. A resource is a loader mod when its first line is
-exactly one of these:
+(2 for source text; 1 is taken too), then the text, which has to be source text. A resource is a loader mod when its
+first line starts with one of these (a text editor's mark in front of it, more text after the name and a Windows line
+end are all taken):
 
 | Header | Kind |
 |---|---|
 | `-- HD2-Addon: mods/<author>/<name>` | A module that returns a table of hooks |
 | `-- HD2-Boot: mods/<author>/<name>` | A boot-style script with global `init`/`update`/`render`/`shutdown` |
-| `-- HD2-Options: mods/<author>/<name>` | An options table for that mod (one per ticked Arsenal option folder) |
+| `-- HD2-Options: mods/<author>/<name>` | An options table for that mod (one per ticked Arsenal option folder; one deployed in the same patch as a left-out older copy of the mod is left out with it) |
+| `-- HD2-Lang: mods/<author>/<name>` | A language file (data only) |
 
 - **Names:** `<author>` matches `[%w_%-]+`; `<name>` is made of the same characters and may go on in more
   `/`-separated parts (`mods/<author>/<name>/core`), never ending in `/`.
@@ -138,7 +158,7 @@ exactly one of these:
   "Monitor opacity (%)" makes it see-through (10 to 100, 100 by default); "Monitor on pause screen only" keeps it off
   the HUD while you play: Missions (on the ship it shows as always) or Always (the ship too). "Budget (ms)"
   (1 ms by default) marks the mods over it in orange (and names them in the log); "Hide mods under N ms" (N follows the
-  Budget row) puts the rest on one line.
+  Budget row) puts the rest on one line. Past 12 rows the cheapest (and any that are off) share a +N MORE line.
 - **Options menu (F9):** the loader's own entry first (under a divider), then the mods in alphabetical order; Right
   opens one mod's options, under a < Back row (Left or Right on it goes back); Left/Right change an option, and on a
   key or a button Right sets the key or presses it and Left goes back to the list; Delete puts an option's default
@@ -193,7 +213,7 @@ exactly one of these:
   font) once the game has it loaded, laid out by measured width, long notices wrapped. Each text is kept and only
   changed when it changes, so an open menu or monitor costs a few rects a frame, not hundreds. The pixel font is the
   fallback (before the font is loaded, if text calls fail, after a crash in one).
-- **Notices:** the loader's messages on screen (a mod stopped, mods updated, a mod that starts at the next launch) and
+- **Notices:** the loader's messages on screen (a mod stopped, mods updated, a mod that starts when the menu closes) and
   mods' `chef.notify` ones are drawn centered on a dark plate under the game's logo, the first plate's top 18% down
   the screen, the next ones under it. A notice's time only starts once the game shows the ship or a mission (60 s at
   most after it could first be seen, if neither comes), so one made at start-up isn't spent on the loading screens.
@@ -203,7 +223,10 @@ exactly one of these:
   - **Mission:** it counts as a mission when it has more than 10 levels (the ship has one or two, a mission hundreds),
     whatever its size. Only if the engine can't count levels: above 5,000 units, or when mods' mission loot kinds are
     found in it.
-  - **Unit scan:** spread over frames at 1,500 units a frame. It runs only while a mod watches unit kinds.
+  - **Unit scan:** spread over frames at 1,500 units a frame. It runs only while a mod watches unit kinds. Once the
+    lookup by resource is trusted it's used instead, and while a mission has none of the watched kinds it answers too,
+    with a full scan every 30 s for each watch. A game that dies twice in a row in that lookup (`loader|lookup`)
+    loses only the lookup and the full scan carries on; one that dies twice in a row in the scan (`loader|scan`) stops it.
 
 ## Security model
 
@@ -225,7 +248,8 @@ Source: `src/chef_loader/sandbox.lua`.
   and its `stingray.Unit` are the same). A mod that replaces a library or engine function changes it only for itself;
   an engine object's metatable it reads is a copy too.
 - **The string metatable:** `getmetatable('')` returns a view whose `__index` is the mod's own `string` copy, never
-  the shared string metatable.
+  the shared string metatable. So `s:fn()` always reaches the game's own `string`: a function a mod adds to its copy
+  is called as `string.fn(s)` (`s:fn()` raises), and one it replaces there applies to `string.fn(s)` only.
 - **File handles:** `getmetatable(file)` returns `nil` (file methods are shared).
 - **Checks can't be bent:** the policy checks use functions captured before any mod runs.
 
@@ -239,18 +263,30 @@ Source: `src/chef_loader/sandbox.lua`.
 | `dofile`, `loadfile`, `module` | Raise errors (`module(..., package.seeall)` would hand out the game's globals). |
 | `require` | The mod's own `package.loaded`, then its own `package.preload` (a loop is an error), then only `bit`, `string`, `table`, `math`, `coroutine`, `table.new`, `table.clear` (the mod's own copies). Everything else raises an error: no C modules, and no `require('_G')`, `('debug')` or `('io')`. Another mod's exports go through `chef.require`; `require('mods/<author>/<name>')` and `package.loaded` give another running mod's module too (a trusted mod's never). |
 | `package` | A per-mod table (`loaded`, `preload`, empty `path`/`cpath`). No `loadlib`. |
-| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer`, every `*Lobby*` / `*GameServer*` table and, from 1.4.0, `Console`, `CommandWindow`, `ConsoleHelp`, `SaveSystem`, `Cloud` and `CloudToken`, and from 1.4.1 `Friends` (the friend list and invites), `SteamClient` (the lobby browser) and `SteamVoip`, `SteamVoipClient` and `SteamVoipRoom` (Steam voice chat) (each reads as `false`). `Steam` (from 1.4.1) keeps only `app_id`, `client_running`, `connected`, `is_installed`, `language`, `overlay_active`, `owns_app` and `user_name`: no `open_url` (the Steam overlay), `install_event` or `user_id`. `Application` (from 1.4.0) keeps everything but the calls that write files, change or save the player's settings or open a browser (`save_render_target`, `set_user_setting`, `open_url_in_browser` ..., and any name with save, write, dump, export, capture, screenshot, url or browser in it). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `synchronizing_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `game_object_field_batched`, `is_*`, `has_*`, `get_*`, `num_*`; `game_object_field_batched` answers only for an object that exists, and a game that ends in it two launches in a row skips that call for that mod, which stays on as after any crash of its own: it's turned off only after it ends 3 launches in a row) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
-| `debug` | `traceback` and `getinfo` (levels shifted past the wrapper, `func` removed). No `getlocal`, `getupvalue`, `setupvalue`, `getregistry`, `sethook`, `getmetatable`, `setfenv`. |
-| `getfenv` / `setfenv` | A function of the game, of the loader or of another mod reads as the caller's own environment and can't be changed. Level 0 (the thread) reads as the mod's own and can't be set. |
+| Engine tables | `stingray` and the globals without `PluginManager`, `Http`, `WebSocket`, `Localizer`, every `*Lobby*` / `*GameServer*` table and, from 1.4.0, `Console`, `CommandWindow`, `ConsoleHelp`, `SaveSystem`, `Cloud` and `CloudToken`, and from 1.4.1 `Friends` (the friend list and invites), `SteamClient` (the lobby browser) and `SteamVoip`, `SteamVoipClient` and `SteamVoipRoom` (Steam voice chat), and from 1.5.0 `RPC` (the engine's network messages), `LanClient` (the LAN lobby browser), and `Leaderboard`, `LeaderboardTransactionToken` and `Presence` (the player's Steam account and what friends see) (each reads as `false` in the globals and `nil` in `stingray`). From 1.5.0 `Achievement` keeps only `unlocked`, `Stats` only `get`, and `AI` all but `find_intersecting_units`. `Steam` (from 1.4.1) keeps only `app_id`, `client_running`, `connected`, `is_installed`, `language`, `overlay_active`, `owns_app` and `user_name`: no `open_url` (the Steam overlay), `install_event` or `user_id`. `Application` (from 1.4.0) keeps everything but the calls that write files, change or save the player's settings or open a browser (`save_render_target`, `set_user_setting`, `open_url_in_browser` ..., and any name with save, write, dump, export, capture, screenshot, url or browser in it). `Network` keeps only its reads (`peer_id`, `game_session`, `is_*`, `has_*`, `get_*`, `num_*`), without names with lobby, server, join, connect, create, leave, send or dump; `GameSession` keeps only its reads (`in_session`, `peers`, `other_peers`, `synchronizing_peers`, `game_session_host`, `game_object_field`, `game_object_exists`, `game_object_owner`, `game_object_is_type`, `objects_owned_by`, `unit_synchronizer`, `game_object_field_batched`, `is_*`, `has_*`, `get_*`, `num_*`; `game_object_field_batched` answers only for an object that exists, and a game that ends in it two launches in a row skips that call for that mod, which stays on as after any crash of its own: it's turned off only after it ends at least 4 launches in a row) and `Network.object_info`; `UnitSynchronizer` only its lookups (`game_object_id_to_unit`, `unit_to_game_object_id`, `is_*`, `has_*`, `get_*`, `num_*`). A call a game update adds stays out until it's known to be a read. An engine object's metatable gives the trimmed table. `chef.call` refuses the same. |
+| `debug` | `traceback` and `getinfo` (levels shifted past the wrapper, `func` removed, an option string starting `>` raises `invalid option`). No `getlocal`, `getupvalue`, `setupvalue`, `getregistry`, `sethook`, `getmetatable`, `setfenv`. |
+| `getfenv` / `setfenv` | A function of the game, of the loader or of another mod, or one in a custom environment the mod didn't set itself (`setfenv`, or the table passed to `load`), reads as the caller's own environment and can't be changed. Level 0 (the thread) reads as the mod's own and can't be set. |
+| `newproxy` | The mod's own metatable, with a locked one on it: a `__gc` written there is dropped (logged once), since a finalizer runs with no hooks and no `pcall`, past the hang watchdog and past the mod's stop. |
 | `collectgarbage` | `count`, `step` and `collect` only. Other options (`stop`, ...) do nothing. |
 
 **File policy** (`sb.check`, applied to `io.open` and `io.lines`):
 - **Reads are allowed** directly in the loader's folder, which is also the game's settings folder
   (`%APPDATA%\Arrowhead\Helldivers2\`), for a mod's own files: never the loader's files (`chef_loader*`), another
-  mod's saved tables (`chef_data_*`) or a `.log` the mod didn't open to write this launch; below it only
+  mod's saved tables (`chef_data_*`) or a `.log` the mod doesn't hold this launch; below that folder only
   `saves\<id>_user_settings.config`. Reads are allowed under the game's `data\` too, and for
   `.log .txt .json .csv .dat .ini .marker .fatal` files directly in the old `%LOCALAPPDATA%\` folder (a `.log` only
-  after the mod opened it to write this launch), so a mod can pick up its own old files.
+  one the mod holds), so a mod can pick up its own old files. When the loader's folder is `%LOCALAPPDATA%\` itself
+  (the game's folder can't be written), the same rule holds there.
+- **Who holds a `.log`:** the first mod this launch to make it new or start it with `w`, or to open it with
+  `chef.own_log` or the look-alike's `open_log`; only that mod reads it back. A log from an earlier launch that it
+  doesn't hold is written on with `a` (`a+` acts as `a`, with no read on the handle), `r+` is refused, and `w` on a log
+  another mod holds appends instead of emptying it. The first `a` on such a log holds the name for no reader: other
+  mods' `w` and `open_log` append, and its own `w` still takes it, until another mod has written there this launch.
+  `chef.own_log` on a log from an earlier launch holds it for
+  reading only when the file's first line, written by `chef.own_log`, names that mod, and only then starts it fresh
+  past 1 MB; a mod's own log that lost that line comes back with `w`, the same way. Mods share one registry of these
+  names, case folded. No owner is kept across launches, so a mod that starts a log with `w` first takes that name for
+  the launch, though the old text is gone by then.
 - **A mod's own files in `%LOCALAPPDATA%\`:** a file opened directly there (one name, an allowed type) is opened in
   the loader's folder instead, under the same name (said once per mod in the log). A read of one not there yet falls
   back to `%LOCALAPPDATA%\`.
@@ -263,8 +299,10 @@ Source: `src/chef_loader/sandbox.lua`.
 - **Case and slashes:** comparisons are case-insensitive, and `/` counts as `\`.
 - **Old files carry over:** a read of a missing file directly in the loader's folder falls back to the same name in
   the old `%LOCALAPPDATA%\` folder.
-- **Denials are logged:** the first 10 per mod go to `chef_loader.log` as `blocked: <mod> tried to open <path>
-  (<mode>): <reason>`, with the player's folders shown as `%APPDATA%` / `%LOCALAPPDATA%`.
+- **Denials are logged:** the first 10 file refusals per mod go to `chef_loader.log` as `blocked: <mod> tried to open
+  <path> (<mode>): <reason>` (`tried to read` for `io.lines`), with the player's folders shown as `%APPDATA%` /
+  `%LOCALAPPDATA%`. An `io.open` read of a path starting `..\` is refused with no line: it's a mod looking for a folder.
+  Nor is any other refusal logged: `dofile`, `io.popen` and the rest write nothing.
 
 **Trusted mods** (`TRUSTED` in `loader.lua`, by HD2-Addon name; granted through `sb.grant`):
 - **Only installed ones get grants.** The log says `trusted: <mod> (...)` at start-up.
@@ -273,7 +311,9 @@ Source: `src/chef_loader/sandbox.lua`.
 - **No files:** a trusted mod's files are every mod's (above): nothing in `data\`, no `os.remove` or `os.rename`.
 - **Screenshots** (`capture` in the entry, from 1.4.0): `chef.capture()`. The loader makes the engine call
   itself and saves the picture in its own folder as `<author>_<mod>_capture_01.dds` to `_50` (the oldest
-  written over), one a second at most; see Trusted mods in [docs/MODDING.md](docs/MODDING.md).
+  written over), one a second at most. `chef.capture('depth')`, under the same grant, saves the scene's depth as
+  `<author>_<mod>_depth_01.dds` or `_02` (its render target isn't confirmed in game); see Trusted mods in
+  [docs/MODDING.md](docs/MODDING.md).
 - **Getting on the list:** see [How a mod gets on the list](docs/MODDING.md#how-a-mod-gets-on-the-list) in
   docs/MODDING.md.
 
@@ -295,6 +335,10 @@ Some engine calls end the game with a native fault (a null read on a stale handl
   - `> owner|call` / `< owner|call`: the first time each engine call is made, and its return. A mod's start code and
     its own hooks count too (`<mod>|start`, `|update`, `|render`, `|shutdown`, `|options`), so a mod whose own code
     ends the game is blamed.
+  - The same for a mod's callbacks, keyed by where the callback's code sits so each place is learned on its own:
+    `<mod>|<kind>:<line>:<file>`, kind `after_startup`, `event`, `on_change` or `button` on its first run, `after`,
+    `every`, `spread` or `spread done` until one run from that place has finished (a spread: every batch, until a job
+    from there has finished).
   - `>> owner|job @<s>` / `<< owner|job`: a per-frame job starting and ending.
   - `f <mod> <fingerprint>`: the file of each mod (and boot script) this launch runs, so a crash is counted against
     that file.
@@ -309,21 +353,26 @@ Some engine calls end the game with a native fault (a null read on a stale handl
     nothing is refused for every mod. The log names it and says so. The suspicion goes after a launch that doesn't end
     in it.
   - **The next launch ending in the same call or job** is a crash: it is skipped from then on, and both launches count
-    against the mod that made it. The mod stays on until it has ended 3 launches in a row; then it is turned off. So a
-    mod that crashes the game in one call after another is turned off at its 4th crash in a row (2 calls, each
-    suspected once, then skipped), one launch later than if a single crash were enough. A launch it doesn't end starts
-    the count over; a launch only suspected of ending in its call keeps the count as it was.
+    against the mod that made it. The mod stays on until the count reaches 4, so at least 4 launches in a row; then it
+    is turned off. Launches only ever count in those twos, so a mod that crashes the game in one call after another is
+    turned off at its 4th crash in a row (2 calls, each suspected once, then skipped), one launch later than if a single
+    crash were enough. A launch it doesn't end starts the count over; a launch only suspected of ending in its call
+    keeps the count as it was.
   - **A mod whose start code ends the game** (`<mod>|start`) twice in a row isn't started from then on, until its file
-    changes. It doesn't wait for 3 in a row.
+    changes. It doesn't wait for 4 in a row.
   - **A launch that reached `shutdown()`** is never blamed. The game often crashes by itself after a menu quit.
 - **State** (`chef_loader_state.txt`):
   - `rule: 3`
   - `version: <loader version>`, `build: <game build>`
+  - `test: <n>` (a Test build's number: a different one drops the loader's own skips, as a new version does)
+  - `trace: stale` (the crash trace wouldn't open, so its lines aren't read again until it does)
   - `skip: <owner|call>`
   - `suspect: <key>`
   - `off: <mod> <fingerprint> <reason>`
   - `strikes: <mod> <launches in a row> <fingerprint>` (kept at 0 while the mod has skipped calls, so an update of it
     tries them again)
+  - `end`, the last line. A `.tmp` that ends in it is a whole save that couldn't be put in place, and is read ahead of
+    the state file; any other `.tmp` is read only when there's no state file.
 - **Coming back on:** a mod turned off comes back on by itself when its source changes (an update: the fingerprint
   differs), and the calls of its that crashed are tried again. `-- HD2-Keep-On-Crash: yes` in a mod's first lines
   keeps it on, with only the crashing call skipped. It keeps its skipped calls, and they're tried again when it's
@@ -331,23 +380,47 @@ Some engine calls end the game with a native fault (a null read on a stale handl
   update installed after the crash but before the next launch counts as a change too.
 - **Trying a mod again from the menu** (from 1.4.0): F9 > Chef Shared Loader > **CRASH RECOVERY** lists every mod
   the crash state holds back (kept off, crashes counted in a row, skipped calls, suspected calls; the row's hint says
-  which), each with a **Try again next launch** button. Pressed, that mod's lines leave the state file: the next
-  launch starts it and tries its skipped calls again, and a call only suspected of the last crash is a first
-  suspicion again (skipped only if two launches in a row end in it). Nothing changes in the launch you press it in.
-  Other mods' boot scripts that the loader runs are listed too, each named by the patch file it's in (by its
-  fingerprint when that file isn't deployed).
+  which), each with a RETRY button. A mod held off, or running with calls skipped, has **Try again now**: pressed,
+  its lines leave the state file at once and it starts when the menu closes, in the same launch, its skipped calls
+  tried again (a running mod is stopped first, its `on_stop` runs, and it starts fresh). If it ends the game again
+  it's blamed at the next launch as any mod, its count starting over. With the mod's switch off its lines go and
+  it doesn't start: switching it on then starts it. The other rows are **Try again next launch**: another mod's boot
+  script that the loader runs (each named by the patch file it's in, by its fingerprint when that file isn't
+  deployed), a mod left to another loader, one whose file isn't found, one stopped in this launch (by errors, a hang
+  or itself), one that didn't start for another reason (a missing requirement, say), a running mod with nothing
+  skipped, or a mod with no `on_stop` that ran in this launch (a try again has to start it fresh, on top of what it changed). A row whose mod started in this launch with nothing left against it (its file changed, say) reads
+  **Nothing held back** and does nothing. Pressed, a next-launch row's lines leave the state file: the next launch
+  starts it if nothing else stops it and tries its
+  skipped calls again, a call only suspected of the last crash is a first suspicion again (skipped
+  only if two launches in a row end in it), and nothing changes in the launch you press it in.
 - **Trying a mod again by hand:** delete `chef_loader_state.txt` (and `chef_loader_state.txt.tmp` if it's there)
   with the game closed. It clears every mod's skipped calls and crash counts. Use it if the last launch before 1.3.1
   crashed and a fixed update of the mod was installed before relaunching (that launch's trace names no files).
 - **Switching a mod off** (from 1.4.0): every mod's options in F9 start with its on/off switch, which shows the
   mod's name and, dimmer, its version (once the mod has started). Off stops the mod at once (it puts back what it
-  can, as when the loader stops a mod) and it stays off; on, it starts again the next time you launch the game.
-  Mods with no options of their own are listed for this row too. Searching for a mod's name finds it.
+  can, as when the loader stops a mod) and it stays off; on, it starts when the menu closes, with no relaunch (once a
+  world that's loading has settled). A mod that ran in this launch and has no `on_stop` can't put back what it changed,
+  and a new copy on top of that can break things, so off only pauses it: it stops running, what it changed or spawned
+  stays until you switch it back on, and on, the same copy carries on when the menu closes. A mod left not
+  started by a requirement or a start that failed tries again the same way: off, then on, and it starts when the menu
+  closes if it can by then. A mod that can't start now says what comes of it: one stopped in this launch by errors, a
+  hang or itself starts at the next launch; one the crash guard holds says it's held and points to CRASH RECOVERY
+  (**Try again now** there brings it back, the switch doesn't, and neither does a next launch); one left to another
+  loader says so, and nothing here starts it. A part of a package waits for its main mod: while that's stopped the
+  part doesn't start alone, and the log says so.
+  Mods with no options of their own are listed for this row too. Searching for a mod's name finds it. A mod another
+  loader runs is listed too, with one read-only row and no switch or reset: "Run by <that loader>", or "Left to <that
+  loader>, not running" when that loader blocked it or never started it. The HD2 Lua Runtime core such a loader bundles
+  (`mods/hd2rt/core`) is part of that loader, so it isn't listed. Mods another loader runs from one patch file share
+  one such row, named for the main mod (one whose name isn't a generic one such as `core`, one with an `@name` first,
+  else the first by name); the log, the health file and `chef.mods()` still name each of them.
   Mods deployed in one patch file (a mod and the helpers it ships) are one package: one entry with one switch, the
   main mod's (the one with options or a title of its own, else the one whose name isn't a generic one such as `core`
   or `main`, else the first by name); its other parts are listed under INCLUDED with their state, their options
-  under their names, and the switch and Reset cover them all. The entry's title bar shows how the mod is doing, at
-  the right of its name (running, off, kept off by the crash guard, stopped or not started, and why), its start's
+  under their names, and the switch and Reset cover them all. Any of the file's mods saved off keeps the whole package
+  off, also when an update adds a mod to the file. The entry's title bar shows how the mod is doing, at
+  the right of its name (running, off, CRASH GUARD, stopped or not started, and why; CRASH GUARD is a mod the crash
+  guard holds off, with the reason, or one running with calls skipped, with how many), its start's
   cost and its last error (red, dim gray once five minutes pass without a new one; on the compact panel's yellow bar
   in a dark ink with a small square of the state's color before it, the error in a dark red), what doesn't fit
   dropped first (the memory, then the time, then the error is cut): a screenshot of the bar is a good start for a bug
@@ -358,11 +431,14 @@ Some engine calls end the game with a native fault (a null read on a stale handl
 - **Mod updates** (from 1.4.0): when a mod's version differs from the one it had at the last launch, the log says
   `updated <mod>: <old> -> <new>` and the screen shows it for 8 s (`TREASURE RADAR UPDATED: 0.6.0 -> 0.7.0`, or how
   many mods were updated). The versions are kept in `chef_loader_settings.txt` (`_loader` lines `ver.<author>.<mod>`);
-  a mod seen for the first time, one that's off this launch and one with no version say nothing.
+  a mod seen for the first time, one that's off this launch, one with no version and one whose version is over 64
+  characters say nothing.
 - **Shared with every mod:** a call on one kind of unit that took only the unit (`chef.call_kind(call, kind, unit)`,
   or `chef.lights`) and ended the game is refused for every mod, not only the one that found it
   (`skip: shared|Unit.<call>:<unit kind>`). Other mods get `nil, 'skipped'` for that same call on that kind and stay
-  on. It is tried again when the loader or the game's build changes.
+  on. It is tried again when the loader or the game's build changes. This covers `chef.call_kind` and `chef.lights`
+  only: `chef.call`, a mod's own `stingray` and the HD2 Lua Runtime look-alike's calls don't ask about it, and a crash
+  in one of those isn't shared.
 - **Refused centrally:** engine calls known to end the game are refused before they reach the engine.
 
 ## Other mods' boot scripts
@@ -372,17 +448,36 @@ A mod that ships its own `boot` (instead of `HD2-Boot`) would normally replace t
 - **When it deploys before the loader:** the loader runs it too.
   - **Its own space:** it gets an environment whose `_G` is itself, with `loadstring`/`load`/`dofile` sealed to that
     environment. A boot that loads code can't overwrite the loader's callbacks: that was a bug with another mod's
-    loader in older builds.
+    loader in older builds. `rawget(_G, name)` reads the game's global for a name it hasn't set (never the four game
+    callbacks), so a boot gated on `rawget(_G, 'stingray')` runs. `pairs(_G)` still lists only what it set itself.
   - **Full access:** it otherwise keeps everything, as the game would give it. Locking it down would only break it
     (the file-mod installer swaps game files at exit), and a boot deployed after the loader gets everything anyway.
     The log line says `with full access`.
   - **Its first run** (the boot script's own code as it loads) is watched by the hang watchdog with the 10 s a mod's
     start gets: one that runs on past that is stopped, logged as `the boot script in <patch> failed to run: stopped by
-    the hang watchdog ...`, and not started this session, so an endless loop there no longer freezes the game.
+    the hang watchdog ...` (Rat's boot stub as `Rat's Shared Loader failed to run: ...`), and not started this session,
+    so an endless loop there no longer freezes the game.
   - **Callbacks:** each of its callbacks is called after the loader's own, crash-guarded, and switched off after 20
     errors. The hang watchdog covers them too (one that runs on past 3 s is stopped and the boot script switched off
     for the session), except its `shutdown`, which may take its time: the file-mod installer swaps game files there.
   - **Identical copies** (fingerprint) run once.
+  - **Rat's Shared Loader's boot stub** (its first line starts `-- HD2 Shared Loader boot stub`) is one of these, on
+    purpose: it starts Rat's Shared Loader under this one. The log, CRASH RECOVERY, the health file and the performance
+    monitor call it Rat's Shared Loader. The mods marked for it (`-- @loader rat`) and the HD2 Lua Runtime's core are
+    then left to it. If the crash guard holds the stub back, or skips its first run or one of its own callbacks, the
+    stub doesn't run, the core isn't started and this loader's look-alike runs those mods. A callback a mod it runs left
+    in the game's globals has a crash key of its own: a skip takes that callback alone (CRASH RECOVERY and the health
+    file still count it on the stub's row), and the stub and its mods go on. Its crashes still count toward the stub's
+    crashes in a row, so enough of them hold the stub back too.
+  - **The sweep after the boot scripts:** the stub runs everything in a pcall of its own, so a core that's missing or
+    fails raises nothing here. Rat's Shared Loader puts an entry in `package.loaded` for every marked mod it starts or
+    blocks, so once the boot scripts have run, a left mod with no entry was never touched, and it starts on this
+    loader's look-alike, with a log line and a notice. That's every left mod when its core never came up (the log and
+    the stub's `why` in the health file say so, and the HD2 Lua Runtime's core isn't started), or one mod its own
+    reading doesn't take while this loader's does: a name with a `-` in it, more text after the name on the first line,
+    a text editor's mark in front of that line, a resource not named what its first line says, or a dev mode file. A
+    mod it blocked, or one that failed under it, has its entry and stays left. With Rat's Shared Loader on top it has
+    run before this loader starts, and nothing is swept.
 - **When it deploys after the loader:** the game runs only that mod's `boot`, and no loader mod runs, unless that
   `boot` is the loader's start-up stub. A mod author fixes it for good by shipping the stub as the mod's `boot` (or by
   porting the mod to `-- HD2-Boot:`); see "Carrying the stub" in [docs/MODDING.md](docs/MODDING.md).
@@ -393,8 +488,8 @@ A mod that ships its own `boot` (instead of `HD2-Boot`) would normally replace t
   - Boots that are copies of this loader: the start-up stub, a changed copy of it, or the loader built into a mod
     (they carry the `--@@LOADER@@` marker). The log lists them (`boot scripts of mine, not run: ...`).
   - The HD2 Lua Runtime's own boot (its first line starts `-- HD2 Lua Runtime`): its mods run on the loader's
-    look-alike of it (`src/chef_loader/runtime.lua`). When a loader that bundles that runtime handed off to this one,
-    they're left to that loader instead.
+    look-alike of it (`src/chef_loader/runtime.lua`). When a loader that bundles that runtime runs here, in either
+    order, the mods marked for it (`-- @loader rat`) are left to that loader instead.
   - Other mod loaders: a boot whose source mentions both `HD2-Addon` and `9ba626afa44a3aa3`, or carries
     `__boot_mod_loader`, such as Boot Mod Loader. Running one would start every addon a second time. The log and the
     screen name it.
@@ -433,8 +528,8 @@ Filled in only where the game lacks it. Nothing of the game's is replaced.
   - `bit`: the full LuaJIT API with identical results, checked against native LuaJIT on 19,850 vectors.
   - `table.new`, `table.clear` and `table.unpack`.
   - `require('bit')`, `require('table.new')` and `require('table.clear')`.
-- **In each mod's environment:** an `xpcall` that passes extra arguments, and a `load` that takes a string or a
-  reader (text only).
+- **In each mod's environment:** an `xpcall` that passes extra arguments (a function handler isn't run for the hang
+  watchdog's error), and a `load` that takes a string or a reader (text only).
 - **Not possible from a script:** `ffi`, the JIT and LuaJIT bytecode.
 
 ## Files on the player's computer
@@ -442,7 +537,8 @@ Filled in only where the game lacks it. Nothing of the game's is replaced.
 All in `%APPDATA%\Arrowhead\Helldivers2\`.
 - **Why there:** the game keeps its own settings there, so every player has the folder, and the game's Lua can't create
   folders.
-- **Fallback:** if the folder can't be written, the loader uses `%LOCALAPPDATA%\`.
+- **Fallback:** if the folder can't be written, the loader uses `%LOCALAPPDATA%\`. If only the log can't open there
+  (another program holds it), only the log goes to `%LOCALAPPDATA%\` for that launch.
 - **Mods find the folder** in `chef.log_directory`.
 
 | File | Holds |
@@ -451,16 +547,17 @@ All in `%APPDATA%\Arrowhead\Helldivers2\`.
 | `chef_loader.old.log` | The launches from before the log last started fresh, oldest first: the newest whole launches (each from its `==== Chef Shared Loader ... starting` line) within 4 MB; one launch over 4 MB on its own is kept whole. If it can't be written (in use, disk full), the log starts fresh as before and its second line says why. `.tmp` and `.bak` files next to it exist only while it's being replaced. |
 | `chef_loader_state.txt` | The crash state (see Crash guard). |
 | `chef_loader_trace.txt` | This launch's breadcrumbs (written again with only what's open whenever it passes 200 KB). |
-| `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. The loader's own lines are `_loader`'s: its options (`opt.<id>`), each mod's version at the last launch (`ver.<author>.<mod>`, for the update notices) and a mod's headings opened or closed against their default (`fold.<mod>.<heading>`, with characters other than letters, digits and `_ . -` written as `_`: `fold.mods_you_my_mod.Look`). |
-| `chef_loader_health.txt` | Every mod found, with its state and why, its time a frame, and how long its start took (`start_ms`) and how much Lua memory it added then (`start_kb`, approximate: the game shares that memory) (tab-separated; written after start-up, after changes and at shutdown, only when its text changed: the times are looked at once a minute). |
+| `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. In a string, `\\`, `\n` and `\t` stand for those bytes and `\xHH` for any other control byte. A file that's there but can't be read at launch (locked) isn't replaced: that launch runs without its values and nothing is saved over the file until it reads. The loader's own lines are `_loader`'s: its options (`opt.<id>`), each mod's version at the last launch (`ver.<author>.<mod>`, for the update notices) and a mod's headings opened or closed against their default (`fold.<mod>.<heading>`, with characters other than letters, digits and `_ . -` written as `_`: `fold.mods_you_my_mod.Look`). |
+| `chef_loader_health.txt` | Every mod found, with its state and why, its time a frame, how long its start took (`start_ms`), how much Lua memory it added then (`start_kb`, approximate: the game shares that memory) and how many of its calls the crash guard skips (`skipped`) and its errors in timers and spread jobs (`timer_errors`) (tab-separated; written after start-up, after changes and at shutdown, only when its text changed: the times are looked at once a minute). |
 | `chef_loader_lang_missing.txt` | While a language is on: the texts it has no entry for, as lines ready for its `text` table. |
 | `chef_loader_stub.txt` | Only after a launch whose start-up stub couldn't load the core: that one line (removed once it's logged). |
 | `chef_loader_dev.txt` | Made by hand: dev mode's file list (`reload = <key>` optional; test builds only). |
-| `chef_data_<author>_<mod>__<name>.lua` | A mod's saved table (characters other than `a-z 0-9 -` are written as `_` and two hex digits). It is text only and is loaded with an empty environment. |
+| `chef_data_<author>_<mod>__<name>.lua` | A mod's saved table (characters other than `a-z 0-9 -` are written as `_` and two hex digits). It is text only and is loaded with an empty environment. A table saved under an older name is copied to this one the first time the mod loads it; the old file stays. |
 | `<name>.log` | A mod's own log (`chef.own_log`). |
 
 **Moving from `%LOCALAPPDATA%`** (where older builds kept these files): on the first launch, the state, settings,
-dev list and breadcrumbs are copied, checked and removed from the old place. A file already in the new place wins.
+dev list and breadcrumbs are copied, checked and removed from the old place. A file already in the new place wins; an
+old one that differs from it is kept in the old place as `<name>.kept`, and an identical one is removed.
 
 The old place keeps a trace:
 - **The old `chef_loader.log`** gets a last line pointing to the new place.
@@ -472,7 +569,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.4.1 starting`
+- `==== Chef Shared Loader 1.5.0 starting`
 - When the log had passed 1 MB: `the last log passed 1 MB, so this one starts fresh; its launches are now at the end of
   chef_loader.old.log (N KB: ...)`, or `couldn't keep the last log's launches in chef_loader.old.log (<why>); this log
   starts fresh as before`.
@@ -490,9 +587,10 @@ The old place keeps a trace:
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
 - `options menu: F9, or the controller's touchpad / View held 2 s on the ship (to change the key without the menu: ...)`
   (the controller part only while "Controller in this menu" is on its first choice).
-- `mods run locked down: ... (sandbox 1.4.1)`, and on the first launch after the move,
-  `moved from %LOCALAPPDATA% ...`.
-- `hang watchdog: on (a mod's call over 3 s, or its start over 10 s, is stopped and the mod switched off)`, or
+- `mods run locked down: ... (sandbox 1.5.0)`, and on the first launch after the move,
+  `moved from %LOCALAPPDATA% ...`; `set aside in %LOCALAPPDATA% ...` when a file there differed from the one in the new
+  place; `the log could not open in %APPDATA%\Arrowhead\Helldivers2 ...` on a launch that logs in the old place.
+- `hang watchdog: on (a mod's call over 3 s, or its start at launch over 10 s, is stopped and the mod switched off)`, or
   `hang watchdog: off (another debug hook is set)` (never for the hook of a loader that handed off to me: mine takes its
   place during my calls).
 - `crash recovery: N mod(s) held back by the crash state (options menu > Chef Shared Loader > CRASH RECOVERY)`
@@ -504,28 +602,70 @@ The old place keeps a trace:
 - `two copies of <mod>: running the one deployed last (...)`
 - `not started: <mod> <why>`, such as `not started: <mod> (switched off in the options menu)`
 - `kept off: <mod> (...)`
-- `blocked: <mod> tried to open ...`
+- `blocked: <mod> tried to open ...` (`tried to read ...` for `io.lines`)
 - `switched off <mod> for this session: it hung (a call ran over 3 s)` (another mod's boot script is named
   `boot:<fingerprint>`)
+- `<mod> stopped after 20 errors`, an `HD2-Boot` mod by its name, another mod's boot script as `the boot script in
+  <patch file>`; either way a notice names it on screen
 - `switched off <mod> in the options menu (and at the next launches)` and
-  `<mod> switched on in the options menu: it starts at the next launch`
-- `crash recovery: <mod> is tried again at the next launch (<what held it back>)` (a boot script named by its patch
-  file)
+  `<mod> switched on in the options menu: it starts when this menu closes`. For a mod that can't start now the end
+  says what comes of it: `it starts at the next launch`, `the crash guard holds it (CRASH RECOVERY in this menu can try it again)`, `it's left to another loader, so I don't start it`, or, for a package's part whose main mod isn't coming,
+  `it waits for <main mod>, the main mod of its package, and doesn't start alone`
+- `starting <mod> in this launch (switched on)` or `(tried again)`, then its usual `started` line
+- `resumed <mod> in this launch (switched on): the same copy carries on`: a mod with no `on_stop` that was only paused
+- `<mod>: not started in this launch after all (<why>)`: something moved between the switch or the button and the menu
+  closing (switched off again, stopped, it stopped itself, left to another loader, its package's main mod didn't start)
+- `crash recovery: stopping <mod> to start it again`: a running mod tried again, as the menu closes
+- `<part> starts with <main>, the main mod of its package, when this menu closes`: Try again now on a main mod brings
+  the parts left waiting for it, their switches on
+- `<mod> starts with <part>, a part of its package, when this menu closes`: Try again now on a part brings the main mod
+  and the other parts that part left waiting. A part whose main mod still isn't coming doesn't start: the `not started in
+  this launch after all` line above, the notice `<PART> WAITS FOR <MAIN>`, and Try again now on that main mod brings it
+- `crash recovery: <mod> is tried again in this launch (<what held it back>)`,
+  `crash recovery: <mod> is no longer held back (<what held it back>); it starts when it's switched on`, or
+  `crash recovery: <mod> is tried again at the next launch (<what held it back>)` (a boot script named by its patch
+  file, Rat's boot stub as Rat's Shared Loader)
 - `options reset to defaults: <mod> (<n> row(s))`
 
 **Other boots:**
-- `running another mod's boot script too, with full access ...`
+- `running another mod's boot script too, with full access ...` (for Rat's boot stub, ending in `(Rat's Shared Loader)`)
+- `the boot script in <patch>: <callback> error: ...`, `the boot script in <patch> stopped after <n> errors`, `could not
+  compile the boot script in <patch>: ...`, `kept off: the boot script in <patch> (...)` and `running the callbacks the boot
+  script in <patch> set before it started me (<n>)`; Rat's boot stub is named `Rat's Shared Loader` in place of `the boot
+  script in <patch>` in each
+- `kept off: Rat's Shared Loader (a call of it is skipped after a crash)`: the crash guard skips one of its own callbacks,
+  so the stub isn't run in this launch
 - `<loader>'s boot script is in <patch>, below mine: not run, it would start every addon a second time; ...`, or
   `<loader>'s boot script in <patch> handed off to me: I run its mods`
+- `my mods start at my first init, once <loader> has finished loading me`: another loader handed off to this one
 - `the HD2 Lua Runtime's boot script in <patch> (...): not needed, its mods run on my look-alike of it`, or, when a
-  loader that bundles that runtime's core handed off to me, `... not needed, its mods are left to the loader that
-  bundles its core (in <patch>)`
+  loader that bundles that runtime's core runs here (it handed off to me, or it runs as one of my boot scripts),
+  `... not needed, its mods are left to the loader that bundles its core (in <patch>)`
 - The runtime's core that another loader bundles as an addon: `the HD2 Lua Runtime in <patch> (mods/hd2rt/core): left
-  to the loader that bundles it, which runs that runtime's mods` when that loader handed off to me, else
-  `the HD2 Lua Runtime in <patch> (mods/hd2rt/core): not needed, no loader handed off to me, so its mods run on my
-  look-alike of it`. With the handoff, for each mod that announces `@requires` / `@after mods/hd2rt/core`:
+  to the loader that bundles it, which runs that runtime's mods` when that loader runs here, else
+  `the HD2 Lua Runtime in <patch> (mods/hd2rt/core): not needed, the loader that bundles it isn't running here, so its
+  mods run on my look-alike of it`. While it runs here, for each mod with a `-- @loader rat` line:
   `<mod> (<patch>): made for the HD2 Lua Runtime, whose own core is in <patch>: left to the loader that bundles it, not
   started on my look-alike`
+- `<loader> never came up: nothing left to it has a package.loaded entry, so my look-alike runs those mods`: the
+  sweep after the boot scripts found nothing it touched. The real stub raises no error of its own, so this line, not
+  a `failed to run`, is what a missing or failing core shows
+- `<mod> (<patch>): left to <loader>, which never touched it: it's mine to start`, with a notice that counts the ones
+  that run: that core never came up, or it doesn't read this mod as marked (see The sweep after the boot scripts above)
+- `<mod>: left to <loader>, which didn't start it: not started here either`: that loader refused the mod, or it failed
+  under it (with this loader on top, the line comes once the boot scripts have run)
+- `unit names can't be read (...)`, with the notice `GAME UPDATE? UNIT CALLS REFUSED`: no unit name has read this launch,
+  so a game update may have changed them. Mods' unit asks stay refused rather than risk ending the game; once a launch
+- `<loader>: a mod it runs replaced the game's update: I put mine back and run that one after its own`: a mod that
+  loader runs set a game callback the plain way, with this loader on top
+- `<loader>: its mods keep replacing the game's callbacks: I put mine back and keep no more of theirs`: after 16 kept
+  callbacks; mine still go back
+- `<loader>: the <callback> a mod it runs left in the game's globals hung (a call ran over <n> s): I stopped that one`
+- `<loader>: the <callback> a mod it runs left in the game's globals stopped after <n> errors`: that callback alone
+  stops; the loader and its mods go on
+- `<mod>: its requirement is there now, starting it`: it waited for a mod left to a loader that runs after it
+- `warning: <mod> has both marks, HD2-Requires: chef-shared-loader and @loader rat: <loader> doesn't read the first and
+  started it, so it runs there and not here; it should say only one`
 - `the boot script in <patch> (<its first line>) installs file mods from your mod manager, and Medic File Mod Merger
   manages the game's settings files here (...): both write the same files, so untick these in your mod manager and
   deploy (...): <file mod> in <patch>, ...`, or `... installs Medic File Mod Merger's own merged pack (...)`
@@ -544,7 +684,8 @@ The old place keeps a trace:
   shutdown these two start with `shutdown:`.
 - `options menu: the mouse's dead zone was found held after the menu let it go: put back`
 
-**When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`,
+**When the numbers move (at most every 60 s, else every 10 minutes):** `status: loader avg/max ms | <mod> on avg/max ms ...`
+(the loader's figures are its own, the mods' time taken out; a mod's part ends in `errors N` and `timer errors N` when it has any),
 ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the menu has opened once that launch.
 
 **Crash guard:**
@@ -552,6 +693,9 @@ ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the 
 - `the last launch ended inside <owner|call> (a call that never returned): ... nothing is skipped or counted for it yet; ...`
 - `the last launch ended while <job> was running; if the next one ends the same way, I skip it ...`
 - `the last launch crashed in: <owner|call> (the launch before it ended in it too; that call is skipped from now on)`
+- `skipped <mod|kind:line:file> (it crashed the game)`, once a launch: a timer or spread whose callback is skipped
+- `[<mod>] event <name>: skipped (it crashed the game)`, once a launch: a listener whose callback is skipped;
+  `[<mod>] after_startup: skipped`, `[<mod>] on_change <id>: skipped` and `[<mod>] button <id>: skipped` as they come up
 
 ## Cost
 
@@ -572,7 +716,7 @@ ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the 
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.4.1 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.5.0 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
@@ -580,7 +724,7 @@ build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything e
 | Path | What it is |
 |---|---|
 | `src/loader.lua` | The core (`mods/chef_shared_loader/core_1`), or the boot script of a mod with the loader built in. It carries the modules below inline, because the game runs a Lua resource as one script. |
-| `src/stub.lua` | The start-up stub, the patch's `boot` (frozen: `tools/build.py` pins its sha256 and stops when it changes; `run_tests.sh` checks it too). |
+| `src/stub.lua` | The start-up stub, the patch's `boot` (frozen: `tools/build.py` pins its sha256 and stops when it changes). |
 | `src/chef_loader/compat.lua` | The LuaJIT parts. |
 | `src/chef_loader/probe.lua` | The once-a-launch Lua probe. |
 | `src/chef_loader/services.lua` | The api 2 services, the options menu, the look-alikes and dev mode. |
@@ -611,8 +755,11 @@ Lua 5.1's limit of 200 active locals (about a dozen free), so new start-up code 
   every engine table (and of the tables inside them, three levels down), so a function a mod replaces there is
   replaced for that mod only.
 - **Time and memory:** the hang watchdog (from 1.4.0) stops a mod's call that runs on past 3 s (10 s for its
-  start) and switches the mod off for the session, but it can't stop a stuck engine call, and it's off for the
+  start at launch) and switches the mod off for the session, but it can't stop a stuck engine call, and it's off for the
   session when another script has set a Lua debug hook. A mod can still allocate without limit.
+- **String patterns** run in C, where no hook runs: one that backtracks hard (`('a?'):rep(32) .. ('a'):rep(32)`) freezes
+  the game past the watchdog, and the crash guard doesn't help. A very long pattern of `?` on a very long text can run
+  out of C stack past any `pcall`, which may end the game (seen on plain Lua 5.1, not checked in the game).
 - **Bingus-style hooks:** a mod that hooks the frame by replacing `update` in its globals (keeping the one it found)
   has its function run as that mod's hook, guarded and timed. It never replaces the game's own `update`.
 - **HD2 Lua Runtime mods** get that runtime's API, not its programs or Desktop writes: a runtime mod's buttons that

@@ -1,5 +1,160 @@
 # Changelog
 
+## 1.5.0
+
+**Safety**
+- Saved data keeps every byte. A string in `chef.save` and a saved table (`chef.save_table`), keys included, come back as
+  they were: `\xHH` stands for a control byte in `chef_loader_settings.txt`, so a NUL or a byte 26 can't cut the file and
+  lose the lines after it, and a raw byte 26 an older build left there no longer cuts it either.
+- A table that saves always loads, up to exactly 256 KB, and a bigger one stops at 256 KB straight away instead of
+  freezing the game. `chef.save` holds 256 KB per mod. A slow settings save no longer repeats every 3 s: the next waits
+  20 times as long as it took.
+- A settings file that's there but can't be read at launch (another program has it locked) isn't replaced. That launch runs
+  without its values, nothing is saved over the file until it reads, and what changed meanwhile goes on top of it then.
+- A switch-off holds. Any of a file's mods saved off keeps the whole package off, also when an update adds a mod to the
+  file, and a mod switched off stays off even if its stop crashes the game.
+- A log that can't open no longer moves a launch's files: only the log goes to `%LOCALAPPDATA%` for that launch, and the
+  state and the settings stay where they are. The first move of your files to the game's folder can't leave a short copy
+  behind, a failed move still loads your settings, and an old file that differs from the one in the new place is kept as
+  `<name>.kept`, not removed.
+- Crash information survives a locked state file, and a saved crash is no longer lost when the file can't be replaced. A
+  locked trace file no longer blames a working mod for an old crash, launch after launch.
+- Crash learning reaches a mod's callbacks. A crash in `chef.after_startup`, a `chef.on` listener, an `on_change`, a
+  button's `run`, `chef.after`, `chef.every` or `chef.spread` is now learned like one in `update`: suspected the first
+  time, skipped if the next launch ends in it too. It goes by where the callback's code sits, so a skip takes that place
+  alone and the mod stays on. A skipped timer stops, and a skipped spread ends with `done(false)`.
+- The same for the unit lookup: a game that dies twice in a row in the lookup by resource loses only the lookup, and the
+  full unit scan carries on. The crash guard no longer hides a job that opened before the drawing did.
+- The hang watchdog catches loops it used to miss: a mod that keeps calling the loader's helpers, a loop that spends nearly
+  all its time in a listener or `on_change` it fires, a loop in a module's `__index` as the loader reads it, an option label
+  made with `loadstring`, and an error object with an endless `__tostring`, boot-style mods' too. A function handler given
+  to `xpcall` isn't run for the watchdog's error, so it can't loop there or retry what hung.
+- An options file with an endless loop no longer freezes the launch: the log says why and the mod starts without it.
+- A boot script's update hooks are now covered by the hang watchdog and end when the script stops. A slow shutdown hook is
+  still left to finish.
+- A unit kept from an earlier world stays refused in every later world, even if nothing asked about it in between, or the
+  mod only ever made other calls on it: by the `chef` helpers, by `chef.call` on the `Unit` calls and on destroying,
+  linking, dismembering or mending a unit, and by HD2 Lua Runtime mods' engine calls. A unit from `chef.watch` or a
+  `World.units` list counts as seen when it's listed. (thanks sscoolqaz)
+- If a game update changes unit names, mods' unit calls are refused instead of risking a crash, and a notice says so once
+  a launch. A refused unit call now says why: no unit, no world yet, or a unit whose name can't be read.
+
+**New for mods**
+- A late start. A mod switched on in the options menu, or tried again from CRASH RECOVERY, starts in the same launch, once
+  a world that's loading has settled. It's the same start as at launch, and it gets what a launch gives a mod once, to that
+  mod alone: its `after_startup` callbacks, `startup`, a boot-style mod's `init()`, then `world` and `mission_start` if a
+  mission is under way. A late start gets a call's 3 s from the hang watchdog, not the 10 s of a start at launch.
+- A mod with no `on_stop` and no `handle.on('stop')` that ran in this launch isn't started again: it's paused, and resumed
+  as the same copy, so it can't take what it left behind for the game's own. Add `on_stop` to get a full stop and a fresh
+  restart instead. See "Starting late" in `docs/MODDING.md`.
+- `chef.watch` hands back a small handle: `w.items`, `w.generation`, `w.active` (now documented: false while paused or
+  stopped), `w.pause()`, `w.resume()`, `w.refresh()` and `w.stop()`. The loader's own fields are gone from it, so `w.a`,
+  `w.next` and `w.kinds` are nil. Keep your own `kinds` table: change it in place and call `w.refresh()`. It's read raw, so
+  a metatable on it isn't asked. Kinds work in any case, and a stopped watch stays empty.
+- Option specs are copied when you register a row, lists included, so editing a label or a list afterward doesn't change
+  the row, and one table can be reused for the next row. A label or choice given as a function stays live. A label or
+  choice that's a table or userdata shows `?`. `chef.texture_sizes` copies its lists too.
+- `chef.share`: a mod's values go when the loader stops it, so nil means it isn't running, and a mod started again shares
+  them anew.
+- A `chef` helper handed a unit from a world that's gone now says so in the log, once per mod for each helper:
+  `[mod] refused chef.unit_position: a unit from a world that is gone`. Its answer doesn't change, and `chef.unit_alive`
+  stays quiet, so checking a unit first is still the clean way.
+- `chef.mods()` and `chef_loader_health.txt` have `skipped` (how many of a mod's calls the crash guard skips) and
+  `timer_errors`: errors in timers and spread jobs now count in the mod list, the health file and the status line.
+- `mod_stopped` also comes for a mod stopped to be tried again from CRASH RECOVERY, and for a dev-mode reload.
+- A requirement that another loader really runs counts as met, and so does a running `HD2-Boot` mod. A versioned
+  `HD2-Requires` reads a mod's header `-- @version`, so it works on HD2 Lua Runtime mods too. A mod waiting for one that
+  runs below this loader is tried again after that loader has run. The log tells `(not installed)` from `(deployed, but off)`.
+- A `chef.call` or `chef.call_kind` name that isn't a string answers `nil, 'missing'`.
+- `handle.missing()` names an engine call this game build lacks.
+- `package.loaded` and `require` see a running `HD2-Boot` mod.
+
+**Changes**
+- Switching a mod in F9 works in the same launch. A mod with no `on_stop` that you switch off is paused: it stops running,
+  what it changed or spawned stays, and switched back on, the same copy carries on when the menu closes. A mod with
+  `on_stop`, or one that was off at launch, starts when the menu closes, when it can. A mod stopped in this launch by
+  errors, a hang or itself starts at the next launch.
+- CRASH RECOVERY's **Try again now** restarts a mod in the same launch: its crash lines go at once, a running mod is stopped
+  first (its `on_stop` runs), and it starts when the menu closes with its skipped calls tried again. A row that can't do
+  that stays **Try again next launch**, a mod with no `on_stop` that ran in this launch among them, and one with nothing
+  left against it reads **Nothing held back**.
+- A crash-guarded mod shows CRASH GUARD in the menu: one the crash guard holds off, with the reason, or one running with
+  calls skipped, with how many.
+- Rat's Shared Loader:
+  - Works in either deploy order. With Chef Shared Loader on top it runs as one of this loader's boot scripts and still
+    runs its mods on its own runtime, and its loading screen shows READY WITH WARNINGS because it asks to be on top.
+  - Only the mods marked for it (`-- @loader rat`) are left to it. A mod that only says `@requires` or `@after`
+    `mods/hd2rt/core` runs on this loader's look-alike in both orders. If its core never comes up, the look-alike runs the
+    marked mods too.
+  - The mods it runs show a read-only row in F9, "Run by Rat's Shared Loader", with no switch and no reset. Mods from one
+    patch file share a row named for the main mod; the log, the health file and `chef.mods()` still name each of them. The
+    core itself isn't listed.
+  - With it on top, a crash in a mod's start no longer gets this loader blocked by it: this loader starts its mods at its
+    first `init` call, once Rat's Shared Loader has finished loading it, so the crash guard settles that crash. A player it
+    already blocked stays blocked until they add the line `allow boot@patch_N` to `SharedLoader-choices.txt` in
+    `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs` (its blocked message gives the exact line), or a redeploy changes this
+    loader's patch number.
+- A stopped mod lets go of its memory: its environment, its module and its hooks aren't kept for the session.
+- The performance monitor folds mods past 12 into a +N MORE line.
+- The status line's loader time no longer includes the mods' time.
+- One log line is 64 KB at most.
+- A mission with none of the kinds a mod watches no longer walks every unit all mission. The lookup by resource answers, a
+  full scan still runs every 30 s for each watch, and anything found goes back to normal right away.
+
+**Fixes**
+- The HD2 Lua Runtime look-alike kept the id of a material a mod replaced, to put it back when the mod stopped, and using
+  that id later could end the game. It now keeps the id's text and makes a fresh id to put back.
+- A long-running mod swapping one text label no longer hits the primitive limit.
+- Options menu and monitor:
+  - Holding the D-pad no longer flips a mod's switch or a two-way option.
+  - A touchpad / View hold started while the menu was open no longer reopens it after it closes.
+  - A mouse button held when the mouse comes back to the menu no longer counts as a click or grabs a slider.
+  - A hand-set menu key in capitals or with a stray space works, and a key the menu uses falls back to the default.
+  - Unlabeled options show their id instead of the mod's whole path, very small slider steps show correctly (0.0001,
+    0.0625), and button rows no longer offer DEL DEFAULT.
+  - Mods with a hyphen in their name keep their whole name as their heading, and a mod in nested generic folders, such as
+    `mods/foo/src/main`, shows as "foo".
+  - A part's reset shows when its first toggle comes after its button, and two mods with look-alike names no longer share
+    a saved fold.
+  - Long-named mods get their update notice.
+  - A mod's status keeps its room on a long-named row: the title is cut with dots, not the reason the mod is off.
+  - A D-pad Right held on a closed fold opens it and stops there, rather than stepping in and changing its first row.
+  - The monitor keeps its spot when a drag is cut off by the pause screen closing or the full menu opening.
+- Languages: the word SEARCH is translated, typed searches stay out of the missing-texts file, a hint no longer stays in
+  English after a busy frame, and a gone language file no longer shows as held back.
+- Boot-style mods and boot scripts:
+  - One that stops after errors is named on screen and in the log.
+  - A boot-style mod's error shows as LAST ERROR, its budget check, status line and health times work, and its
+    `handle.on` callbacks run. What it needs and lacks shows in `chef.mods()` and the health file.
+  - A boot callback that returns nil and a message no longer counts as an error.
+- Logs and notices:
+  - A failing guard shows in the log, and the log names why an options file couldn't be read.
+  - The "overridden" notice names only the mod that said HD2-Exclusive.
+  - Start-up notices last their real seconds when a mod speeds up the game's time.
+- A mod's options from an older copy left installed no longer come back.
+- A header line crossing byte 1200 is read to its end, one too far down is named in the log, and HD2-Keep-On-Crash is read
+  as far as HD2-Requires.
+- For mod authors:
+  - `chef.screen()` is right from the first frame, `chef.key_down(nil)` answers false, `chef.typed()` gives each mod its own
+    raw list, `chef.setting` gives each mod its own copy, and `chef.sprite` notices rows changed in place.
+  - `chef.ray_box` takes a direction of any length.
+  - Spread jobs stop where you cancel them, and call `done(false)` after 20 errors.
+  - Key reads through `chef.call` stay quiet while the options menu is open.
+  - Controller bindings work by either pad family's name for every button, and a missing button is logged. Dead zones set
+    by several runtime mods go back as the first found them, in any stop order.
+  - A mod can read back its own `chef.own_log` and `open_log` files, and `io.lines` finds a mod's old files in
+    `%LOCALAPPDATA%`, as `io.open` does.
+  - `return getfenv()` works as a mod's last call, and a boot script's `rawget(_G, 'stingray')` finds the game's globals.
+- Tools:
+  - The packing tools stop on a `--header-from` file that isn't a patch.
+  - A clone of the repo with Git's Windows line endings on builds: Lua and Python files stay LF.
+  - `pack_addon` reads mod.json as UTF-8 on every system, accepts a text editor's mark, and says so when the file is saved
+    as ANSI. It no longer warns about that mark or an options header, and it notes a mod name the loader would skip, an empty
+    or cut name, and an option aimed at no packed mod.
+- Docs: corrected what a first line allows, language files, `chef.world_id`, `chef.sprite`, what `chef.mouse_held()` sees of
+  another mod's dead zone, and the crash count (4 launches in a row). New: what string patterns can't be stopped, and how a
+  function added to `string` is called.
+
 ## 1.4.1
 
 **Safety**
