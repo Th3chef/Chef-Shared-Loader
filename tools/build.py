@@ -27,7 +27,7 @@ import re
 # the version comes from the loader itself, so the zip, the manifest and the log always agree
 VERSION = re.search(r"^local VERSION = '([^']+)'", open(os.path.join(HERE, 'src', 'loader.lua'), encoding='utf-8').read(), re.M).group(1)
 GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader's mod id (fixed: mod managers match updates by it)
-ZIP_DATE = (2026, 10, 29, 0, 0, 0)
+ZIP_DATE = (2026, 11, 1, 0, 0, 0)
 # The start-up stub is frozen: mods ship it byte for byte as their own boot, and the loader tells it from a changed copy
 # by its fingerprint (scan.STUB in loader.lua). A new stub is a new core name (core_2) and a new release of both.
 STUB_SHA256 = '7da502fea32b041b320bc7b14b7cf6d24b0334860fced8832e8ca2b3910477e1'
@@ -37,7 +37,7 @@ args = sys.argv[1:]
 OUT = args[0]
 TEST = int(args[args.index('--test') + 1]) if '--test' in args else None
 assert '--header-from' in args, 'pass --header-from <a Lua patch that works on the current game>'
-HEADER = open(args[args.index('--header-from') + 1], 'rb').read()[12:72]
+HEADER = h.lua_header_from(args[args.index('--header-from') + 1])
 assert len(HEADER) == 60
 
 # Test builds only, opt in: with CSL_BUILD_CACHE=<dir> (a test runner sets one per run, for the dozens of suites that each

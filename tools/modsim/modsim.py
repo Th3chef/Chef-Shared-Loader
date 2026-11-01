@@ -89,6 +89,7 @@ def parse_args(argv):
 
 
 def header_line(path, src, need=True):
+    if src[:3] == b'\xef\xbb\xbf': src = src[3:]        # (one text editor's mark: the loader drops it too)
     first = src.split(b'\n', 1)[0].decode('utf-8', 'replace').rstrip('\r')
     m = HEADER_RE.match(first)
     if not m:
@@ -102,7 +103,7 @@ def collect(a):
     patches, names = [], []
     for path in a['files']:
         if path.endswith('.json'):
-            spec = json.load(open(path, encoding='utf-8'))
+            spec = json.load(open(path, encoding='utf-8-sig'))
             base = os.path.dirname(os.path.abspath(path))
             core = []
             for item in spec.get('lua', []):

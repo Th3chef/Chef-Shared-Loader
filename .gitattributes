@@ -4,3 +4,5 @@
 *.ttf binary
 *.woff2 binary
 *.zip binary
+*.lua text eol=lf
+*.py text eol=lf

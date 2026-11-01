@@ -33,13 +33,18 @@ def read_archive(path):
 # wrong header installs but does nothing in game.
 KNOWN_HEADER_25327279 = bytes.fromhex('00000000ce09f5f400000000a05345216b807fe000af620300000000008f660000000000000000000000000000000000000000000000000000000000')
 
+def lua_header_from(path):
+    """Bytes 12..72 of the patch at path, the header a new patch takes from it. Stops on a file that isn't a patch."""
+    src = open(path, 'rb').read(72)
+    if len(src) < 72 or struct.unpack_from('<I', src, 0)[0] != MAGIC:
+        raise SystemExit('%s is not a patch archive: pass a Lua patch that works on the current game' % path)
+    return src[12:72]
+
 def write_archive(path, entries, header_from=None):
     """header_from: a patch of the same kind (material/texture/unit) that works on the CURRENT game,
     e.g. the mod's last in-game-tested patch rebuilt from fresh Filediver extracts. Pass it on every build."""
     if header_from:
-        src = open(header_from, 'rb').read()
-        assert struct.unpack_from('<I', src, 0)[0] == MAGIC, 'header_from is not a patch archive'
-        hdr = src[12:72]
+        hdr = lua_header_from(header_from)
         if hdr != KNOWN_HEADER_25327279:
             print('note: archive header differs from build 25327279 (expected after a game patch); using header_from')
     else:
