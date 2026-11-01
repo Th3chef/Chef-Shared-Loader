@@ -56,7 +56,7 @@ python3 tools/modsim/modsim.py my_mod.lua --scenario next_mission
   for a zip you install.
 - **Shows** whether your mod starts, its `chef.log` lines and own logs, Lua errors, refused calls, budget warnings,
   the texts it drew, and a crash where the game would have crashed (a unit kept from a world that's gone, say, with
-  `--scenario next_mission`).
+  `--scenario next_mission`). A `chef` helper handed such a unit logs one `refused chef.unit_position: ...` line instead.
 - **Doesn't show** how it looks, or anything of the game beyond what a mod reads through the loader. What's
   simulated and what isn't: [tools/modsim/README.md](../tools/modsim/README.md).
 

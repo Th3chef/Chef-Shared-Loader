@@ -38,13 +38,13 @@
 ---| 'color'   # a color: the value is 'RRGGBB' (from 1.4.0)
 
 ---@alias ChefEvent
----| 'startup'        # once, after every mod started and the after_startup callbacks ran
+---| 'startup'        # once, after every mod started and the after_startup callbacks ran (a mod that starts late gets its own)
 ---| 'world'          # (world_id, in_mission): a new world has settled
 ---| 'mission_start'  # (world_id): a mission starts
 ---| 'mission_end'    # (world_id): the mission ends (extraction, quitting, a new world)
 ---| 'players'        # (players, joining, players_before): the player count or the number still joining changed (from 1.4.0)
 ---| 'menu'           # (open): the loader's options menu opened (true) or closed (false) (from 1.4.0)
----| 'mod_stopped'    # (name, why): a running mod stopped: errors, the hang watchdog, switched off (from 1.4.0)
+---| 'mod_stopped'    # (name, why): a running mod stopped: errors, the hang watchdog, switched off, tried again, a dev reload (from 1.4.0)
 ---| 'shutdown'       # the game closes
 ---| string           # any event a mod emits with chef.emit
 
@@ -156,6 +156,7 @@
 ---@class ChefWatch
 ---@field items ChefWatchItem[]  the last list
 ---@field generation integer     bumps with each new list
+---@field active boolean          false while paused or stopped
 local ChefWatch = {}
 ---Stops listing until resume().
 function ChefWatch.pause() end
@@ -183,7 +184,8 @@ function ChefBinding.pressed() end
 ---@return boolean
 function ChefBinding.down() end
 
----A row of the options menu: `chef.option(id, spec)`.
+---A row of the options menu: `chef.option(id, spec)`. The spec is copied when you register the row: changing the table
+---or its lists afterward doesn't change the row (a label or choice given as a function stays live).
 ---@class ChefOptionSpec
 ---@field type ChefOptionType
 ---@field label string?        the row's name (its id otherwise)
@@ -275,12 +277,14 @@ function ChefSpriteSheet.draw(i, x, y, w, h, c, layer) end
 ---@field state ChefModState
 ---@field why string?            why it isn't running
 ---@field errors integer
+---@field timer_errors integer  errors in its timers and spread jobs
 ---@field ms_avg number?         its average ms a frame over the last status minute (nil before the first)
 ---@field ms_max number?         its worst call over that minute, in ms
 ---@field requires string[]?     its HD2-Requires lines
 ---@field missing string[]?      what an HD2 Lua Runtime mod said it needs (spec.needs) and the loader lacks
 ---@field start_ms number?       its start (compile and first run) in ms; nil for a mod that never ran (from 1.4.0)
 ---@field start_kb number?       how much the Lua heap grew over its start, in KB (approximate, can be below 0; from 1.4.0)
+---@field skipped integer        how many of its calls the crash guard skips
 ---@field title string?          a boot entry's title
 
 ---A patch as chef.index() reports it.
@@ -324,12 +328,12 @@ function ChefIndex.conflicts() end
 ---@field update fun(dt: number)?  every frame
 ---@field render fun()?           every frame, after the game's render
 ---@field shutdown fun()?         when the game closes
----@field on_stop fun()?          once, when the loader stops your mod (errors, the hang watchdog, switched off in the menu, a failed start, a dev reload): put back what only you know
+---@field on_stop fun()?          once, when the loader stops your mod (errors, the hang watchdog, switched off in the menu, tried again from CRASH RECOVERY, a dev reload; not a start that raised, which never returned this table: pcall risky start code, or use handle.on('stop')): put back what only you know. After a hang a new world may not have settled yet
 
 ---The helpers each mod gets.
 ---@class Chef
 ---@field loader string                 the loader's name, 'Chef Shared Loader'
----@field loader_version string         the loader's version, e.g. '1.4.1'
+---@field loader_version string         the loader's version, e.g. '1.5.0'
 ---@field api integer                   the helper level (3); it only goes up when something is added
 ---@field name string                   your mod's name, 'mods/<author>/<name>'
 ---@field options table                 your merged Arsenal options ({} when none is ticked)
@@ -354,7 +358,8 @@ function Chef.time() end
 -- ---------------------------------------------------------------- engine calls (crash-guarded)
 
 ---A guarded engine call, e.g. chef.call('Unit.alive', u). Returns the engine's answers, or nil and a reason when the
----function is missing, raised an error, is refused, or is skipped after it crashed the game.
+---function is missing (a name that isn't a string counts as missing), raised an error, is refused, or is skipped after
+---it crashed the game.
 ---@param name string  'Table.function'
 ---@param ... any
 ---@return any ...
@@ -525,7 +530,7 @@ function Chef.bitmap(tex, x, y, w, h, c, layer) end
 ---@param map table<string, string>
 function Chef.ui_textures(map) end
 
----Texture -> pre-shrunk sizes { width, id, width, id, ... }, smallest first.
+---Texture -> pre-shrunk sizes { width, id, width, id, ... }, smallest first. The lists are copied when you call it.
 ---@param map table<string, (number|string)[]>
 function Chef.texture_sizes(map) end
 
@@ -546,7 +551,8 @@ function Chef.line(x1, y1, z1, x2, y2, z2, c) end
 ---@return boolean
 function Chef.has(name) end
 
----Runs fn once every mod has started (at once when start-up is already over).
+---Runs fn once every mod has started (at once when start-up is already over, except in your mod's own late start:
+---right after that start ends).
 ---@param fn fun()
 function Chef.after_startup(fn) end
 
@@ -559,7 +565,9 @@ function Chef.own_log(name) end
 
 -- ---------------------------------------------------------------- saved settings
 
----Keeps a boolean, number or string (up to 512 characters) between launches; nil removes it.
+---Keeps a boolean, number or string (up to 512 characters, any bytes) between launches; nil removes it. A mod saves
+---256 KB at most: past that, a save that would make its lines bigger gets false and why, while removing a value or
+---changing one within its size still works, and nothing already saved is taken away.
 ---@param key string  letters, digits, _ . - (64 at most); opt. keys are the options menu's: refused, nil and why
 ---@param value boolean|number|string|nil
 ---@return boolean? ok
@@ -574,13 +582,14 @@ function Chef.load(key, default) end
 
 -- ---------------------------------------------------------------- between mods
 
----A value any mod can read by name (use your mod's name in it: 'you.my_mod.data').
+---A value any mod can read by name (use your mod's name in it: 'you.my_mod.data'). It goes when your mod stops; a
+---mod started again shares it anew.
 ---@param name string
 ---@param value any
 ---@return boolean
 function Chef.share(name, value) end
 
----A shared value, or nil.
+---A shared value, or nil (nil: never shared, or the mod that shared it isn't running).
 ---@param name string
 ---@return any
 function Chef.shared(name) end
@@ -671,7 +680,8 @@ function Chef.bind(id, default_key, label) end
 ---@return string? why
 function Chef.hold_mouse(on) end
 
----True while the game's camera can't turn with the mouse (held by the loader for a mod or its menu, or by another mod).
+---True while the loader holds the mouse for a mod or its menu, or wants to and finds a dead zone another mod set itself
+---already there. With no mod or menu asking for the hold it doesn't look, so another mod's own dead zone alone reads false.
 ---@return boolean
 function Chef.mouse_held() end
 
@@ -803,13 +813,14 @@ function Chef.light(u, i) end
 ---@return ChefTimer?
 function Chef.after(s, fn) end
 
----fn() every s seconds (a timer that errors 20 times stops).
+---fn() every s seconds (a timer that errors 20 times stops, and so does one the crash guard skips).
 ---@param s number
 ---@param fn fun()
 ---@return ChefTimer?
 function Chef.every(s, fn) end
 
----fn(item, i) for n items a frame; done(true) at the end, done(false) when a new world stops it.
+---fn(item, i) for n items a frame; done(true) at the end, done(false) when a new world stops it, the crash guard
+---skips it or its items have raised 20 errors (with a line in the log).
 ---@generic T
 ---@param list T[]
 ---@param n integer?  items a frame (50 by default)
@@ -962,12 +973,20 @@ function Chef.load_table(name) end
 -- ---------------------------------------------------------------- screenshots (trusted mods with the capture grant)
 
 ---Saves a picture of the screen (1.4.0). Only a mod whose TRUSTED entry grants `capture`; every other mod gets
----nil, 'not available to this mod'. It takes no arguments: the loader picks the render target and the file, in its
----own folder, named <author>_<mod>_capture_<nn>.dds with nn 01 to 50, then over again (the oldest written over).
+---nil, 'not available to this mod'. The loader picks the render target and the file, in its own folder, named
+---<author>_<mod>_capture_<nn>.dds with nn 01 to 50, then over again (the oldest written over).
 ---One a second at most. The engine's render target name and file format aren't confirmed on HD2 7.2 yet.
+---
+---chef.capture('depth') saves the scene's depth instead, under the same grant; any other value answers nil and why,
+---with no engine call. It has its own crash record, one a second and number, and its own names,
+---<author>_<mod>_depth_<nn>.dds with nn 01 or 02 (only 2 kept: read the one just named). The render target
+---(linear_depth) and the file aren't confirmed in game: a 148-byte DDS header (DX10, DXGI format 41, R32_FLOAT, 1 mip,
+---the render resolution, pitch width * 4), then little-endian float32 pixels, row-major, top-left origin: linear view
+---depth in meters, the sky 0, NaN or inf. 148 + width * height * 4 bytes in all, when it's whole.
+---@param what? 'depth'  nothing for the screen
 ---@return string? file  the file's name (not its path)
 ---@return string? why
-function Chef.capture() end
+function Chef.capture(what) end
 
 -- ---------------------------------------------------------------- the mod list and the index
 
