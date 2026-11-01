@@ -39,7 +39,8 @@ local CACHE, MISSING, DONE, PAT_KEY, WILD, OPT, BUDGET, PAT_COST = 4096, 3000, 4
 -- my own texts I renamed: a language's entry for the old text translates the new one too, until it has its own (the
 -- old texts as released, in capitals as a language's keys are taken: the compact look's rows are under its own
 -- heading now)
-local RENAMED = { ['MENU OPACITY % (COMPACT LOOK)'] = 'MENU OPACITY (%)', ['MENU POSITION (COMPACT LOOK)'] = 'MENU POSITION' }
+local RENAMED = { ['MENU OPACITY % (COMPACT LOOK)'] = 'MENU OPACITY (%)', ['MENU POSITION (COMPACT LOOK)'] = 'MENU POSITION',
+  ['KEPT OFF BY THE CRASH GUARD'] = 'CRASH GUARD', ['KEPT OFF'] = 'CRASH GUARD' }
 
 -- a language file's code with its strings and comments taken out (each string as one '"', each comment as a space)
 -- -> code, or nil, why
@@ -226,7 +227,7 @@ end
 
 function M.install(ctx)
   local log = ctx.log
-  local L = { langs = {}, by = {}, names = {}, on = nil, cur = {}, old = {}, n = 0, done = {}, ndone = 0, missing = {}, nmissing = 0,
+  local L = { langs = {}, by = {}, names = {}, on = nil, cur = {}, old = {}, n = 0, done = {}, ndone = 0, missing = {}, nmissing = 0, here = {},
               olddone = {}, piece = {}, oldpiece = {}, npiece = 0, dirty = false, at = 0, v = nil, frame = -1, spent = 0,
               resume = {}, nresume = 0,
               skipped = false }
@@ -368,7 +369,8 @@ function M.install(ctx)
       elseif clock and clock() - t_start > LOAD_BUDGET then err = 'language files took more than ' .. LOAD_BUDGET .. ' s to read'
       else
         local key = rec.name .. '|lang:' .. (ctx.fp and ctx.fp(rec.src) or #rec.src)
-        if ctx.skipped and ctx.skipped(key) then err = 'it ended the game before (this file stays off; a changed one is tried)'
+        L.here[key] = true                           -- (the files there now: a skip of a gone one holds nothing back)
+        if ctx.skipped and ctx.skipped(key) then err = 'it ended the game or took over 5 s to read before (this file stays off; a changed one is tried)'
         else
           if ctx.crumb then ctx.crumb('> ' .. key) end
           timing.left = TIME_BUDGET
@@ -511,7 +513,14 @@ function M.install(ctx)
       -- and tried on from the next pattern in a later frame; L.skipped tells a caller that keeps what it made)
       local f = ctx.frame and ctx.frame() or 0
       if f ~= L.frame then L.frame, L.spent = f, 0 end
-      if L.spent >= BUDGET then L.skipped = true; return s end
+      if L.spent >= BUDGET then
+        if not L.resume[s] then
+          if L.nresume >= 1000 then L.resume, L.nresume = {}, 0 end
+          L.resume[s], L.nresume = 1, L.nresume + 1
+        end
+        L.skipped = true
+        return s
+      end
       local clock = ctx.clock
       local t0 = clock and clock() or 0
       local ps = lang.patterns
@@ -572,6 +581,7 @@ function M.install(ctx)
   -- noted missing; a source whose patterns are still being tried makes nothing kept
   function L.keep(s, src)
     if not L.on or type(s) ~= 'string' or s == '' then return s end
+    if L.resume[src == nil and s or src] then return s end     -- (its patterns are still being tried: not kept yet)
     if src ~= nil then
       local c = L.cur[src]
       if c == nil then c = L.old[src] end

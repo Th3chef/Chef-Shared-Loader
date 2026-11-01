@@ -13,13 +13,16 @@
 --   * handle.engine: the API's engine calls, in its call shapes (Gui.rect takes numbers, Gui.text a font name,
 --     World.spawn_unit a resource name ...), built here on the engine as the mod's own calls: the first call of each is
 --     breadcrumbed for the mod, a unit is checked before it's asked anything (the loader's unit rules too: a unit from
---     a world that's gone, or a runtime-built one, is refused), and a refused call returns nil and why
+--     a world that's gone is refused, and a runtime-built one for the calls those rules name), and a refused call
+--     returns nil and why
 --   * what a mod made is undone when it stops: its units destroyed, its GUIs destroyed, units it hid shown, materials
 --     it swapped on units it didn't make put back, mouse dead zones it changed put back
 -- The Steam lobby (Steam.user_id, Friends.playing_game, Network.join_steam_lobby, SteamLobby.*) only for a mod the
 -- loader trusts with it (loader.lua, TRUSTED): the lobby the game reports this player in, and the mod's own member key.
 -- Capitalized globals one of these mods sets reach the other ones' environments, as with that API, where they share one
--- _G; never a name the game already has. A trusted mod's globals stay its own, and it takes none of the others'.
+-- _G; never a name the game already has. Only the first write is seen (a new key in the mod's environment): a later one
+-- stays its own, and a mod that starts later gets the value as it is then. A trusted mod's globals stay its own, and it
+-- takes none of the others'.
 -- Plain Lua 5.1.
 
 local M = { version = '1.1.0', runtime_version = '0.1.0' }
@@ -59,9 +62,24 @@ local TEXT_FONTS = { ['content/fonts/fallback'] = 'content/fonts/runtime_font',
 local GUIS_PER_MOD, PRIMITIVES, SETS_PER_SECOND = 6, 12000, 10
 -- the resource types Application.can_get answers for (another string goes to the engine as a type name)
 local CAN_GET = { unit = true, material = true, texture = true, font = true, runtime_font = true, package = true }
+-- the IdString64 calls that work on the one value they're handed: called with nothing at all they read as called with a
+-- nil (the other value calls may take no arguments: Vector3.zero, Quaternion.identity)
+local CONVERTERS = { to_hex = true, from_hex = true }
+-- what a binding asks of the engine besides, or instead of, its own name: a mod that needs it needs all of these
+-- (hard dependencies only: a binding that manages without one doesn't list it)
+local USES = { ['Gui.rects'] = { 'Gui.rect', 'Vector3', 'Vector2', 'Color' },
+               ['Gui.update_rects'] = { 'Gui.update_rect', 'Vector3', 'Vector2', 'Color' },
+               ['Gui.rect'] = { 'Gui.rect', 'Vector3', 'Vector2', 'Color' },
+               ['Gui.update_rect'] = { 'Gui.update_rect', 'Vector3', 'Vector2', 'Color' },
+               ['Window.ui_state'] = { 'Window.get_main_window', 'Window.has_focus', 'Window.show_cursor', 'Window.mouse_focus' },
+               ['Unit.set_material_at'] = { 'Unit.set_material', 'Unit.num_meshes', 'Unit.mesh', 'Mesh.num_materials',
+                                            'Mesh.material_slot_id' },
+               ['Keyboard.pressed'] = { 'Keyboard.pressed', 'Keyboard.button_index', 'Keyboard.num_buttons' } }
+-- the engine tables only a mod the loader trusts with the lobby gets anything from
+local LOBBY = { Steam = true, Friends = true, Network = true, SteamLobby = true }
 
 -- ctx: log(line), mod_log(owner, text), guarded(owner, key, fn, ...), fn_of(name), G (the game's globals),
--- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh),
+-- frame() -> number, instance() -> the engine world's instance, DIR, util (gone, unit_refused, fresh, listed),
 -- trusted(owner) -> its TRUSTED entry or nil, attach(owner, hooks) (the hooks the loader calls with the mod's own),
 -- now() -> seconds; optional: notify(notice), missing(owner, list) (what a mod needs and I lack, for the mod list)
 function M.install(ctx)
@@ -181,9 +199,10 @@ function M.install(ctx)
         end
         if type(f) ~= 'function' then return f end
         local b = name .. '.' .. tostring(k)
+        local one = name == 'IdString64' and CONVERTERS[k]
         local g = function(...)
           if rec.state ~= 'active' then return refuse(rec, b, 'the mod is off') end
-          if holed(...) then return refuse(rec, b, 'nothing to work on (nil)') end
+          if holed(...) or (one and select('#', ...) == 0) then return refuse(rec, b, 'nothing to work on (nil)') end
           return once(rec, b, ...)
         end
         rawset(w, k, g)
@@ -326,7 +345,17 @@ function M.install(ctx)
         local list = rec.rebound[u] or {}
         rec.rebound[u] = list
         local key = i .. ':' .. j
-        if list[key] == nil then list[key] = previous end
+        -- (kept as hex, not the id: release runs minutes later, and an id kept from an earlier frame ends the game. to_hex
+        -- only on a real id: on anything else it can fault natively. false: there's nothing to put back here, and a later
+        -- swap's answer, the mod's own material, mustn't take this place.)
+        if list[key] == nil then
+          local hex = kind(previous) == 'IdString64' and once(rec, 'IdString64.to_hex', previous) or nil
+          list[key] = type(hex) == 'string' and hex or false
+          if not list[key] and not rec.no_put_back then
+            rec.no_put_back = true
+            log(fmt('[%s] %s: the material it replaced can\'t be put back (no id to keep)', rec.owner, b))
+          end
+        end
       end
       return true
     end
@@ -398,11 +427,13 @@ function M.install(ctx)
     end
 
     -- World
+    -- (util.listed: a list of the main world's units stamps them, as these mods find their units here and the shared
+    -- scan stamps only the kinds a watch asks for; a list of a world that has never been main clears its refused ones)
     for _, name in ipairs({ 'units', 'num_units' }) do
       local b = 'World.' .. name
       N.World[name] = function(w)
         if not listed(w) then return refuse(rec, b, 'not a live world') end
-        return once(rec, b, w)
+        return util.listed(w, once(rec, b, w))
       end
     end
     function N.World.units_by_resource(w, id)
@@ -411,7 +442,7 @@ function M.install(ctx)
       local res = (kind(id) == 'IdString64' and id) or (hex16(id) and once(rec, 'IdString64.from_hex', id))
         or (type(id) == 'string' and id ~= '' and once(rec, 'IdString64', id))
       if not res then return refuse(rec, b, 'not a resource id') end
-      return once(rec, b, w, res)
+      return util.listed(w, once(rec, b, w, res))
     end
     function N.World.spawn_unit(w, unit_resource, position, rotation)
       local b = 'World.spawn_unit'
@@ -445,7 +476,9 @@ function M.install(ctx)
       local b = 'World.link_unit'
       local why = own_in(w, child)
       if why then return refuse(rec, b, why) end
-      local pwhy = unit_ask(rec, b, parent)                    -- the parent under the unit rules too
+      -- (the parent must be a live unit of this world too. The link isn't one of the calls refused by name, so a
+      -- runtime-built parent gets through, as it does for chef.link)
+      local pwhy = unit_ask(rec, b, parent)
       if pwhy then return refuse(rec, b, pwhy) end
       if child == parent then return refuse(rec, b, 'a unit linked to itself') end
       if once(rec, 'Unit.world', parent) ~= w then return refuse(rec, b, 'units are not in this world') end
@@ -569,7 +602,8 @@ function M.install(ctx)
     function N.Gui.set_visible(g, on)
       if not gui_ok(g) then return refuse(rec, 'Gui.set_visible', 'not this mod\'s GUI in a live world') end
       if type(on) ~= 'boolean' then return refuse(rec, 'Gui.set_visible', 'visibility is not a boolean') end
-      once(rec, 'Gui.set_visible', g, on)
+      guis[g].shown = on                       -- (what it last set: a pause hides it until the resume, rt.resume)
+      if not rec.paused then once(rec, 'Gui.set_visible', g, on) end
       return true
     end
     -- text: a font from TEXT_FONTS (made fresh as an id each call: an id kept from an earlier frame ends the game)
@@ -617,7 +651,9 @@ function M.install(ctx)
       if not gui_ok(g) then return refuse(rec, 'Gui.destroy_text', 'not this mod\'s GUI in a live world') end
       local t = texts(guis[g])
       if not t[id] then return refuse(rec, 'Gui.destroy_text', 'not a text of this GUI') end
-      once(rec, 'Gui.destroy_text', g, id)
+      -- (the primitive comes back only if the engine call really ran: a skipped one left the text there)
+      local _, no = once(rec, 'Gui.destroy_text', g, id)
+      if no == nil then guis[g].count = guis[g].count - 1 end
       t[id] = nil
       return true
     end
@@ -681,7 +717,9 @@ function M.install(ctx)
       return v
     end
     -- dead zones: mode 0, 1 or 2 and a size; sizes from 0.5 to 10 are refused (near 1 the camera's deltas turn
-    -- infinite for the session), and the first value the mod changes per axis is put back when it stops
+    -- infinite for the session), and what the mod found is put back when it stops. Mods nest (rt.zones, each axis's
+    -- entries, oldest first): one under another hands what it found to the entry above when it stops, so the axis ends as
+    -- the first of them found it, whichever order they stop in. A mod that sets it again from under another moves up.
     local function zone_ok(mode, size) return (mode == 0 or mode == 1 or mode == 2) and finite(size, 1e9) and size >= 0 end
     function N.Mouse.dead_zone(i)
       if not axis_ok(i) then return refuse(rec, 'Mouse.dead_zone', 'invalid axis') end
@@ -694,13 +732,27 @@ function M.install(ctx)
       if not axis_ok(i) then return refuse(rec, b, 'invalid axis') end
       if not zone_ok(mode, size) then return refuse(rec, b, 'invalid dead zone') end
       if size >= 0.5 and size <= 10 then return refuse(rec, b, 'a size near 1 breaks the camera') end
+      if rec.paused then return refuse(rec, b, 'the mod is off') end   -- (a function it shared: the camera stays free)
+      return rec.zone_set(i, mode, size)
+    end
+    -- (its own function on rec, never on N: the mod has that table, and a resume calls this outside the mod's calls)
+    function rec.zone_set(i, mode, size)
+      local b = 'Mouse.set_dead_zone'
       rec.dead_zones = rec.dead_zones or {}
-      if not rec.dead_zones[i] then
+      local z, e = rt.zones[i], rec.dead_zones[i]
+      if not z then z = {}; rt.zones[i] = z end
+      if not e or z[#z] ~= e then
         local m, s = once(rec, 'Mouse.dead_zone', i)
         if not zone_ok(m, s) then return refuse(rec, b, 'unexpected answer') end
-        rec.dead_zones[i] = { m, s }
+        -- (my mouse hold's own size isn't what the mod found: what the hold found is, or the mod hands the hold's size back)
+        local had = ctx.hold_had and ctx.hold_had(i, s)
+        if had then m, s = had[1], had[2] end
+        if e then rt.zone_out(z, e) end
+        e = { m, s }
+        rec.dead_zones[i], z[#z + 1] = e, e
       end
       once(rec, b, i, mode, size)
+      e.mode, e.size = mode, size
       return true
     end
     -- the keyboard: names only (the engine's key constants don't match its live indices)
@@ -870,21 +922,58 @@ function M.install(ctx)
   rt.lobby = { handles = {}, current = nil, reported = nil }
 
   -- ---------------------------------------------------------------- undoing what a mod made
+  rt.zones = {}
+  function rt.zone_near(a, b) return abs(a - b) <= 1e-6 * math.max(1, abs(b)) end
+  -- (an entry leaves its axis's list: what it found goes to the entry above it, which found this one's value)
+  function rt.zone_out(z, e)
+    for k, q in ipairs(z) do
+      if q == e then
+        if z[k + 1] then z[k + 1][1], z[k + 1][2] = e[1], e[2] end
+        table.remove(z, k)
+        return
+      end
+    end
+  end
+  -- (the last one on an axis puts back what it found, unless the axis reads neither what the mod set nor what it found:
+  -- something that isn't a runtime mod has it now, and it's left to that. Compared near enough: the engine keeps a size
+  -- as a float. No answer: put back, as a stop always did. My menu's or a mod's mouse hold sitting on what the mod set
+  -- would hand that back when it ends, so the hold is given what the mod found as well: ctx.hold_had. The switch that
+  -- stops or pauses a mod is pressed in that menu.)
+  function rt.zones_back(rec)
+    local o = rec.owner
+    local function g(name, ...) return guarded(o, name, fn_of(name), ...) end
+    for i, v in pairs(rec.dead_zones or {}) do
+      local z, top = rt.zones[i], false
+      if z then top = z[#z] == v; rt.zone_out(z, v) end
+      if top then
+        local _, s = g('Mouse.dead_zone', i)
+        local had = ctx.hold_had and ctx.hold_had(i)
+        if had and v.size and rt.zone_near(had[2], v.size) then had[1], had[2] = v[1], v[2] end
+        if type(s) ~= 'number' or not v.size or rt.zone_near(s, v.size) or rt.zone_near(s, v[2]) then
+          g('Mouse.set_dead_zone', i, v[1], v[2])
+        end
+      end
+    end
+    if rec.dead_zones and ctx.hold_look then ctx.hold_look() end
+    rec.dead_zones = nil
+  end
   local function release(rec)
     local o = rec.owner
     local function g(name, ...) return guarded(o, name, fn_of(name), ...) end
-    for i, v in pairs(rec.dead_zones or {}) do g('Mouse.set_dead_zone', i, v[1], v[2]) end
-    rec.dead_zones = nil
+    rt.zones_back(rec)
     for u, list in pairs(rec.rebound or {}) do
       if type(u) == 'userdata' and not util.gone(u) and kind(u) == 'Unit' and g('Unit.alive', u) == true then
         for key, previous in pairs(list) do
           local i, j = key:match('^(%d+):(%d+)$')
           i, j = tonumber(i), tonumber(j)
-          if i <= (g('Unit.num_meshes', u) or 0) then
+          if previous and i <= (g('Unit.num_meshes', u) or 0) then
             local m = g('Unit.mesh', u, i)
             if m ~= nil and j <= (g('Mesh.num_materials', m) or 0) then
               local slot = g('Mesh.material_slot_id', m, j)
-              if slot ~= nil then g('Unit.set_material', u, slot, previous) end
+              -- (the id made here, fresh, and a key of its own: the swap already proved Unit.set_material's, so a crash
+              -- in this one would leave no crumb)
+              local id = slot ~= nil and g('IdString64.from_hex', previous) or nil
+              if id ~= nil then guarded(o, 'release:Unit.set_material', fn_of('Unit.set_material'), u, slot, id) end
             end
           end
         end
@@ -918,6 +1007,21 @@ function M.install(ctx)
       ok and fmt('destroyed %d, shown %d', d or 0, s or 0) or ('undoing failed: ' .. tostring(d))))
     return ok
   end
+  -- an orphan is only there to find the copies a reload replaces: one no running mod has goes, with what it holds (a
+  -- string most of all: a weak table never lets go of one). A running mod writing over its copy tells me nothing, so I
+  -- look when a mod is forgotten and at each new world.
+  function rt.sweep()
+    for k, x in pairs(orphan) do
+      local held = false
+      if x.v ~= nil then
+        for e in pairs(envs) do
+          -- (rawequal: a mod's __eq must never run here, in another mod's stop)
+          if rawequal(rawget(e, k), x.v) then held = true; break end
+        end
+      end
+      if not held then orphan[k] = nil end
+    end
+  end
   -- the loader stopped this mod (errors, a failed start, dev reload): everything it made is undone
   function rt.forget(owner)
     local o = owners[owner]
@@ -926,10 +1030,51 @@ function M.install(ctx)
     if o.env then envs[o.env] = nil end
     owners[owner] = nil
     -- what it shared isn't handed to mods that start later; mods that have it keep their copy (one may have made the
-    -- name its own, X = X or {})
+    -- name its own, X = X or {}). Held weakly: its functions keep the stopped mod's environment and locals, and what a
+    -- running mod still has stays alive through that mod.
     for k, by in pairs(shared_by) do
-      if by == owner then orphan[k], shared[k], shared_by[k] = { by = owner, v = shared[k] }, nil, nil end
+      if by == owner then
+        orphan[k], shared[k], shared_by[k] = setmetatable({ by = owner, v = shared[k] }, { __mode = 'v' }), nil, nil
+      end
     end
+    rt.sweep()
+  end
+  -- A paused mod (svc.pause) keeps all it made, but two things of it can't wait with it, as nothing calls it to change
+  -- them: its dead zones go back, or the camera stays frozen as long as it's off, and its GUIs hide, or they stay on
+  -- screen frozen where it left them (a retained GUI shows until it's removed). rec.zones_held: the entries it had,
+  -- with what it set on each axis (mode, size); a GUI's hid: I hid it. Resumed, the zones are set again, on top of what
+  -- the axis has by then, and each GUI shows as the mod last set it (shown), unless its world went meanwhile.
+  local function gui_here(e) return (not ctx.instance or e.instance == ctx.instance()) and listed(e.world) end
+  function rt.pause(owner)
+    local o = owners[owner]
+    for _, rec in ipairs(o and o.order or {}) do
+      rec.paused, rec.zones_held = true, rec.dead_zones
+      rt.zones_back(rec)
+      for gui, e in pairs(rec.guis) do
+        if gui_here(e) then e.hid = true; once(rec, 'Gui.set_visible', gui, false) end
+      end
+    end
+  end
+  function rt.resume(owner)
+    local o = owners[owner]
+    for _, rec in ipairs(o and o.order or {}) do
+      local held = rec.state == 'active' and rec.zones_held
+      rec.paused, rec.zones_held = nil, nil
+      for i, e in pairs(held or {}) do if e.size then rec.zone_set(i, e.mode, e.size) end end
+      for gui, e in pairs(rec.guis) do
+        if e.hid then
+          e.hid = nil
+          if gui_here(e) then once(rec, 'Gui.set_visible', gui, e.shown ~= false) end
+        end
+      end
+    end
+  end
+  -- did a mod of this file stop itself (handle.switch_off)? (the loader's stop forgets it: asked before that) A mod that
+  -- did stays stopped until the next launch: its switch brings it back no sooner.
+  function rt.stopped_itself(owner)
+    local o = owners[owner]
+    for _, rec in ipairs(o and o.order or {}) do if rec.state ~= 'active' then return true end end
+    return false
   end
   -- a new world: what belonged to a world that's gone is let go without being touched (any call on it ends the game)
   function rt.new_world()
@@ -942,7 +1087,9 @@ function M.install(ctx)
     for u in pairs(versions) do versions[u] = nil end
     for _, o in pairs(owners) do
       for _, rec in ipairs(o.order) do
-        for u, w in pairs(rec.owned) do if not listed(w) then rec.owned[u] = nil end end
+        -- (a unit of an engine world that's gone goes whatever its world handle says: a world restarted in place stays
+        -- listed, and past the stamps' cap nothing would tell release this one is gone)
+        for u, w in pairs(rec.owned) do if not listed(w) or util.gone(u) then rec.owned[u] = nil end end
         for u in pairs(rec.hidden) do if util.gone(u) then rec.hidden[u] = nil end end
         for u in pairs(rec.rebound or {}) do if util.gone(u) then rec.rebound[u] = nil end end
         for gui, e in pairs(rec.guis) do
@@ -950,22 +1097,27 @@ function M.install(ctx)
         end
       end
     end
+    rt.sweep()
   end
 
   -- ---------------------------------------------------------------- the callbacks, through the mod's own hooks
+  -- (failed: a callback may raise nil, and that's an error too: it counts toward the loader's stop like any other)
   local function dispatch(o, event, ...)
-    local first
+    local failed, first = false, nil
     for _, rec in ipairs(o.order) do
       if rec.state == 'active' then
         local list = rec.callbacks[event]
         for i = 1, #list do
           local ok, err = pcall(list[i], ...)
-          if not ok and first == nil then first = err end
+          if not ok then
+            rec.errors = rec.errors + 1
+            if not failed then failed, first = true, err end
+          end
           if rec.state ~= 'active' then break end
         end
       end
     end
-    if first ~= nil then error(first, 0) end
+    if failed then error(first, 0) end
   end
 
   -- ---------------------------------------------------------------- HD2Runtime.mod and the public table
@@ -1042,7 +1194,12 @@ function M.install(ctx)
     for _, n in ipairs(needs) do
       local ns, call = n:match('^(%a[%w_]*)%.(%a[%w_]*)$')
       local have
-      if ns then have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
+      if ns then
+        have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
+        -- (my wrapper is always there: what counts is what it asks of this build)
+        for _, e in ipairs(have and USES[n] or {}) do if fn_of(e) == nil then have = false end end
+        if have and not USES[n] and fn_of(n) == nil then have = false end
+        if have and LOBBY[ns] then have = grant_state(o.name, 'lobby') ~= nil end
       else have = grant_state(o.name, n) ~= nil end
       if not have then rec.missing[#rec.missing + 1] = n end
     end
@@ -1082,6 +1239,11 @@ function M.install(ctx)
         render = function() return dispatch(o, 'render') end,
         shutdown = function() return dispatch(o, 'shutdown') end,
         stop = function() return dispatch(o, 'stop') end,
+        -- (is there a stop callback at all? one for the loader's log, never a hook)
+        has_stop = function()
+          for _, x in ipairs(o.order) do if #x.callbacks.stop > 0 then return true end end
+          return false
+        end,
       })
     end
     -- its environment shares the runtime mods' globals from now on
@@ -1090,7 +1252,15 @@ function M.install(ctx)
       -- (a trusted mod gets none of the shared globals, and what it sets stays its own: its environment holds only
       -- what it set itself)
       if not ctx.trusted(o.name) then
-        for k, v in pairs(shared) do if rawget(o.env, k) == nil then rawset(o.env, k, v) end end
+        -- (the value its owner has now, not the one it set first: only that first write told me anything)
+        for k, v in pairs(shared) do
+          if rawget(o.env, k) == nil then
+            local by = owners[shared_by[k]]
+            local now = by and by.env and rawget(by.env, k)
+            if now == nil then now = v end
+            rawset(o.env, k, now)
+          end
+        end
         -- and what it set before registering is shared now (a library mod defines its global, then calls mod())
         local own = {}
         for k, v in pairs(o.env) do own[k] = v end
@@ -1140,12 +1310,15 @@ function M.install(ctx)
     if type(pkg) == 'table' and type(pkg.loaded) == 'table' then pkg.loaded.hd2rt = pub end
     return true
   end
-  -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet.
+  -- a capitalized global a runtime mod sets: shared with every runtime mod that doesn't have that name yet. (Each mod
+  -- has its own copy of the name, so I hear of a write only when the key is new: the first one, or one after X = nil.)
   -- A trusted mod's globals stay its own (what it sets could let another mod use what only it was given: its lobby
   -- key, say), and it gets none of the others'.
   function rt.on_global(env, k, v)
     local o = envs[env]
-    if not o or type(k) ~= 'string' or not k:match('^%u[%w_]*$') or rawget(G, k) ~= nil or k == 'HD2Runtime' then return end
+    -- (each mod's HD2Runtime and BingusRuntime are bound to its own environment: shared, one would keep a stopped mod's
+    -- whole environment for the session. fn_of: the game keeps its tables in stingray, so a name it has isn't always in G)
+    if not o or type(k) ~= 'string' or not k:match('^%u[%w_]*$') or rawget(G, k) ~= nil or fn_of(k) ~= nil or k == 'HD2Runtime' or k == 'BingusRuntime' then return end
     if v == nil then return end
     if ctx.trusted(o.name) then return end
     if shared_by[k] ~= nil and shared_by[k] ~= o.name then return end   -- another mod's name: this one's copy is its own
@@ -1159,7 +1332,7 @@ function M.install(ctx)
     for e, r in pairs(envs) do
       if e ~= env and not ctx.trusted(r.name) then
         local cur = rawget(e, k)
-        if cur == nil or (prev ~= nil and cur == prev) then rawset(e, k, v) end
+        if cur == nil or (prev ~= nil and rawequal(cur, prev)) then rawset(e, k, v) end
       end
     end
   end

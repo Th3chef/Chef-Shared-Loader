@@ -196,26 +196,43 @@ end
 
 -- LuaJIT's xpcall passes extra arguments on to the function; Lua 5.1's drops them, so a mod written for LuaJIT
 -- would call its function with none. This one passes them on.
+-- The hang watchdog's error skips a function handler: Lua runs a handler for an error raised in a debug hook with hooks
+-- off, so a handler that loops there could never be stopped, nor one that retries what hung.
 local function xpcall_args(f, handler, ...)
+  local h = handler
+  if type(handler) == 'function' then
+    h = function(e)
+      if type(e) == 'string' and e:sub(1, 28) == 'stopped by the hang watchdog' then return e end
+      return handler(e)
+    end
+  end
   local n = select('#', ...)
-  if n == 0 then return xpcall(f, handler) end
+  if n == 0 then return xpcall(f, h) end
   local args = { ... }
-  return xpcall(function() return f(unpack(args, 1, n)) end, handler)
+  return xpcall(function() return f(unpack(args, 1, n)) end, h)
 end
 
 -- LuaJIT's load takes a string or a reader function (plus a mode and an environment, 5.2 style).
 -- The game has no load at all, so I build it on loadstring alone: a reader's
 -- pieces get joined first, then it's the same as a string.
 local loadstring, setfenv = loadstring, setfenv
+-- (the reader's loop in code of its own, as sandbox.lua's load has it: the hang watchdog never stops code under my
+-- chunk name, and a reader from C has no Lua frame for it to stop)
+local drain = loadstring([[
+  local chunk, type = ...
+  local parts, n = {}, 0
+  while true do
+    local piece = chunk()
+    if piece == nil or piece == '' then return parts end
+    if type(piece) ~= 'string' then return nil end
+    n = n + 1
+    parts[n] = piece
+  end
+]], '=load reader')
 local function load_compat(chunk, name, mode, env)
   if type(chunk) == 'function' then
-    local parts = {}
-    while true do
-      local piece = chunk()
-      if piece == nil or piece == '' then break end
-      if type(piece) ~= 'string' then return nil, 'reader function must return a string' end
-      parts[#parts + 1] = piece
-    end
+    local parts = drain(chunk, type)
+    if not parts then return nil, 'reader function must return a string' end
     chunk = concat(parts)
   end
   if type(chunk) ~= 'string' then return nil, 'bad argument #1 to \'load\' (string or function expected)' end

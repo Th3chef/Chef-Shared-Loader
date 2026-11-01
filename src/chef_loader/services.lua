@@ -35,11 +35,16 @@ function M.version_at_least(have, want)
   return true
 end
 
+-- The header bytes a mod's first lines are read from: the first 1200, and on to the end of the line that crosses them
+-- (a line cut there would read a version or a name short). 1456 at most, so a long line can't make it the whole file.
+function M.head(src)
+  return src:sub(1, min(src:find('\n', 1200, true) or 1456, 1456))
+end
 -- "-- HD2-Requires: mods/x/lib >= 1.2" (or "chef-shared-loader >= 1.0", also "chef-loader"), lines near the top
 function M.requirements(src)
   local out = {}
   -- (spaces and tabs only between the name and its version: a line without one must not reach into the next line)
-  for name, want in src:sub(1, 1200):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)[ \t]*>?=?[ \t]*([%d%.]*)') do
+  for name, want in M.head(src):gmatch('\n%-%- HD2%-Requires: ([%w_/%.%-]+)[ \t]*>?=?[ \t]*([%d%.]*)') do
     out[#out + 1] = { name = name, version = want ~= '' and want or nil }
   end
   return out
@@ -102,10 +107,17 @@ local HINTS = {
   -- slider's or a color's, where Left and Right change it; back is the Back row's, where both go back)
   group = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
             { '<', word = 'BACK' }, { KEY_NOW, word = 'CLOSE' } },
-  -- (a key or a button inside an open fold: Left closes the fold, the cursor on its heading)
+  -- (a key inside an open fold: Left closes the fold, the cursor on its heading)
   group_fold = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
                  { '<', word = 'FOLD' }, { KEY_NOW, word = 'CLOSE' } },
   back = { { 'ARROWS', word = 'MOVE', opt = true }, { '<', '>', word = 'BACK' }, { KEY_NOW, word = 'CLOSE' } },
+  -- (a read-only row, a mod another loader runs: nothing to change)
+  read = { { 'ARROWS', word = 'MOVE', opt = true }, { '<', word = 'BACK' }, { KEY_NOW, word = 'CLOSE' } },
+  -- (a button keeps nothing, so Delete does nothing on it; button_fold: inside an open fold)
+  button = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { '<', word = 'BACK' },
+             { KEY_NOW, word = 'CLOSE' } },
+  button_fold = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { '<', word = 'FOLD' },
+                  { KEY_NOW, word = 'CLOSE' } },
   value = { { 'ARROWS', word = 'MOVE', opt = true }, { '<', '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
             { KEY_NOW, word = 'CLOSE' } },
   list = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'OPEN' }, { '/', word = 'SEARCH' },
@@ -275,25 +287,67 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- saved settings
   -- One file next to the log: "<mod>\t<key>\t<b|n|s>\t<value>" per line. Written at most every 3 s while something
-  -- changed, and at shutdown. It's written whole to a .tmp first and then put in place, so a full or locked disk never
-  -- leaves it cut short; a write that didn't go through is tried again 3 s later.
+  -- changed (less often when a save is slow: saving.timed), and at shutdown. It's written whole to a .tmp first and then
+  -- put in place, so a full or locked disk never leaves it cut short; a write that didn't go through is tried again 3 s
+  -- later.
+  -- In a string, \\ \n \t stand for those bytes and \xHH for every other control byte: a raw NUL glues its line to the
+  -- next one in f:lines, and a raw byte 26 ends a text-mode read on Windows, and either way the lines after it are lost.
+  -- I read in binary so a byte 26 already in the file can't cut it, and take off the \r the text-mode write leaves.
+  -- A file that's there but wouldn't open at launch (a lock) is no first launch: saving.blocked holds what changed since
+  -- start-up and nothing goes over the file until it reads; then the file counts, with those changes on top. That
+  -- launch has already started without its values: I can't undo that, only keep them for the next one.
   local store, dirty, save_at = {}, false, 0
   local saving = { failed = 0 }
   do
-    -- (only the .tmp is there when the game ended between taking the old file away and putting the new one in place)
-    local f = ctx.open(SETTINGS_FILE, 'r') or ctx.open(SETTINGS_FILE .. '.tmp', 'r')
-    if f then
-      local UNESCAPE = { n = '\n', t = '\t', ['\\'] = '\\' }
-      for line in f:lines() do
-        local mod, key, ty, v = line:match('^([^\t]+)\t([^\t]+)\t([bns])\t(.*)$')
-        if mod then
-          local val
-          -- strings: one pass over the escapes, so "C:\new" (saved as C:\\new) comes back as it was
-          if ty == 'b' then val = v == 'true' elseif ty == 'n' then val = tonumber(v) else val = (v:gsub('\\(.)', UNESCAPE)) end
-          if val ~= nil then store[mod] = store[mod] or {}; store[mod][key] = val end
+    local ESCAPE, UNESCAPE = { ['\\'] = '\\\\', ['\n'] = '\\n', ['\t'] = '\\t' }, { n = '\n', t = '\t', ['\\'] = '\\' }
+    function saving.escape(c) return ESCAPE[c] or fmt('\\x%02X', c:byte()) end
+    -- (hex: the two characters after the escape, which only \x takes; nil, any other escape, leaves it as it is)
+    local function unescape(c, hex)
+      if c == 'x' and #hex == 2 then return string.char(tonumber(hex, 16)) end
+      return UNESCAPE[c] and UNESCAPE[c] .. hex
+    end
+    -- The file's lines into t. False and the code when the main file is there but wouldn't open: 2 is "no such file", and
+    -- a code that isn't a number tells me nothing, so neither counts.
+    function saving.read(t)
+      local f, _, code = ctx.open(SETTINGS_FILE, 'rb')
+      local refused = f == nil and type(code) == 'number' and code ~= 2
+      -- (only the .tmp is there when the game ended between taking the old file away and putting the new one in place;
+      -- only the old folder's copy when the one-time move failed this launch: M.UNMOVED)
+      f = f or ctx.open(SETTINGS_FILE .. '.tmp', 'rb') or (M.UNMOVED and M.UNMOVED['_settings.txt'] and ctx.open(M.UNMOVED['_settings.txt'], 'rb'))
+      if f then
+        for line in f:lines() do
+          if line:sub(-1) == '\r' then line = line:sub(1, -2) end
+          local mod, key, ty, v = line:match('^([^\t]+)\t([^\t]+)\t([bns])\t(.*)$')
+          if mod then
+            local val
+            -- strings: one pass over the escapes, so "C:\new" (saved as C:\\new) comes back as it was
+            if ty == 'b' then val = v == 'true' elseif ty == 'n' then val = tonumber(v) else val = (v:gsub('\\(.)(%x?%x?)', unescape)) end
+            if val ~= nil then t[mod] = t[mod] or {}; t[mod][key] = val end
+          end
+        end
+        f:close()
+      end
+      if refused then return false, code end
+      return true
+    end
+    -- the file again, while it's blocked: true once it read and the changes since start-up went on top of it
+    function saving.unblock()
+      local t = {}
+      if not saving.read(t) then return false end
+      for mod, keys in pairs(saving.blocked) do
+        for key, box in pairs(keys) do
+          t[mod] = t[mod] or {}
+          t[mod][key] = box[1]
         end
       end
-      f:close()
+      store, saving.blocked, saving.used = t, nil, {}
+      log('the settings file reads again: its values are kept, with what changed since start-up on top')
+      return true
+    end
+    local ok, code = saving.read(store)
+    if not ok then
+      saving.blocked = {}
+      log(fmt('the settings in %s could not be read (error %s): this launch runs without them, and nothing is saved over the file until it reads', SETTINGS_FILE, tostring(code)))
     end
   end
   -- a number as text that reads back as the same number (tostring alone keeps 14 digits)
@@ -303,6 +357,7 @@ function M.install(ctx)
     return fmt('%.17g', v)
   end
   local function save_now()
+    if saving.blocked and not saving.unblock() then return false end
     -- with the utilities there (always, in the game) I write it to .tmp and put it in place; without them, in place
     local replace = svc.util and svc.util.replace
     local tmp = SETTINGS_FILE .. '.tmp'
@@ -319,7 +374,7 @@ function M.install(ctx)
         for _, k in ipairs(keys) do
           local v = store[m][k]
           local ty = type(v) == 'boolean' and 'b' or (type(v) == 'number' and 'n' or 's')
-          local text = ty == 's' and (v:gsub('\\', '\\\\'):gsub('\n', '\\n'):gsub('\t', '\\t')) or (ty == 'n' and num_text(v) or tostring(v))
+          local text = ty == 's' and (v:gsub('[%z\1-\31\127\\]', saving.escape)) or (ty == 'n' and num_text(v) or tostring(v))
           if ok then ok = io_ok(pcall(f.write, f, m, '\t', k, '\t', ty, '\t', text, '\n')) end
         end
       end
@@ -335,6 +390,36 @@ function M.install(ctx)
     end
     return ok
   end
+  -- The frame's save. Each one writes every mod's lines, so a slow one mustn't come around every 3 s: the next waits 20
+  -- times what this one took, which holds saving to 5% of the game's time. The 3 s goes in first, so a save that raises
+  -- still waits. (util.clock: real seconds. ctx.now is the game's time, which stands still during a save.)
+  function saving.timed()
+    save_at = ctx.now() + 3
+    if not svc.util then return save_now() end
+    saving.t0 = svc.util.clock()
+    save_now()
+    save_at = max(save_at, ctx.now() + 20 * (svc.util.clock() - saving.t0))
+  end
+  -- What a mod has saved, in bytes, counted once it first saves and kept up by put (saving.used: mod -> bytes): chef.save
+  -- stops growing a mod's lines past 256 KB (saving.CAP), as every mod's lines are written whole at each save. Nothing is
+  -- taken away: a mod already over it keeps its lines, may change them within their size and may
+  -- remove them. Only chef.save asks: my options menu's rows always save.
+  saving.used, saving.CAP = {}, 256 * 1024
+  function saving.size(key, v)
+    if v == nil then return 0 end
+    return #key + (type(v) == 'string' and #v or 8) + 4
+  end
+  function saving.over(mod, key, v)
+    local t = store[mod]
+    local u = saving.used[mod]
+    if not u then
+      u = 0
+      for k, x in pairs(t or {}) do u = u + saving.size(k, x) end
+      saving.used[mod] = u
+    end
+    local grows = saving.size(key, v) - saving.size(key, t and t[key])
+    return grows > 0 and u + grows > saving.CAP
+  end
   local function put(mod, key, v)
     if type(key) ~= 'string' or not key:match('^[%w_%.%-]+$') or #key > 64 then return false, 'keys are letters, digits, _ . - (64 at most)' end
     local t = type(v)
@@ -342,7 +427,14 @@ function M.install(ctx)
     if t == 'string' and #v > 512 then return false, 'strings are saved up to 512 characters' end
     if t == 'number' and (v ~= v or v == math.huge or v == -math.huge) then return false, 'only finite numbers are saved' end
     store[mod] = store[mod] or {}
-    if store[mod][key] ~= v then store[mod][key] = v; dirty = true end
+    if store[mod][key] ~= v then
+      local u = saving.used[mod]
+      if u then saving.used[mod] = u + saving.size(key, v) - saving.size(key, store[mod][key]) end
+      store[mod][key] = v; dirty = true
+    end
+    -- (boxed, as nil is a change too: saving.unblock)
+    local b = saving.live and saving.blocked
+    if b then b[mod] = b[mod] or {}; b[mod][key] = { v } end
     return true
   end
   local function get(mod, key, default)
@@ -354,12 +446,22 @@ function M.install(ctx)
 
   -- ---------------------------------------------------------------- after_startup, shared values, events
   -- I time a mod's callbacks (events, on_change, after_startup) as that mod's own (its record, from extend), so the
-  -- performance monitor and its frame budget count them for it, not for the loader.
+  -- performance monitor and its frame budget count them for it, not for the loader. They're crash-guarded too: a crash
+  -- in one is a native fault no pcall sees, so each runs through run_as (svc.run_as, further down) under a key of its
+  -- own (ctx.place_key, kept on its record c, whose c.fn it is), like the look-alikes' hooks. what: its kind in that key.
+  -- My own callbacks stay out of it: every mod's switch shares one such place, so a skip of it would leave all of them
+  -- saving and doing nothing. A mod's callback that runs inside one of mine still comes back here under its own key.
   local recs = {}
-  local function call_as(owner, fn, ...)
+  local function call_as(owner, what, c, ...)
+    if owner == 'loader' then return pcall(c.fn, ...) end
+    local p = recs[owner]
+    if p and p.paused then return true end         -- (nothing of a paused mod is called: svc.pause)
+    local k = c.key
+    if k == nil then k = ctx.place_key(what, c.fn); c.key = k end
+    if k then return svc.run_as(owner, k, c.fn, ...) end
     local a, u = recs[owner], svc.util
-    if a and u then return u.timed(a, fn, ...) end
-    return pcall(fn, ...)
+    if a and u then return u.timed(a, c.fn, ...) end
+    return pcall(c.fn, ...)
   end
   -- a mod's own call that runs other mods' callbacks (emit, set): their time already went to them, so it comes off
   -- the caller's, which its hook or timer counts whole
@@ -371,11 +473,13 @@ function M.install(ctx)
     u.discount(a, (u.clock() - t0) * 1000)
     return r
   end
+  -- (ctx.late: the mod starting now, after start-up: its callbacks wait for its start to end, as every mod's do at
+  -- launch, so they find its locals set and its module returned: svc.late_start. Later on one runs at once.)
   local after, started = {}, false
   local function after_startup(owner, fn)
     if type(fn) ~= 'function' then return false, 'after_startup needs a function' end
-    if started then
-      local ok, err = call_as(owner, fn)
+    if started and ctx.late ~= owner then
+      local ok, err = call_as(owner, 'after_startup', { fn = fn })
       if not ok then log(fmt('[%s] after_startup: %s', owner, err_text(err))) end
       return true
     end
@@ -401,17 +505,22 @@ function M.install(ctx)
   local function ended(event)
     if emitting > 0 then stale[event] = true else compact(event) end
   end
-  local function emit(event, ...)
+  -- (only: one owner's subscriptions alone, a late start's replay: svc.late_start; nil: everyone's)
+  local function emit_as(only, event, ...)
     local list = subs[event]
     if not list then return 0 end
     local n = 0
     emitting = emitting + 1
     for i = 1, #list do
       local sb = list[i]
-      if sb and sb.on then
-        local ok, err = call_as(sb.owner, sb.fn, ...)
-        n = n + 1
-        if not ok then
+      local p = sb and recs[sb.owner]              -- (a paused mod's listener stays, uncalled and not counted)
+      if sb and sb.on and (only == nil or sb.owner == only) and not (p and p.paused) then
+        local ok, err = call_as(sb.owner, 'event', sb, ...)
+        -- (one the crash guard skips didn't run: it isn't counted, and it's no error of its own; said once)
+        local held = not ok and err == 'skipped'
+        if held and not sb.said then sb.said = true; log(fmt('[%s] event %s: skipped (it crashed the game)', sb.owner, event)) end
+        if not held then n = n + 1 end
+        if not ok and not held then
           sb.errors = sb.errors + 1
           if sb.errors <= 3 then log(fmt('[%s] event %s: %s', sb.owner, event, err_text(err))) end
           if sb.errors >= 20 then sb.on = false; stale[event] = true; log(fmt('[%s] event %s: switched off after 20 errors', sb.owner, event)) end
@@ -425,6 +534,7 @@ function M.install(ctx)
     end
     return n
   end
+  local function emit(event, ...) return emit_as(nil, event, ...) end
   svc.emit = emit
 
   -- ---------------------------------------------------------------- options (the menu's rows) and key bindings
@@ -434,7 +544,8 @@ function M.install(ctx)
   -- the menu's line list and the key users are kept until a row is added or moved (layout) or a binding changes (keys)
   -- (src: a label function's chunk name, the mod it belongs to, asked of the debug library once per function: text_of)
   -- (pk: the packages, by patch file: svc.pk_settle)
-  local ver = { layout = 0, keys = 0, rows = 0, src = setmetatable({}, { __mode = 'k' }), pk = {} }
+  local ver = { layout = 0, keys = 0, rows = 0, src = setmetatable({}, { __mode = 'k' }),
+                fns = setmetatable({}, { __mode = 'k' }), pk = {} }
   local function group(mod, title)
     local g = group_of[mod]
     if not g then
@@ -519,16 +630,20 @@ function M.install(ctx)
     return fmt('opt.h_%08x%08x', a, b)
   end
   -- a label, title or choice as text (a mod's function or odd value can't raise into the menu). A function runs as its
-  -- mod (found by its chunk name, '@mods/...') under the hang watchdog (ctx.dog), and not at all once that mod is off.
+  -- mod under the hang watchdog (ctx.dog), and not at all once that mod is off. Its mod: by its chunk name,
+  -- '@mods/...'; a chunk name that's no mod's (loadstring's text, a piece of its own) goes by the mod that registered
+  -- it (ver.fns).
   local function text_of(v)
     if type(v) == 'function' then
       local D, a = ctx.dog, nil
-      if D and D.armed and D.getinfo then
-        -- (a function's chunk never changes: its name is kept, the mod's record looked up live)
+      if D and D.getinfo then
+        -- (a function's chunk never changes: its name is kept, the mod's record looked up live. Asked with the watchdog
+        -- off too, enter and leave doing nothing then: with only a paused mod left it is off, and that mod's label stays uncalled)
         local name = ver.src[v]
         if name == nil then
           local info = D.getinfo(v, 'S')
           name = info and type(info.source) == 'string' and info.source:sub(2) or false
+          if not recs[name] then name = ver.fns[v] or name end
           ver.src[v] = name
         end
         a = name and recs[name] or nil
@@ -542,6 +657,8 @@ function M.install(ctx)
       v = s
     end
     if type(v) == 'string' then return v end
+    -- (a table's or userdata's __tostring would run here with no mod entered, past the hang watchdog)
+    if type(v) == 'table' or type(v) == 'userdata' then return '?' end
     local ok, s = pcall(tostring, v or '')
     return ok and type(s) == 'string' and s or '?'
   end
@@ -578,8 +695,9 @@ function M.install(ctx)
     if ty == 'key' then
       local k = type(value) == 'string' and value or 'off'
       -- the menu's own key is never none or one of the keys the menu uses (it could never be opened again), and
-      -- always one plain key
-      if spec.menu and (k == 'off' or MENU_KEYS[k] or key_parts(key_value(k))) then return spec.default end
+      -- always one plain key (a hand-set line as I keep a key first: 'F8' or a stray space is no other key)
+      if spec.menu then k = key_value(k) or 'off' end
+      if spec.menu and (k == 'off' or MENU_KEYS[k] or key_parts(k)) then return spec.default end
       -- (a row that takes combos keeps them in my order; one without a controller takes no button)
       if spec.combos then
         k = key_value(k) or 'off'
@@ -588,6 +706,13 @@ function M.install(ctx)
       return k
     end
     return value
+  end
+  -- A saved value of another type than its row's (a row id a mod reused for another kind of row): clean would turn it into
+  -- an off, so the row's default stands. Only what's read back goes through this: the line itself stays in the file.
+  function saving.typed(spec, v, default)
+    local ty, tv = spec.type, type(v)
+    if (ty == 'toggle' and tv ~= 'boolean') or (ty == 'key' and tv ~= 'string') then return default end
+    return v
   end
   local function finite(n) return type(n) == 'number' and n == n and n > -math.huge and n < math.huge end
   local function check_spec(spec)
@@ -612,22 +737,61 @@ function M.install(ctx)
     end
     return nil
   end
+  -- A mod's spec as a plain table of my own: the fields a mod's row reads (menu and section are for my own rows only),
+  -- its lists item by item. It's read with plain spec[k] in chef.option, while the mod runs, so an inherited spec works
+  -- and a bad __index stops under that mod's watchdog; the menu runs as no mod and never touches the mod's table. A
+  -- list ends at its first nil or at 33 items, one past check_spec's limit, so a longer one is refused as ever.
+  svc.SPEC_KEYS = { 'type', 'label', 'default', 'min', 'max', 'step', 'choices', 'palette', 'run', 'text', 'heading',
+                    'sub', 'fold', 'hint', 'combos', 'pads' }
+  function svc.spec_list(l)
+    if type(l) ~= 'table' then return l end
+    local c = {}
+    for i = 1, 33 do
+      local v = l[i]
+      if v == nil then break end
+      c[i] = v
+    end
+    return c
+  end
+  function svc.spec_copy(spec)
+    if type(spec) ~= 'table' then return spec end        -- (check_spec says why)
+    local c = {}
+    for _, k in ipairs(svc.SPEC_KEYS) do c[k] = spec[k] end
+    c.choices, c.palette = svc.spec_list(c.choices), svc.spec_list(c.palette)
+    return c
+  end
   local function add_row(owner, mod, title, id, spec)
     local err = check_spec(spec)
     if err then return nil, err end
+    -- (what a mod's row may show as text: text_of runs each as this mod)
+    if owner ~= 'loader' then
+      for _, v in pairs(spec) do if type(v) == 'function' then ver.fns[v] = owner end end
+      if type(spec.choices) == 'table' then
+        for _, v in ipairs(spec.choices) do if type(v) == 'function' then ver.fns[v] = owner end end
+      end
+    end
     local full = mod .. '|' .. id
     local row = rows_by_id[full]
-    if row then return row end
+    -- (only a row a stopped copy of this same mod left, svc.row_dead: registered again it's the new copy's, whole: its
+    -- spec, its default, its saved value. Any other row stays as first registered.)
+    if row and not (row.dead and row.owner == owner) then return row end
     local default = spec.default
     if spec.type == 'toggle' then default = default == true
     elseif spec.type == 'choice' then default = default or 1
     elseif spec.type == 'slider' then default = default or spec.min
     elseif spec.type == 'key' then default = default or 'off'
     elseif spec.type == 'color' then default = default or 'FFFFFF' end
+    if row then
+      row.spec, row.dead, row.vs_v, row.dp_st = spec, nil, nil, nil
+      row.default = clean(spec, default)
+      row.value = clean(spec, saving.typed(spec, get(mod, row.key, row.default), row.default))
+      ver.layout, ver.keys = ver.layout + 1, ver.keys + 1
+      return row
+    end
     ver.rows = ver.rows + 1
     row = { id = full, key = row_key(id), mod = mod, spec = spec, owner = owner, changed = {}, n = ver.rows, short = id }
     row.default = clean(spec, default)
-    row.value = clean(spec, get(mod, row.key, row.default))
+    row.value = clean(spec, saving.typed(spec, get(mod, row.key, row.default), row.default))
     rows_by_id[full] = row
     local g = group(mod, title)
     g.rows[#g.rows + 1] = row
@@ -639,10 +803,12 @@ function M.install(ctx)
     -- (a mod's option wants its reset button, a button of its own doesn't; either keeps the reset button last)
     if owner ~= 'loader' then
       s = rows_by_id[owner .. '|#on']
-      if s and s.reset and spec.type ~= 'button' then s.reset.wanted = true end
+      local fresh = s and s.reset and spec.type ~= 'button' and not s.reset.wanted
+      if fresh then s.reset.wanted = true end
       reset_tail(owner)
-      -- (a package's mod with options of its own may be its main mod now)
-      if s and s.pk and not s.opts then s.opts = true; svc.pk_settle(s.pk) end
+      -- (a package's mod with options of its own may be its main mod now; a part's first row with a value, after a
+      -- button of its own, still has to tell the main mod's reset button)
+      if s and s.pk and (fresh or not s.opts) then s.opts = true; svc.pk_settle(s.pk) end
     end
     return row
   end
@@ -659,7 +825,9 @@ function M.install(ctx)
     -- each callback runs as the mod that asked for it ({ fn, owner, on }; a mod that stops has its own switched off)
     for _, c in ipairs(row.changed) do
       if c.on then
-        local ok, err = call_as(c.owner, c.fn, v)
+        local p = recs[c.owner]
+        c.due = p and p.paused                     -- (a paused mod hears the row's value as it's resumed: svc.resume)
+        local ok, err = call_as(c.owner, 'on_change', c, v)
         if not ok then log(fmt('[%s] on_change %s: %s', c.owner, row.id, err_text(err))) end
       end
     end
@@ -674,16 +842,16 @@ function M.install(ctx)
   -- are mine and always run.
   local function press(row)
     local a = recs[row.owner]
-    if a and a.on == false then return end
+    if row.ro or (a and a.on == false) then return end
     if ctx.opt_changed then ctx.opt_changed(row.id) end
     local run = row.spec.run
     if type(run) == 'function' then
-      local ok, err = call_as(row.owner, run)
+      local ok, err = call_as(row.owner, 'button', { fn = run })
       if not ok then log(fmt('[%s] button %s: %s', row.owner, row.id, err_text(err))) end
     end
     for _, c in ipairs(row.changed) do
       if c.on then
-        local ok, err = call_as(c.owner, c.fn, true)
+        local ok, err = call_as(c.owner, 'on_change', c, true)
         if not ok then log(fmt('[%s] on_change %s: %s', c.owner, row.id, err_text(err))) end
       end
     end
@@ -746,35 +914,57 @@ function M.install(ctx)
   -- it (a fresh file each launch once it passes 1 MB, the same cap per launch). The loader's own lines about the mod
   -- (started, errors, crashes, timings) stay in chef_loader.log. A mod opens 8 names at most a launch, and all of its
   -- own logs together take what one log may (ctx.LOG_CAP), so a runaway mod can't fill the disk with many of them.
+  -- (keyed in lower case: Windows folds names, so Foo and foo are one file. A name a mod holds through io.open or
+  -- open_log is taken here too: sandbox.lua's sb.claims)
   local own_logs = {}                       -- name -> { f, owner, use = { written } shared by the mod's own logs }
   local function own_open(owner, name)
-    local o = own_logs[name]
+    local key = name:lower()
+    local o = own_logs[key]
     if o then
       if o.owner ~= owner then return nil, name .. '.log is ' .. o.owner .. "'s" end
       return o
     end
+    if DEVICES[key] then return nil, 'device names are off limits' end
+    local sbx, file = svc.sandbox, key .. '.log'
+    local who = sbx and sbx.claims[file]
+    if who and who ~= owner then return nil, name .. '.log is ' .. who .. "'s" end
     -- (its logs so far: how many, and the count they share; opens are rare, so I walk them)
     local n, use = 0, nil
     for _, q in pairs(own_logs) do if q.owner == owner then n, use = n + 1, q.use end end
     if n >= 8 then return nil, 'a mod opens 8 logs of its own at most' end
     local path = ctx.DIR .. name .. '.log'
-    local f, big = ctx.open(path, 'r'), false
-    if f then local size = f:seek('end'); big = size and size > 1024 * 1024; f:close() end
-    f = ctx.open(path, big and 'w' or 'a')
+    -- (text from an earlier launch is this mod's to read back only when the file's first line, own_log's, names it: an
+    -- open is no proof, or chef.own_log would hand over another mod's old log. The same line says when a log over 1 MB
+    -- is this mod's to start fresh: one that lost it is only added to)
+    local f, big, mine = ctx.open(path, 'r'), false, true
+    if f then
+      local size = f:seek('end'); big = size and size > 1024 * 1024
+      f:seek('set', 0)
+      local head = f:read(256)
+      mine = not head or head:find('==== ' .. owner .. ',', 1, true) ~= nil
+      f:close()
+    end
+    f = ctx.open(path, (big and mine) and 'w' or 'a')
     if not f then return nil, 'could not open ' .. path end
     o = { f = f, owner = owner, use = use or { written = 0 } }
-    own_logs[name] = o
-    -- a log of the same name in the old folder (%LOCALAPPDATA%) gets one last line saying
-    -- where the log went, once
+    own_logs[key] = o
+    -- (a log it can't show is its own is held with no reader, and this mod is its writer: if it lost its first line, the
+    -- mod's own w takes the name back)
+    if sbx and sbx.takes(file, owner) then
+      sbx.claims[file], sbx.writer[file] = mine and owner or false, not mine and owner or nil
+    end
+    -- this mod's own log of the same name in the old folder (%LOCALAPPDATA%) gets one last line saying where the log
+    -- went, once. Its own: each launch's log starts with the mod's name, and a file without it is some other program's.
     if ctx.OLD_DIR then
       local old = ctx.OLD_DIR .. name .. '.log'
       local g = ctx.open(old, 'r')
       if g then
+        local head = g:read(#owner + 64) or ''
         local size = g:seek('end') or 0
         g:seek('set', math.max(0, size - 300))
         local tail = g:read('*a') or ''
         g:close()
-        if not tail:find('this log is no longer written', 1, true) then
+        if head:find('==== ' .. owner .. ', run by', 1, true) and not tail:find('this log is no longer written', 1, true) then
           local w = ctx.open(old, 'a')
           if w then
             pcall(w.write, w, fmt('%s %s.log moved to %%APPDATA%%\\Arrowhead\\Helldivers2 with %s; this log is no longer written\n',
@@ -789,6 +979,7 @@ function M.install(ctx)
   local function own_write(o, text)
     local u = o.use
     if u.written > ctx.LOG_CAP then return end
+    if #text > 65536 then text = text:sub(1, 65536) .. ' ... (cut: a log line is 64 KB at most)' end
     local line = fmt('%s %6.1f s | %s', ctx.clock(), ctx.now(), text)
     u.written = u.written + #line + 1
     if u.written > ctx.LOG_CAP then line = line .. '\n(this mod\'s logs are full for this launch)' end
@@ -801,8 +992,9 @@ function M.install(ctx)
     local title = a.title
     recs[owner] = a
     chef.api = M.api
+    -- (dev: only a test build reads the dev file)
     local caps = { api = M.api, after_startup = true, settings = true, share = true, events = true, require = true,
-                   bind = true, menu = true, shims = true, dev = true, logs = true, own_log = true, mouse_hold = true,
+                   bind = true, menu = true, shims = true, dev = ctx.TEST ~= nil, logs = true, own_log = true, mouse_hold = true,
                    players_event = true, hang_watchdog = ctx.dog ~= nil and ctx.dog.armed == true,
                    option_buttons = true, option_colors = true, option_headings = true, menu_state = true, mod_stopped_event = true, bind_combos = true,
                    option_folds = true }
@@ -814,17 +1006,23 @@ function M.install(ctx)
       if name == 'hang_watchdog' then return ctx.dog ~= nil and ctx.dog.armed == true end
       return chef.capabilities[name] == true or (name == 'api' and true)
     end
-    function chef.after_startup(fn) return after_startup(owner, fn) end
+    -- (a mod that stopped signs up for nothing more: a library's shared function can still run its code, and what it
+    -- signs up for would outlive it. a.on and not recs[owner]: a restart's new record would pass that)
+    function chef.after_startup(fn)
+      if a.on == false then return false, 'this mod has stopped' end
+      return after_startup(owner, fn)
+    end
     -- saved settings
     -- (keys starting with opt. are my options menu's: a mod's rows are saved under them, chef.option)
     function chef.save(key, value)
       if type(key) == 'string' and key:find('^opt%.') then return nil, 'keys starting with opt. are the options menu\'s' end
+      if type(key) == 'string' and saving.over(owner, key, value) then return false, 'a mod saves 256 KB at most' end
       return put(owner, key, value)
     end
     function chef.load(key, default) return get(owner, key, default) end
     -- shared values and events
     function chef.share(name, value)
-      if type(name) ~= 'string' then return false end
+      if type(name) ~= 'string' or a.on == false then return false end
       local was = shared[name]
       if was and was.owner ~= owner then log(fmt('[%s] replaced shared "%s" (it was %s\'s)', owner, name, was.owner)) end
       shared[name] = { owner = owner, value = value }
@@ -833,7 +1031,7 @@ function M.install(ctx)
     function chef.shared(name) local s = shared[name]; return s and s.value end
     -- returns a function that ends the subscription (the entry leaves the list)
     function chef.on(event, fn)
-      if type(event) ~= 'string' or type(fn) ~= 'function' then return nil end
+      if type(event) ~= 'string' or type(fn) ~= 'function' or a.on == false then return nil end
       subs[event] = subs[event] or {}
       local sb = { owner = owner, fn = fn, on = true, errors = 0 }
       subs[event][#subs[event] + 1] = sb
@@ -843,7 +1041,13 @@ function M.install(ctx)
     end
     function chef.emit(event, ...) if type(event) == 'string' then return as_caller(a, emit, event, ...) end end
     -- the mouse held from the game's camera, and this frame's movement (svc.hold_mouse, svc.mouse_delta)
-    function chef.hold_mouse(on) return svc.hold_mouse(owner, on ~= false) end
+    -- (a mod that's off takes nothing: a function it shared still runs, and nothing would let go of the mouse. Letting
+    -- go while paused counts: the resume doesn't take back a hold the mod gave up)
+    function chef.hold_mouse(on)
+      if on ~= false and a.on == false then return false, 'the mod is off' end
+      if on == false and a.paused then a.paused.hold = nil end
+      return svc.hold_mouse(owner, on ~= false)
+    end
     function chef.mouse_held() return svc.mouse_held() end
     function chef.mouse_delta() return svc.mouse_delta() end
     -- my options menu: open now? (the 'menu' event says when it opens and closes)
@@ -851,8 +1055,13 @@ function M.install(ctx)
     -- another mod's exports (the table it returned), optionally at a version or newer
     -- (a trusted mod's exports never: nothing it holds goes to other mods)
     function chef.require(name, want)
+      if type(name) ~= 'string' then return nil, 'a mod name is a string' end
       local other = ctx.addon(name)
-      if not other or not other.on or type(other.module) ~= 'table' then return nil, name .. ' is not running' end
+      if not other or not other.on or type(other.module) ~= 'table' then
+        -- (a boot-style mod that runs has no table to hand out: package.loaded says true for it)
+        if not other and svc.module_of(name) == true then return nil, name .. ' is a boot-style mod: it has no exports' end
+        return nil, name .. ' is not running'
+      end
       local sbx = svc.sandbox
       if sbx and sbx.trusted and sbx.trusted(name) then return nil, name .. ' shares nothing' end
       if want and not M.version_at_least(other.version, want) then
@@ -877,16 +1086,23 @@ function M.install(ctx)
       if s and s.pk then svc.pk_settle(s.pk) end
     end
     function chef.option(id, spec)
+      -- (a stopped copy's held function never takes a dead row back: only the mod's next copy does)
+      if a.on == false then return nil, 'the mod is off' end
       if type(id) ~= 'string' or not id:match('^[%w_%.%-]+$') then return nil, 'ids are letters, digits, _ . -' end
-      local row, err = add_row(owner, owner, title or svc.short_title(owner), id, spec)
+      local row, err = add_row(owner, owner, title or svc.short_title(owner), id, svc.spec_copy(spec))
       if not row then log(fmt('[%s] option %s: %s', owner, id, err)); return nil, err end
       return row.value
     end
     function chef.get(id) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then return r.value end end
-    function chef.set(id, v) local r = rows_by_id[owner .. '|' .. tostring(id)]; if r then as_caller(a, set_row, r, v); return r.value end end
+    -- (a # row is mine, not the mod's: its switch and its reset are the player's. By the row, not the id: an id can be a
+    -- table whose tostring reads #on)
+    function chef.set(id, v)
+      local r = rows_by_id[owner .. '|' .. tostring(id)]
+      if r and tostring(r.short):sub(1, 1) ~= '#' then as_caller(a, set_row, r, v); return r.value end
+    end
     function chef.on_change(id, fn)
       local r = rows_by_id[owner .. '|' .. tostring(id)]
-      if r and type(fn) == 'function' then return on_change(r, owner, fn) end
+      if r and type(fn) == 'function' and a.on ~= false then return on_change(r, owner, fn) end
       return false
     end
     -- a button row: Right (Enter too, or a click) runs fn as this mod; text is what the row shows on its right ('RUN')
@@ -1029,9 +1245,9 @@ function M.install(ctx)
     end
   end
   -- Every mod I found gets an on/off row of its own, first in its options, so a mod with no options is listed too
-  -- (settle puts it where the options are). Off stops it at once (ctx.mod_switched, the usual stop) and it isn't
-  -- started at the next launches; on again, it starts at the next launch. True while it's on (or the row couldn't be
-  -- made). Its own group is titled by the mod's short name with spaces, as the look-alikes title a heading. Its label
+  -- (settle puts it where the options are). Off stops it at once (ctx.mod_switched, the usual stop, or a pause for a mod
+  -- with no stop callback) and it isn't started at the next launches; on again, it starts or resumes when my menu closes
+  -- (the loader's starter.restart; a mod that can't says why: starter.switched). True while it's on (or the row couldn't be made). Its own group is titled by the mod's short name with spaces, as the look-alikes title a heading. Its label
   -- is the mod's name as its entry shows it (svc.mod_title, set again when the mod's title changes: group, chef.title,
   -- svc.mod_named), with its version drawn after it in a dimmer color (nav.ver_row), the way my own title shows mine.
   -- It stays the mod's name in a look-alike heading too (settle): the heading's title is the mod's to pick and may not
@@ -1040,20 +1256,45 @@ function M.install(ctx)
   -- file: the patch file the mod is deployed in; the mods in one file are one package (svc.pk_settle), and a
   -- package's main switch switches its parts too, each through its own switch (r.along: switched with its package,
   -- so the loader tells no notice of its own for it)
+  function svc.mod_is_on(name)
+    local s = rows_by_id[name .. '|#on']
+    return s == nil or s.value ~= false
+  end
+  -- the main mod of the package this mod is a part of (nil: no part of one, or that main mod itself)
+  function svc.pk_main(name)
+    local s = rows_by_id[name .. '|#on']
+    local m = s and s.pk and s.pk.main
+    return m and m ~= s and m.mod or nil
+  end
   function svc.mod_switch(name, title, file)
     if title == nil or title == name:match('([^/]+)$') then title = svc.short_title(name)
     elseif type(title) == 'string' then title = (title:gsub('_', ' ')) end
     local r = add_row('loader', name, title, '#on', { type = 'toggle', label = name, default = true,
-      hint = 'Off: stops now and stays off. On: starts again the next time you launch the game.' })
+      hint = 'Off: turns off mod. On: turns on mod after menu is closed (if possible).' })
     if r and not r.switch then
       r.switch, r.at = true, group_of[name]
       r.spec.label = svc.mod_title(name)
       on_change(r, 'loader', function(v)
+        -- A switch-off is on the disk before the mod stops: its stop may be what ends the game. A package's parts go with
+        -- it (their rows are switched below, after this stop, so their lines go in here).
+        if v == false then
+          if r.pk and r.pk.main == r then
+            for _, q in ipairs(r.pk.sw) do if q.value then put(q.mod, q.key, false) end end
+          end
+          if dirty then save_now() end
+        end
         if ctx.mod_switched then ctx.mod_switched(name, v, r.along) end
         local p = r.pk
         if p and p.main == r then
           for _, q in ipairs(p.sw) do
             if q ~= r and q.value ~= v then q.along = true; set_row(q, v); q.along = nil end
+          end
+          -- (a mod of this file left to another loader has no switch, so its old saved off goes here, or it would hold
+          -- the package off again at every launch)
+          if v then
+            for _, n in ipairs(ctx.found_in and ctx.found_in(p.file) or {}) do
+              if get(n, r.key) == false then put(n, r.key, nil) end
+            end
           end
         end
       end)
@@ -1099,7 +1340,14 @@ function M.install(ctx)
       -- (its package: the mods found in the same patch file; a dev mode file is one of its own)
       if type(file) == 'string' and not file:find('^dev:') then
         local p = ver.pk[file]
-        if not p then p = { file = file, sw = {} }; ver.pk[file] = p end
+        if not p then
+          p = { file = file, sw = {} }; ver.pk[file] = p
+          -- (any mod of this file saved off holds the package off, or the first to start, new in an update, say, would
+          -- pass its on to the rest and erase that off. I only read the lines: a mod left to another loader gets no switch.)
+          for _, n in ipairs(ctx.found_in and ctx.found_in(file) or {}) do
+            if r.value and get(n, r.key) == false then r.value = false; put(name, r.key, false) end
+          end
+        end
         p.sw[#p.sw + 1] = r
         r.pk = p
         for _, o in pairs(rows_by_id) do if o.owner == name then r.opts = true; break end end
@@ -1114,18 +1362,19 @@ function M.install(ctx)
   -- by name. Its switch is the package's: the other parts' switches and reset buttons leave every list (s.part, s.at
   -- false), its entry lists them as INCLUDED lines (group_lines), their options under their names (nav.pk_lines), and
   -- its reset button resets theirs too. Each part keeps its own switch underneath, set as the main one is (its own
-  -- saved off, its own stop, as switched from the menu), so a part's start at the next launch follows the package
+  -- saved off, its own stop, its own late start, as switched from the menu), so a part's start follows the package
   -- whatever order the mods start in. The package's value is the one its mods already decided (started or kept off)
   -- hold: they all agree, as only the main switch is listed and it switches them all, so it's the first one's (the
-  -- main mod's own while it's alone). A mod joining (joining) takes it quietly, before the loader decides its start,
+  -- main mod's own while it's alone, off when any of the file's mods was saved off: svc.mod_switch). A mod joining
+  -- (joining) takes it quietly, before the loader decides its start,
   -- even when it becomes the main mod: a newcomer never switches the parts already decided. Only a player's flip of
   -- the main switch changes it. Worked out again as mods join and register options or a title; a package of one mod
   -- is as any mod. (p: { file, sw = its mods' switches, main })
   function svc.pk_settle(p, joining)
     local best, rank = nil, -1
     for _, s in ipairs(p.sw) do
-      local g, tail = group_of[s.mod], s.mod:match('([^/]+)$') or s.mod
-      local k = (s.opts or (g and g.titled)) and 2 or (svc.short_title(s.mod) == (tail:gsub('_', ' ')) and 1 or 0)
+      local g = group_of[s.mod]
+      local k = (s.opts or (g and g.titled)) and 2 or (svc.own_name(s.mod) and 1 or 0)
       if k > rank or (k == rank and s.mod < best.mod) then best, rank = s, k end
     end
     if best ~= p.main then p.main = best; ver.layout = ver.layout + 1 end
@@ -1159,6 +1408,14 @@ function M.install(ctx)
     settle(best.mod)
     reset_tail(best.mod)
   end
+  -- A mod another loader runs (the loader's starter.left_rows, once at start-up): an entry in my list with one row and
+  -- nothing to change, no switch, no reset, no status. The row is its label alone (r.ro), so a language's text and a long
+  -- loader's name get the row's whole width at any size; a search finds it as any row, and the keys only move and go
+  -- back. Drawn as a button is, with no value: a frame pays for nothing else.
+  function svc.mod_left(name, label, hint)
+    local r = add_row('loader', name, svc.short_title(name), '#left', { type = 'button', label = label, hint = hint })
+    if r then r.ro = true end
+  end
   -- a mod's name as its entry in the list shows it: its title (chef.title), else its short name with spaces
   function svc.mod_title(name)
     local g = group_of[name]
@@ -1166,16 +1423,27 @@ function M.install(ctx)
     return svc.short_title(name)
   end
   -- A mod's short name, as its entry shows it until it titles itself: its path's last part with spaces; a last part
-  -- that names no mod (mods/some_helper/core) gives way to the folder above it ("some helper").
+  -- that names no mod (mods/some_helper/core) gives way to the folder above it ("some helper"), and on up the path while
+  -- that one names none either (mods/some_helper/src/main), but never to "mods" itself.
   do
     local GENERIC = { core = true, main = true, init = true, mod = true, boot = true, src = true, lua = true,
                       index = true, script = true, plugin = true }
     function svc.short_title(name)
-      local up, last = name:match('([^/]+)/([^/]+)$')
+      local head, last = name:match('^(.*)/([^/]+)$')
       last = last or name
-      if up and up ~= 'mods' and GENERIC[last:lower()] then last = up end
+      while head and GENERIC[last:lower()] do
+        local above, up = head:match('^(.*)/([^/]+)$')
+        up = up or head
+        if up == 'mods' then break end
+        head, last = above, up
+      end
       return (last:gsub('_', ' '))
     end
+  end
+  -- does this mod's name say which mod it is, or is its last part a generic one that svc.short_title goes past? (how a
+  -- package picks its main mod: svc.pk_settle, and the loader's starter.left_rows for mods another loader runs)
+  function svc.own_name(name)
+    return svc.short_title(name) == ((name:match('([^/]+)$') or name):gsub('_', ' '))
   end
   -- A runtime mod's own name for itself (HD2Runtime.mod{ name = ... }, its file's first mod) titles its entry, unless
   -- the mod titled it itself (chef.title wins, before or after).
@@ -1197,16 +1465,21 @@ function M.install(ctx)
     local out = { 'MENU', 'COMPACT LOOK', 'CONTROLS', 'PERFORMANCE', 'MONITOR LOOK', 'CRASH RECOVERY', 'MOD OPTIONS',
                   'ALL MODS', 'ALSO USED BY:',
                   -- (the status's fixed words, on an entry's title bar: nav.status)
-                  'RUNNING', 'OFF', 'KEPT OFF BY THE CRASH GUARD', 'STOPPED', 'NOT STARTED', 'ON AGAIN AT THE NEXT LAUNCH',
-                  'SWITCHED OFF', 'STARTED IN', 'LAST ERROR:', 'LINE', 'ERRORS:',
+                  'RUNNING', 'OFF', 'CRASH GUARD', 'STOPPED', 'NOT STARTED', 'ON AGAIN AT THE NEXT LAUNCH',
+                  'HELD, SEE CRASH RECOVERY', 'LEFT TO ANOTHER LOADER',
+                  'STARTS WHEN THIS MENU CLOSES', 'TRIED AGAIN WHEN THIS MENU CLOSES', 'CALL SKIPPED, STILL RUNNING',
+                  'CALLS SKIPPED, STILL RUNNING', 'SWITCHED OFF', 'STARTED IN', 'LAST ERROR:', 'LINE', 'ERRORS:',
+                  -- (the fixed reasons a mod doesn't start for, drawn as they are after the head)
+                  'ITS START ENDED THE GAME', 'THE LOCKED-DOWN SPACE FOR MODS COULD NOT BE SET UP',
+                  'ITS REQUIREMENTS GO ROUND IN A CIRCLE',
                   -- (a package's INCLUDED lines: nav.part)
-                  'INCLUDED', 'KEPT OFF' }
+                  'INCLUDED' }
     for _, g in ipairs(groups) do
       if #g.rows > 0 then
         out[#out + 1] = text_of(g.title)
         for _, r in ipairs(g.rows) do
           -- (a mod's switch is labeled by the mod's name, never a text of mine: svc.mod_switch)
-          if not r.switch then out[#out + 1] = text_of(r.spec.label or r.id) end
+          if not r.switch then out[#out + 1] = text_of(r.spec.label or r.short) end
           for _, k in ipairs({ 'heading', 'hint', 'text' }) do
             if type(r.spec[k]) == 'string' then out[#out + 1] = r.spec[k] end
           end
@@ -1333,7 +1606,7 @@ function M.install(ctx)
         elseif not nav.held[a] then
           nav.held[a] = now; nav.rep[a] = now + 0.4; nav.act[a] = true
           if not closed then menu.dev = 'pad' end          -- (the hints show the controller's buttons)
-        elseif PAD_REPEAT[a] and now >= nav.rep[a] then nav.rep[a] = now + 0.09; nav.act[a] = true end
+        elseif PAD_REPEAT[a] and now >= nav.rep[a] then nav.rep[a] = now + 0.09; nav.act[a] = 'rep' end
       else nav.held[a] = nil end
     end
   end
@@ -1442,7 +1715,18 @@ function M.install(ctx)
       H.clean = 0
       eng('Mouse.set_dead_zone', A.move, H.had[1], H.had[2])
       log('options menu: the mouse\'s dead zone was found held after the menu let it go: put back')
+    -- (another mod's own far-up size isn't clean: that mod may have read my size as what was there, during a hold, and
+    -- hands it back when it lets go, however long after)
+    elseif type(size) == 'number' and size >= 1e5 then H.clean = 0
     else H.clean = H.clean + 1 end
+  end
+  -- (a runtime mod's dead zones just went back, from its release: one may be my size, so the looks start over)
+  function svc.hold_look() nav.hold.clean, nav.hold.heal_at = 0, 0 end
+  -- (what my hold found, while it's on this axis: a runtime mod's dead zone may be under it, and going back changes that.
+  -- at: a size read off the axis, answered only if it's my size)
+  function svc.hold_had(i, at)
+    local H, A = nav.hold, nav.axes
+    return H.on and A and A.move == i and (at == nil or at == HOLD) and H.had or nil
   end
   -- the engine's cursor (window pixels from the bottom left) as menu pixels, or nil when it isn't in the window
   function nav.cursor_at(w, h)
@@ -1665,15 +1949,21 @@ function M.install(ctx)
   -- The controller's hint line, in both looks: each button's picture, then its word, from x up to x_end (y: the hint
   -- row's bottom, rh its height); a picture and its word go whole or not at all, and the pairs after one that doesn't
   -- fit go with it (the compact panel is narrower than the whole line). col: the look's colors; wc: the words' color.
-  function nav.pad_hints(x, x_end, y, rh, px, P, col, wc, layer)
+  -- l: the selected line. As in the key hints, a read-only row offers no PICK and no DEFAULT, and a button no DEFAULT:
+  -- it keeps nothing to put back.
+  function nav.pad_hints(x, x_end, y, rh, px, P, col, wc, layer, l)
     local gy = y + floor((rh - 9 * px) / 2)
     local parts = nav.ps and nav.pad_hint.ps or nav.pad_hint.xb
+    local r = l and l.row
+    local ro, btn = r and r.ro, r and r.spec.type == 'button'
     for k = 1, 9, 2 do
       local it, word = parts[k], parts[k + 1]
-      local gw = it and GLYPH_OF[it] and 11 * px or 0
-      if x + gw + (word and ctx.text_width(P(word), px) or 0) > x_end then break end
-      if gw > 0 then x = x + nav.glyph(it, x, gy, px, layer + 1, col) + 2 * px end
-      if word then x = x + (ctx.text(x, nav.midy(y, rh, px), P(word), px, wc, layer) or 0) + 6 * px end
+      if not (ro and it == 'enter') and not ((ro or btn) and it == 'delete') then
+        local gw = it and GLYPH_OF[it] and 11 * px or 0
+        if x + gw + (word and ctx.text_width(P(word), px) or 0) > x_end then break end
+        if gw > 0 then x = x + nav.glyph(it, x, gy, px, layer + 1, col) + 2 * px end
+        if word then x = x + (ctx.text(x, nav.midy(y, rh, px), P(word), px, wc, layer) or 0) + 6 * px end
+      end
     end
   end
   -- the title picture: 534 x 74 pixels, a texture in my own patch (BANNER_TEX, the resource
@@ -1803,8 +2093,8 @@ function M.install(ctx)
     end
   end
   -- A mod's state word's color, one pick for the status and a package's part lines: its kind (nav.st_kind: 1
-  -- running, the menu's green; 2 kept off or not started, orange; 3 stopped, red; 0 off or any other, the line's own
-  -- color c). col: the look's color function; faint: the preview's, fainter as its text is.
+  -- running, the menu's green; 2 the crash guard holding it or not started, orange; 3 stopped, red; 0 off or any other,
+  -- the line's own color c). col: the look's color function; faint: the preview's, fainter as its text is.
   -- The color is made right here, for the call that draws with it (the frame's color cache emptied first), so it never
   -- rides on a Color made earlier in the frame, whose slot the engine may have handed out again since.
   -- The top world (my layers from ctx.TOP: the menu, the monitor, the notices) puts what I draw through its own tone
@@ -1850,8 +2140,25 @@ function M.install(ctx)
     local t = nav.pal[k]
     return col(t[1], t[2], t[3], a or 255)
   end
-  function nav.st_kind(s)
+  function nav.st_kind(s, guard)
+    if guard then return 2 end
     return (s == 'running' and 1) or (s == 'stopped' and 3) or ((s == 'kept off' or s == 'not started' or not s) and 2) or 0
+  end
+  -- Is the crash guard holding this mod (m: its facts, nil for one with none)? Kept off, its start ended the game (a
+  -- boot-style mod's start is a load my guard skipped), or running with calls of its own skipped. Crash counts or a
+  -- suspected call alone hold nothing back: that mod is simply running. Only the menu's words: chef.mods() and the
+  -- health file keep their states.
+  function nav.guard(m)
+    local s = m and m.state
+    if s == 'kept off' then return true end
+    if s == 'running' then return (m.skipped or 0) > 0 end
+    return s == 'not started' and (m.why == 'its start ended the game' or m.why == 'failed to run: skipped')
+  end
+  -- A mod switched on that stays off for more than this launch (r: its switch row, m: its facts): 'guard' while the
+  -- crash guard holds it, 'left' when it's another loader's (the loader's starter.held), nil otherwise. Only asked when
+  -- a status is made again, so at most once a second.
+  function nav.on_hold(r, m)
+    if m and m.why == 'switched off in the options menu' and r.value and ctx.held then return ctx.held(r.mod) end
   end
   -- (state k's color from col at full alpha, or the preview's at 150 when faint: the looks' green and orange too)
   function nav.st_c(k, col, faint)
@@ -1873,11 +2180,11 @@ function M.install(ctx)
     local lv = ctx.lang_v and ctx.lang_v()
     if q.pw_st ~= st or q.pw_p ~= P or q.pw_lv ~= lv then
       local m = st and st.by[q.mod]
-      local s = st and (m and m.state or 'not started')
-      local h = s and ((s == 'running' and 'RUNNING') or (s == 'off' and 'OFF') or (s == 'kept off' and 'KEPT OFF')
+      local s, g = st and (m and m.state or 'not started'), nav.guard(m) or nav.on_hold(q, m) == 'guard'
+      local h = s and ((g and 'CRASH GUARD') or (s == 'running' and 'RUNNING') or (s == 'off' and 'OFF')
         or (s == 'stopped' and 'STOPPED') or (s == 'not started' and 'NOT STARTED') or caps(s))
       if ctx.tr_cut then ctx.tr_cut(true) end
-      q.pw_st, q.pw_p, q.pw_lv, q.pw, q.pw_k = st, P, lv, h and P((ctx.tr or text_of)(h)), nav.st_kind(s)
+      q.pw_st, q.pw_p, q.pw_lv, q.pw, q.pw_k = st, P, lv, h and P((ctx.tr or text_of)(h)), nav.st_kind(s, g)
       if ctx.tr_cut and ctx.tr_cut() then q.pw_st = nil end   -- (the pattern budget cut it: made again next frame)
     end
     local fit, tw, w = ctx.text_fit or fit_cells, ctx.text_width, q.pw
@@ -1960,6 +2267,19 @@ function M.install(ctx)
     for i = 1, #s do h = (h * 31 + s:byte(i)) % 2147483647 end
     return fmt('.%08x', h)
   end
+  svc.fold_sum = nav.fold_sum                  -- (the loader proper's long keys: it can't reach nav)
+  -- (another entry whose name makes the same key as this one's, mods/foo/bar_baz and mods/foo_bar/baz? Worked out once a
+  -- layout, kept on the group)
+  function nav.flat_twin(g)
+    if g.ft_v ~= ver.layout then
+      local flat = tostring(g.mod):gsub('[^%w_%.%-]', '_')
+      g.ft_v, g.ft = ver.layout, false
+      for _, o in ipairs(groups) do
+        if o ~= g and tostring(o.mod):gsub('[^%w_%.%-]', '_') == flat then g.ft = true; break end
+      end
+    end
+    return g.ft
+  end
   function nav.fold_key(g, text)
     text = tostring(text)
     local k = ('fold.' .. tostring(g.mod) .. '.' .. text):gsub('[^%w_%.%-]', '_')
@@ -1972,6 +2292,8 @@ function M.install(ctx)
         for _, r in ipairs(g.rows or {}) do if r.spec and r.spec.heading == twin then old = nil; break end end
       end
     end
+    -- (two mods whose names make one key: a sum of the mod's name after it, on both; any other mod keeps the key it had)
+    if nav.flat_twin(g) then k = k .. nav.fold_sum(tostring(g.mod)) end
     -- (too long for a key: cut, with a sum of the whole after it, so two long headings don't share one)
     if #k > 64 then k = k:sub(1, 55) .. nav.fold_sum(k) end
     if old and #old > 64 then old = old:sub(1, 55) .. nav.fold_sum(old) end
@@ -2069,7 +2391,7 @@ function M.install(ctx)
             -- (a heading found lists all its rows, a subheading's too, as a title found lists the mod's)
             local hit = whole or (a ~= nil and k1) or (b ~= nil and k2)
             if not hit then
-              local s = text_of(r.spec.label or r.id)
+              local s = text_of(r.spec.label or r.short)
               if r.lw_s ~= s then r.lw_s, r.lw = s, s:lower() end
               hit = r.lw:find(q, 1, true) ~= nil
               -- (a row I relabel is found by its first label too, r.find: it never drops out of the results it's in)
@@ -2137,7 +2459,7 @@ function M.install(ctx)
           end
           if hit then
             n = n + 1
-            if n <= 2 then others[#others + 1] = tr(text_of(g.title)) .. ' (' .. tr(text_of(o.spec.label or o.id)) .. ')' end
+            if n <= 2 then others[#others + 1] = tr(text_of(g.title)) .. ' (' .. tr(text_of(o.spec.label or o.short)) .. ')' end
           end
         end
       end
@@ -2165,9 +2487,8 @@ function M.install(ctx)
   -- (nothing while the menu is closed), and the mod's record (its last error, util.note_error). The line is made again
   -- only when a new list was taken, the switch moved (a fresh list at once: off stops the mod in that frame) or the
   -- language changed, and kept on the switch row (r.st). Its fixed words go through the language before they're
-  -- joined, as the clash hint's do. Its pieces are kept on the row, for nav.status_draw: the state word (r.st_h; and
-  -- its short form, r.st_hs, as a package's part line says it) and its color's kind (r.st_k), why (r.st_y), the
-  -- start's time (r.st_t) and memory (r.st_m), the error (r.st_e).
+  -- joined, as the clash hint's do. Its pieces are kept on the row, for nav.status_draw: the state word (r.st_h) and
+  -- its color's kind (r.st_k), why (r.st_y), the start's time (r.st_t) and memory (r.st_m), the error (r.st_e).
   -- The memory is the heap's change over the start: in KB under 1024, else in MB (one decimal under 10). A heap that
   -- shrank over it (the collector ran during the start and freed more than the mod kept) says nothing of what the mod
   -- kept, so I show no figure then rather than one that reads as "this mod costs nothing".
@@ -2180,13 +2501,26 @@ function M.install(ctx)
     if ctx.tr_cut then ctx.tr_cut(true) end
     -- (no facts at all, a host without util.mod_facts: the row says NOT STARTED rather than raising into the menu)
     local m, a = st and st.by and st.by[r.mod] or {}, recs[r.mod]
-    local s, why = m.state, m.why
-    local head = (s == 'running' and 'RUNNING') or (s == 'off' and 'OFF') or (s == 'kept off' and 'KEPT OFF BY THE CRASH GUARD')
+    local s, why, guard = m.state, m.why, nav.guard(m)
+    local held = nav.on_hold(r, m)
+    if held == 'guard' then guard = true end
+    local head = (guard and 'CRASH GUARD') or (s == 'running' and 'RUNNING') or (s == 'off' and 'OFF')
       or (s == 'stopped' and 'STOPPED') or (s == 'not started' and 'NOT STARTED') or s or 'NOT STARTED'
-    -- (switched off from this menu: said short, or that it comes back at the next launch once switched on again)
-    if why == 'switched off in the options menu' then why = r.value and 'ON AGAIN AT THE NEXT LAUNCH' or 'SWITCHED OFF' end
+    -- (switched off from this menu: said short, or what comes of it once switched on again: it starts as this menu
+    -- closes when it's waiting to start, the crash guard holds it or another loader has it (no start to promise then),
+    -- else at the next launch: stopped in this launch, the loader's starter.can_start. A paused mod closes the same way)
+    if why == 'switched off in the options menu' then
+      why = (not r.value and 'SWITCHED OFF') or (ctx.pending and ctx.pending[r.mod] and 'STARTS WHEN THIS MENU CLOSES')
+        or (held == 'guard' and 'HELD, SEE CRASH RECOVERY') or (held == 'left' and 'LEFT TO ANOTHER LOADER')
+        or 'ON AGAIN AT THE NEXT LAUNCH'
+    elseif why == 'tried again when this menu closes' then why = 'TRIED AGAIN WHEN THIS MENU CLOSES'
+    elseif why == 'failed to run: skipped' then why = 'its start ended the game' end
     r.st_h, r.st_y, r.st_t, r.st_m, r.st_e = tr(head), (type(why) == 'string' and why ~= '') and ': ' .. tr(why) or '', '', '', ''
-    r.st_k, r.st_hs = nav.st_kind(s), s == 'kept off' and tr('KEPT OFF') or r.st_h
+    -- (running with calls skipped: how many, the number outside the language's text)
+    if guard and s == 'running' then
+      r.st_y = ': ' .. m.skipped .. ' ' .. tr(m.skipped == 1 and 'CALL SKIPPED, STILL RUNNING' or 'CALLS SKIPPED, STILL RUNNING')
+    end
+    r.st_k = nav.st_kind(s, guard)
     if m.start_ms then
       r.st_t = ' - ' .. tr('STARTED IN') .. fmt(m.start_ms < 10 and ' %.1f MS' or ' %.0f MS', m.start_ms)
       local kb = m.start_kb and floor(m.start_kb + 0.5)
@@ -2218,14 +2552,14 @@ function M.install(ctx)
     return ctx.text_width(s, px)
   end
   -- A status drawn in pieces, each a text of its own, right-aligned to end at xe (on a title bar, after the title,
-  -- which keeps its room: room is what the title leaves): the state word in its color (RUNNING in the menu's green,
-  -- OFF in the line's gray, KEPT OFF and NOT STARTED orange, STOPPED red), the rest in the line's color (c) and the
+  -- nav.title_room: room is what the title leaves): the state word in its color (RUNNING in the menu's green,
+  -- OFF in the line's gray, CRASH GUARD and NOT STARTED orange, STOPPED red), the rest in the line's color (c) and the
   -- error in red (my notices' red; the looks' dim gray once it's old, r.st_eo). Where the line doesn't fit its room,
   -- the memory goes first, then the start's time; then the error is cut with '...' to what's left after the state
   -- word and why (at least half the room after the state word: a long why is cut for it), so the state word and the
-  -- error stay in view the longest; then why goes, then the state word is said short (KEPT OFF), then not at all,
-  -- never cut. The pieces as drawn, their places and their whole width (r.sp_w) are worked out only when the line was
-  -- made again (nav.status: at most once a second) or its room, size or font changed, and kept on the switch row
+  -- error stay in view the longest; then why goes, then the state word, never cut. The pieces as drawn, their places
+  -- and their whole width (r.sp_w) are worked out only when the line was made again (nav.status: at most once a second)
+  -- or its room, size or font changed, and kept on the switch row
   -- (r.sp_*): a frame only draws them. col: the look's color function (the compact look's takes its opacity); faint:
   -- the preview's (the colors fainter, as its text is). ec: the compact look's yellow bar, where colored words don't
   -- read: the state word in c (the bar's dim ink) as the rest, a new error in ec (a dark red), an old one in c.
@@ -2238,7 +2572,6 @@ function M.install(ctx)
       local h, y, t, m, e = clash_drawn(r.st_h, P), clash_drawn(r.st_y, P), clash_drawn(r.st_t, P), clash_drawn(r.st_m, P),
         clash_drawn(r.st_e, P)
       local hw, rest, err = sw(h, px), '', ''
-      if hw > room then h = clash_drawn(r.st_hs, P); hw = sw(h, px) end
       if hw > room then h, hw = '', 0
       else
         local left, sep = room - hw, e ~= '' and ' - ' or ''
@@ -2278,8 +2611,32 @@ function M.install(ctx)
     end
     return x
   end
+  -- What a status asks of its line: its state word, why and error, whole, as nav.status_draw measures them. The start's
+  -- time and memory aren't in it: they go first there and never cost a title a letter, so a line that shows its why
+  -- already stays as it is. Kept on the switch row (r.sn_w), worked out again for the same reasons as r.sp_*: the line
+  -- made again (at most once a second), or another size or font.
+  function nav.status_need(r, px, P)
+    nav.status(r)
+    if r.sn_of ~= r.st_of or r.sn_src ~= r.st or r.sn_px ~= px or r.sn_P ~= P then
+      r.sn_of, r.sn_src, r.sn_px, r.sn_P = r.st_of, r.st, px, P
+      local sw, e = nav.sw, clash_drawn(r.st_e, P)
+      r.sn_w = sw(clash_drawn(r.st_h, P), px) + sw(clash_drawn(r.st_y, P), px) + (e ~= '' and sw(' - ' .. e, px) or 0)
+    end
+    return r.sn_w
+  end
+  -- The room a title has on a line it shares with its status, which comes first: room is what it has with no status,
+  -- span the line from the title's start to the status's end, r the switch row (nil or no switch: no status, room as it
+  -- was), ink as nav.status_bar's (the square takes its share). A version after the title takes this room too, so it
+  -- goes before the title is cut. The title never goes under 7 of the pixel font's cells, 4 letters and the dots there
+  -- and a few more in the game's font: it still has to say whose status this is, and a status too long for what that
+  -- leaves is cut by nav.status_draw as ever.
+  function nav.title_room(r, room, span, px, P, ink)
+    if not (r and r.switch and svc.util) then return room end
+    local left = span - 6 * px - nav.status_need(r, px, P) - (ink and floor(4.2 * px + 0.5) + 3 * px or 0)
+    return min(room, max(left, 42 * px))
+  end
   -- An entry's status on its title bar (r: its switch row; nil, the loader's own or a heading two mods share: none),
-  -- right-aligned to end at xe, after the title (and its version), which ends at le and keeps its room: nav.status_draw.
+  -- right-aligned to end at xe, after the title (and its version), which ends at le: nav.status_draw, nav.title_room.
   -- The compact look's yellow bar (ink: its ink, dim then for the text; on a dark bar, nil: the text in its colors)
   -- has a small square of the state's color before it, ringed in the ink so the light green and orange read on the
   -- yellow. Where the bar is too narrow for the state word the square stays alone; narrower still, nothing.
@@ -2294,13 +2651,16 @@ function M.install(ctx)
     ctx.rect(dx, dy, d, d, ink, layer)
     ctx.rect(dx + e, dy + e, d - 2 * e, d - 2 * e, nav.st_col(r.st_k, gray, col, faint), layer + 1)
   end
-  -- how many decimals a number has, 3 at most (2.5: 1, 0.25: 2, 4: 0)
+  -- how many decimals a number has, 6 at most (2.5: 1, 0.25: 2, 4: 0, 0.0001: 4); one with no short form (1 / 3) keeps
+  -- 3, unless it's so small 3 would show it as 0
   function nav.places(x)
-    for d = 0, 2 do
+    for d = 0, 6 do
       local m = x * 10 ^ d
-      if math.abs(m - floor(m + 0.5)) < 1e-6 then return d end
+      local w = floor(m + 0.5)
+      -- (a tiny number is within the test of 0: only a real 0 ends here on a 0)
+      if math.abs(m - w) < 1e-6 and (w ~= 0 or x == 0) then return d end
     end
-    return 3
+    return math.abs(x) < 0.001 and 6 or 3
   end
   -- (a slider's and a key's text kept on the row, r.vs, made again only when what it's made from changes: the value
   -- and, r.vs_k, the slider's step or whether the key clashes; as swatch keeps its color)
@@ -2309,7 +2669,7 @@ function M.install(ctx)
     if s.type == 'toggle' then return v and 'ON' or 'OFF' end
     if s.type == 'choice' then return text_of(s.choices[v]) end
     if s.type == 'slider' then
-      -- (a whole number only when the value is one; else as many decimals as its step and min have, 3 at most, 2
+      -- (a whole number only when the value is one; else as many decimals as its step and min have, nav.places, 2
       -- for a slider without a step. Worked out once a row and step: r.dp)
       local st = s.step or 0
       if r.vs_v == v and r.vs_k == st then return r.vs end
@@ -2319,7 +2679,7 @@ function M.install(ctx)
         if r.dp_st ~= st then
           r.dp_st, r.dp = st, st > 0 and max(nav.places(st), nav.places(s.min), nav.places(s.max)) or 2
         end
-        t = fmt(r.dp == 1 and '%.1f' or (r.dp == 2 and '%.2f' or (r.dp == 3 and '%.3f' or '%.0f')), v)
+        t = fmt('%.' .. r.dp .. 'f', v)
         -- (a value a hair off a whole one, 0.1 * 30, reads as the whole one)
         if r.dp > 0 and t:find('%.0+$') then t = t:gsub('%.0+$', '') end
         if t == '-0' then t = '0' end
@@ -2337,7 +2697,7 @@ function M.install(ctx)
       r.vs, r.vs_v, r.vs_k = t, v, clash
       return t
     end
-    if s.type == 'button' then return text_of(s.text or 'RUN') end
+    if s.type == 'button' then return r.ro and '' or text_of(s.text or 'RUN') end
     if s.type == 'color' then return tostring(v) end         -- (the menu's font has no '#')
     return tostring(v)
   end
@@ -2362,15 +2722,18 @@ function M.install(ctx)
   function nav.entry_hints(l)
     if l and l.back then return HINTS.back end
     if l and l.fold then return l.open and HINTS.fold_open or HINTS.fold_shut end
+    if l and l.row and l.row.ro then return HINTS.read end
     local t = l and l.row and l.row.spec.type
     if t == 'toggle' or t == 'choice' or t == 'slider' or t == 'color' then return HINTS.value end
-    -- (a key or a button in a fold: Left closes the fold, menu_input)
+    if t == 'button' then return l.fo and HINTS.button_fold or HINTS.button end
+    -- (a key in a fold: Left closes the fold, menu_input)
     return l and l.fo and HINTS.group_fold or HINTS.group
   end
   -- (a key pressed: the hints show the keys)
   local function pressed(name) local v = ctx.key_pressed(name); if v then menu.dev = 'keys' end; return v end
   -- a menu action this frame: its key, or the controller's button or the mouse standing in for it
-  local function act(name) return nav.act[name] == true or pressed(name) end
+  -- (nav.act: true for a press, 'rep' for the D-pad's repeat)
+  local function act(name) return nav.act[name] ~= nil or pressed(name) end
   local function capture_key(combos)
     -- any key pressed this frame, by its engine name (Escape cancels, Delete clears); for a row that takes combos,
     -- the first key pressed that isn't a modifier, and the first modifier pressed as the second answer
@@ -2437,14 +2800,18 @@ function M.install(ctx)
   local function search_input()
     local typed = svc.util and svc.util.typed() or ''
     if not menu.typing then
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top, nav.drag = true, '', 2, 1, nil end
+      -- (the list is still drawn with nothing typed: line 1, line 2 is for the results under the Back row)
+      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top, nav.drag = true, '', 1, 1, nil end
       if menu.typing then menu.group = nil end
       return false
     end
     for ch in typed:gmatch('[%w ]') do
       if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('delete') or pressed('backspace') then menu.search = menu.search:sub(1, -2); menu.sel, menu.top = 2, 1 end
+    if pressed('delete') or pressed('backspace') then
+      menu.search = menu.search:sub(1, -2)
+      menu.sel, menu.top = menu.search == '' and 1 or 2, 1
+    end
     if pressed('enter') then menu.typing = false end
     -- Down keeps it with the cursor on the first line found, Up on the last (none found: the Back row; nothing typed:
     -- the list's first mod), so a search never needs Enter, which also opens the game's chat. The keys only: this
@@ -2460,9 +2827,18 @@ function M.install(ctx)
     end
     return true
   end
+  -- The search as the header draws it (word: my word for it, the full screen look's; the language translates that word
+  -- alone). What's typed is the player's, no text of the menu's: the line is kept as it is, before anything looks it
+  -- up, so a language never notes it as missing.
+  function nav.search_line(P, word)
+    local s = P((word and ((ctx.tr or text_of)(word) .. ' ') or '') .. '/' .. menu.search .. (menu.typing and '_' or ''))
+    if ctx.tr_keep then ctx.tr_keep(s) end
+    return s
+  end
   -- a mod opened (from the list's line `back`): the cursor on its first row, past any heading
   local function open_group(back, g)
     menu.back, menu.group, menu.search, menu.top, nav.drag = back, g, '', 1, nil
+    nav.rep.right = math.huge                  -- (the hold that opened it does no more: it has to be let go first)
     local ls, i = lines(), 2
     while ls[i] and ls[i].head do i = i + 1 end
     menu.sel = ls[i] and i or 1
@@ -2544,7 +2920,7 @@ function M.install(ctx)
           if g then open_group(i, g); return end
         end
       end
-      if not nav.drag and kind == 'bar' and nav.lmb and ls[i] and ls[i].row and bw > 0 then
+      if not nav.drag and kind == 'bar' and nav.click and ls[i] and ls[i].row and bw > 0 then
         nav.drag = { r = ls[i].row, i = i, bx = bx, bw = bw }
         menu.sel = i
       end
@@ -2571,7 +2947,10 @@ function M.install(ctx)
     -- a fold (a mod's heading): Enter (the pad's confirm, a click) opens or closes it; Right opens it, or steps into it
     -- when it's open; Left closes it, or goes back to the list when it's closed (the keyboard's, as on a key row)
     if l and l.fold then
-      if act('enter') or (l.open and act('left')) or (not l.open and act('right')) then nav.fold_set(l, l.open)
+      if act('enter') or (l.open and act('left')) or (not l.open and act('right')) then
+        -- (the hold that opened it does no more, as open_group's: it has to be let go first)
+        if not l.open then nav.rep.right = math.huge end
+        nav.fold_set(l, l.open)
       elseif act('right') then step(ls, n, 1)
       elseif pressed('left') then go_back() end
       return
@@ -2596,8 +2975,11 @@ function M.install(ctx)
       end
       go = go or pressed('right')
     end
-    if s.type == 'toggle' and (dir ~= 0 or act('enter')) then set_row(r, not r.value)
-    elseif s.type == 'choice' and dir ~= 0 then
+    -- (a held D-pad steps a value along, but a toggle or a two-way choice has only two: one flip a press, or a hold
+    -- turns a mod off and on)
+    local rep = nav.act[dir > 0 and 'right' or 'left'] == 'rep'
+    if s.type == 'toggle' and ((dir ~= 0 and not rep) or act('enter')) then set_row(r, not r.value)
+    elseif s.type == 'choice' and dir ~= 0 and not (rep and #s.choices == 2) then
       local v = r.value + dir
       if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
       set_row(r, v)
@@ -2693,6 +3075,8 @@ function M.install(ctx)
     local c, lv = nav.hw, ctx.lang_v and ctx.lang_v() or 0
     if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most then return c.n end
     c.s, c.px, c.w, c.P, c.lv, c.most = s, px, w, P, lv, most
+    local cut = ctx.tr_cut
+    if cut then cut(true) end
     local t, ws = P(s), nil
     if ctx.text_wrap then ws = ctx.text_wrap(t, px, w, most + 1)
     else
@@ -2708,6 +3092,7 @@ function M.install(ctx)
     c.n = min(#ws, most)
     for i = 1, c.n do c[i] = fit(ws[i], px, w) end
     if ws[most + 1] then c[most] = fit(ws[most] .. '...', px, w) end
+    if cut and cut() then c.s = nil end         -- (the language's budget cut it: made again next frame)
     return c.n
   end
   -- What my looks keep of their texts from frame to frame is good while nav.fk stays: worked out once a frame by each
@@ -2850,11 +3235,15 @@ function M.install(ctx)
     ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
     ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
     local head = menu.group and text_of(menu.group.title) or 'MOD OPTIONS'
-    local right = fit((menu.typing or menu.search ~= '') and P('/' .. menu.search .. (menu.typing and '_' or ''))
+    local right = fit((menu.typing or menu.search ~= '') and nav.search_line(P)
       or P(menu_key.value ~= 'off' and menu_key.value or ''), px, floor(inner * 0.45))
     local rw = right ~= '' and tw(right, px) or 0
     local hw = inner - rw - (rw > 0 and 4 * px or 0)
-    head = fit(P(head), px, hw)
+    local hr = hw                              -- (the title's room: a mod's status gets its room first)
+    if menu.group and menu.search == '' and menu.group.mod ~= loader_mod then
+      hr = nav.title_room(menu.group.rows[1], hw, inner - rw - (rw > 0 and 6 * px or 0), px, P, true)
+    end
+    head = fit(P(head), px, hr)
     ctx.text(x0 + tx, midy(y0 - hb, hb, px), head, px, ink, top + 2)
     if rw > 0 then ctx.text(x0 + pw - tx - rw, midy(y0 - hb, hb, px), right, px, ink, top + 2) end
     -- (my entry open: my version after its title, a small gap after it, in a fainter ink that still reads on yellow)
@@ -2890,12 +3279,13 @@ function M.install(ctx)
         -- (a mod's title in a search's results: white, as in the list of mods, its version in gray after it and a thin
         -- line under it, so it stands apart from its own headings' yellow under it; the mod's status at its right, as
         -- on its entry's bar, in its colors on the dark panel)
-        local tt = fit(P(text_of(l.text)), px, inner)
-        ctx.text(x0 + tx, ty, tt, px, white, top + 2)
         local s1 = l.mt.rows[1]
+        local tr = l.mt.mod == loader_mod and inner or nav.title_room(s1, inner, inner, px, P)
+        local tt = fit(P(text_of(l.text)), px, tr)
+        ctx.text(x0 + tx, ty, tt, px, white, top + 2)
         if l.mt.mod == loader_mod then nav.ver_after(x0 + tx, ty, tt, inner, px, gray, top + 2)
         elseif s1 and s1.switch then
-          local ve = nav.ver_row(s1, x0 + tx, ty, tt, inner, px, gray, top + 2)
+          local ve = nav.ver_row(s1, x0 + tx, ty, tt, tr, px, gray, top + 2)
           nav.status_bar(s1, ve or x0 + tx + tw(tt, px), x0 + pw - tx, ty, px, P, gray, col, false, top + 2)
         end
         ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
@@ -2936,7 +3326,7 @@ function M.install(ctx)
         local t = r.spec.type
         -- (the label and the value as drawn, kept on the row: nav.fc)
         local fc = nav.fc(r)
-        local lt, ltw = nav.fwhole(fc, 0, text_of(r.spec.label or r.id), px, P, true)
+        local lt, ltw = nav.fwhole(fc, 0, text_of(r.spec.label or r.short), px, P, true)
         local lx = x0 + tx + (l.indent and 14 or 2) * px  -- (a subheading's rows indented with it)
         -- a choice or a slider picked: < value >, as in the full screen look; a reset button asking: its seconds left
         local arr = sel and (t == 'choice' or t == 'slider')
@@ -2961,14 +3351,14 @@ function M.install(ctx)
           nav.hit(ax - 2 * px, y, aw, rh, 'inc', i)
         end
         local lr = vx - aw - (arm and 4 or 6) * px - lx   -- (the label's room)
-        ctx.text(lx, ty, (nav.fcut(fc, 0, lr, px, fit)), px, white, top + 2)
+        ctx.text(lx, ty, (nav.fcut(fc, 0, lr, px, fit)), px, r.ro and gray or white, top + 2)
         -- (a mod's switch: its version after its name, in gray; on the lit row in the lighter hint gray)
         if r.switch then nav.ver_row(r, lx, ty, lt, lr, px, sel and nav.pc('hint', col) or gray, top + 2) end
         if t == 'key' and menu.capture ~= r then
           -- a key: a light chip with the key's name in ink
           ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, white, top + 2)
           ctx.text(vx, ty, v, px, ink, top + 3)
-        else
+        elseif not r.ro then
           ctx.text(vx, ty, v, px, arm and orange or ((t == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green)), top + 2)
         end
         if arm then
@@ -2996,7 +3386,7 @@ function M.install(ctx)
     local dev = menu.dev
     if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
-    if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, white, top + 2)
+    if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
     else
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
@@ -3015,16 +3405,18 @@ function M.install(ctx)
   -- the mods. nav.F: this frame's numbers and text functions, set by menu_draw_full (px, rh, b, top; the panes' bottom
   -- and top, py0 and py1; the lines in view); the colors come in as arguments, made in the frame they're drawn in.
   nav.F, nav.no_rows = {}, {}
-  -- (own: the pane shows my entry, my version after its title in vc. Returns where the title ends, where a status
-  -- after it may end (before the note) and the title's y: nav.status_bar)
-  function nav.pane(x, wd, title, note, panel, line, gray, own, vc)
+  -- (own: the pane shows my entry, my version after its title in vc; st: the switch row of a status after the title,
+  -- which gets its room first: nav.title_room. Returns where the title ends, where a status after it may end (before
+  -- the note) and the title's y: nav.status_bar)
+  function nav.pane(x, wd, title, note, panel, line, gray, own, vc, st)
     local F = nav.F
     local px, rh, b, top, py0, py1 = F.px, F.rh, F.b, F.top, F.py0, F.py1
     ctx.rect(x, py0, wd, py1 - py0, panel, top + 1)
     ctx.rect(x, py1 - b, wd, b, line, top + 2); ctx.rect(x, py0, wd, b, line, top + 2)
     ctx.rect(x, py0, b, py1 - py0, line, top + 2); ctx.rect(x + wd - b, py0, b, py1 - py0, line, top + 2)
     local nw = note and F.tw(note, px) or 0
-    local t = F.fit(F.P(title), px, wd - 12 * px - nw)
+    local tr = nav.title_room(st, wd - 12 * px - nw, wd - 8 * px - (note and nw + 8 * px or 0), px, F.P)
+    local t = F.fit(F.P(title), px, tr)
     local ty = nav.midy(py1 - rh - 2 * px, rh, px)
     ctx.text(x + 4 * px, ty, t, px, gray, top + 3)
     if note then ctx.text(x + wd - 4 * px - nw, ty, note, px, gray, top + 3) end
@@ -3136,7 +3528,7 @@ function M.install(ctx)
     local searching = menu.typing or menu.search ~= ''
     -- (my name and version, made once per font's capitals: nav.lv_t)
     if nav.lv_p ~= P then nav.lv_p, nav.lv_t = P, P(ctx.LOADER .. ' ' .. tostring(ctx.VERSION)) end
-    local rtext = searching and P('SEARCH /' .. menu.search .. (menu.typing and '_' or '')) or nav.lv_t
+    local rtext = searching and nav.search_line(P, 'SEARCH') or nav.lv_t
     rtext = fit(rtext, px, floor(w * 0.4))
     local rw = tw(rtext, px)
     ctx.text(w - m - rw, midy(h - hh, band, px), rtext, px, searching and yellow or gray, top + 2)
@@ -3219,7 +3611,7 @@ function M.install(ctx)
     local own = listing and ls[menu.sel] and ls[menu.sel].pick or (not listing and menu.group)
     if nav.ro_p ~= P then nav.ro_p, nav.ro_t = P, P('RIGHT ARROW OPENS') end
     local te, se, sty = nav.pane(rx, rwid, title, listing and #rows > 0 and nav.ro_t or nil, panel, line,
-      gray, own and own.mod == loader_mod, dim)
+      gray, own and own.mod == loader_mod, dim, own and own.rows[1])
     -- (the entry's status on its title's right, before the note, in its colors; dimmer in the preview)
     if own then nav.status_bar(own.rows[1], te, se, sty, px, P, listing and dim or gray, col, listing, top + 3) end
     local inner = rwid - 12 * px
@@ -3272,9 +3664,10 @@ function M.install(ctx)
         -- (a mod's title in a search's results: white with its version dim after it, as in the list of mods, and a
         -- thin line under it, so it stands apart from its own headings' yellow under it; the mod's status at its right,
         -- as on its entry's title)
-        local tt = fit(P(text_of(l.text)), px, x1 - rx - 4 * px)
+        local tr = nav.title_room(l.mt.rows[1], x1 - rx - 4 * px, x1 - rx - 4 * px, px, P)
+        local tt = fit(P(text_of(l.text)), px, tr)
         ctx.text(rx + 4 * px, ty, tt, px, white, top + 4)
-        local ve = nav.ver_mod(l.mt, rx + 4 * px, ty, tt, x1 - rx - 4 * px, px, dim, top + 4)
+        local ve = nav.ver_mod(l.mt, rx + 4 * px, ty, tt, tr, px, dim, top + 4)
         nav.status_bar(l.mt.rows[1], ve or rx + 4 * px + tw(tt, px), x1, ty, px, P, gray, col, false, top + 4)
         nav.divider(rx + 4 * px, y, x1 - rx - 4 * px)
       elseif l.head then
@@ -3305,10 +3698,10 @@ function M.install(ctx)
         nav.fwhole(fc, 6, value_text(r, users), px, P)
         local v, vw = nav.fcut(fc, 6, vmax, px, fit, true)
         local live = not listing
-        local lcol = live and white or dim
+        local lcol = live and (r.ro and gray or white) or dim
         local vcol = not live and dim or ((sp.type == 'toggle' and not r.value) and gray or (menu.capture == r and yellow or green))
         if live then nav.hit(rx, y, rwid, rh, 'line', i) end
-        local lab, labw = nav.fwhole(fc, 0, text_of(sp.label or r.id), px, P, true)
+        local lab, labw = nav.fwhole(fc, 0, text_of(sp.label or r.short), px, P, true)
         local long = x + labw + 8 * px             -- (where a whole label would let its value start)
         if sp.type == 'choice' or sp.type == 'slider' or sp.type == 'color' then
           -- < value >, each arrow a box of its own for the mouse; a slider's short bar left of them takes a click or a
@@ -3362,7 +3755,7 @@ function M.install(ctx)
             -- a key: a light chip with the key's name in ink
             ctx.rect(vx - 2 * px, y + 2 * px, vw + 4 * px, rh - 4 * px, live and white or dim, top + 4)
             ctx.text(vx, ty, v, px, ink, top + 5)
-          else
+          elseif not r.ro then
             ctx.text(vx, ty, v, px, arm and orange or vcol, top + 4)
           end
           if arm then
@@ -3396,7 +3789,7 @@ function M.install(ctx)
       end
       ctx.text(m, hy + rh, nf.t, npx, clash and yellow or nav.pc('hint', col), top + 2)
     end
-    if dev == 'pad' then nav.pad_hints(m, w - m, hy, rh, px, P, col, white, top + 2)
+    if dev == 'pad' then nav.pad_hints(m, w - m, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
     else
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
@@ -3456,6 +3849,7 @@ function M.install(ctx)
       elseif ctx.now() >= nav.pr_at or ctx.now() < nav.pr_at - 1 then nav.pr_at = ctx.now() + 0.1; nav.pad_read(true, fno) end
     elseif next(nav.held) then nav.held = {} end   -- (no reads: no hold kept from before, it would open the menu by itself)
     local combo = pv == 1 and not in_mission and nav.held.touch
+    if menu.open and combo then nav.combo = true end   -- (held while I'm open: closing me with it down is no reopening)
     if not menu.open and combo and not nav.combo and ctx.now() - combo >= 2 then
       nav.combo = true
       menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
@@ -3469,7 +3863,8 @@ function M.install(ctx)
     -- the mouse (only while open): the cursor, the wheel and the clicks of this frame
     nav.mouse = menu.open and nav.mouse_on()
     if nav.mouse then local w, h = ctx.screen(); nav.mouse_read(w, h) else
-      nav.click, nav.rclick, nav.wheel = false, false, 0
+      -- (no reads now: a button down when the mouse comes back is no press)
+      nav.click, nav.rclick, nav.wheel, nav.lmb, nav.rmb = false, false, 0, true, true
       local H = nav.hold
       -- (a mod's hold carries on: hold_mods keeps it)
       if nav.holds.n == 0 then
@@ -3560,11 +3955,13 @@ function M.install(ctx)
   -- (rel: those that trigger on release); rt: the one runtime table every mod's BingusRuntime reads through; seeded:
   -- the other loaders' settings files, read once each; home: a mod's first options heading (its bindings join it);
   -- titles: the heading each title went to first; per: options per mod and heading; frame: my frame count (for the
-  -- release sampling and the once-a-frame guards); ml: the mod list by name, built at most once a frame.
+  -- release sampling and the once-a-frame guards); ml: the mod list by name, built at most once a frame; life: each
+  -- mod's copy that runs now, { on }, what its set's calls ask before they change anything (a stopped copy's held
+  -- function is refused, and a mod's next copy has a life of its own, so asking by the mod's name wouldn't do).
   local shim = { count = { rows = 0, mods = 0, keys = 0 }, upd = { order = {}, hooks = {}, pos = {} },
                  down = { order = {}, hooks = {}, pos = {} }, last = {}, logs = {}, guards = {}, ended = {}, keys = {},
                  rel = {}, kidx = {}, kat = {}, rev = 0, seeded = {}, said = {}, pending = {}, home = {}, titles = {}, per = {},
-                 refused = {}, frame = 0, ml = { at = -1 },
+                 refused = {}, frame = 0, ml = { at = -1 }, life = {},
                  rt = { hashes = {}, statuses = {}, versions = { [1] = true }, hash_reads = 0 },
                  poll_f = { 'down', 'pressed', 'released', 'last' } }   -- (ModBindingsMenu's poll fills these, k.poll)
   local MOM_PER_MOD, MOM_MODS = 32, 112
@@ -3577,24 +3974,56 @@ function M.install(ctx)
   end
   -- (a callback's crash key: no '|' or control characters, so it reads back from the trace as one owner|key)
   local function key_for(what, id) return what .. ':' .. tostring(id):gsub('[%c|]', '_'):sub(1, 64) end
+  -- the crash key of a callback that has no id: where its code sits, its first line and then its file (the cut above
+  -- then takes the end of a long path, never the line). A list position or an event's name wouldn't do: the first moves
+  -- with the order mods load in, the second makes one key of unrelated code. false: no debug.getinfo here, nothing
+  -- names the place, so it isn't learned (one key for all of a kind would skip them all).
+  function ctx.place_key(what, fn)
+    local get = ctx.dog and ctx.dog.getinfo
+    if not get then return false end
+    local ok, i = pcall(get, fn, 'S')
+    if not (ok and type(i) == 'table') then return false end
+    return key_for(what, tostring(i.linedefined) .. ':' .. tostring(i.short_src))
+  end
   -- a look-alike callback run as the mod that registered it -> ok, err (pcall's answer; false, 'skipped' when it
   -- crashed an earlier launch). The box carries the inner pcall's answer out of the timed call. Each one gets a color
   -- scope of its own (util.timed's, or here for an owner that isn't a mod: the game-wide look-alike's).
+  -- A callback with no mod behind it (a boot script's, the game-wide look-alike's) runs under ctx.wide, a stand-in row
+  -- that's off, so the hang watchdog stops that one call and there's no mod to switch off: a hook that hung is dropped as
+  -- one that raised, and the boot goes on. Not once the game closes (ctx.closing, svc.shutdown): a boot script's
+  -- on_shutdown may be swapping game files, and stopped half-way it leaves a broken one. A row that hung has no time left,
+  -- so the next callback gets a new one. A boot's own callback here is that boot's as its update is (ctx.boot_owner).
+  ctx.wide = { on = false }
   local box = {}
-  local function boxed(owner, key, fn, ...) box[1], box[2] = guarded(owner, key, pcall, fn, ...) end
+  local function boxed(owner, key, fn, ...)
+    box[1], box[2] = guarded(owner, key, pcall, fn, ...)
+    if box[1] == false then box[2] = err_text(box[2]) end    -- (its error's text is its code too: still on its watch)
+  end
   local function run_as(owner, key, fn, ...)
     box[1], box[2] = nil, nil
     local a, u = recs[owner], svc.util
+    if a and a.paused then return true end         -- (its look-alike hooks and guards wait, none of them dropped)
     if a and u then u.timed(a, boxed, owner, key, fn, ...)
     else
       if ctx.color_scope then ctx.color_scope() end
+      local D = not ctx.closing and ctx.dog or nil
+      local was = ctx.boot_owner
+      if owner:find('^boot:') then ctx.boot_owner = owner end
+      local po, ps, pl, pn
+      if D then po, ps, pl, pn = D.enter(ctx.wide, D.clock()) end
       boxed(owner, key, fn, ...)
+      if D then
+        D.leave(po, ps, pl, pn)
+        if D.hung[ctx.wide] then ctx.wide = { on = false } end
+      end
+      ctx.boot_owner = was
     end
     local ok, err = box[1], box[2]
     if ok == nil then return false, err or 'skipped' end
     if not ok and a and u then u.note_error(a, err) end      -- (inside the box: timed never saw it fail)
     return ok, err
   end
+  svc.run_as = run_as                       -- (for call_as, above)
 
   -- on_update(id, fn) / on_shutdown(id, fn): fn nil removes the id. Each id is in the order once (set, cleared and set
   -- again keeps its one place); a cleared one leaves the order at once, or at the end of a walk that's running.
@@ -3678,7 +4107,14 @@ function M.install(ctx)
       if not m then return nil end
       st, why, on = m.state, m.why, m.on
     end
-    if st == 'started elsewhere' or st == 'left to its loader' then return 'loaded' end
+    if st == 'started elsewhere' then return 'loaded' end
+    -- (left to a host: what it really did, by package.loaded. Nothing yet while the boots haven't all run is still to come;
+    -- nothing after that means nobody started it)
+    if st == 'left to its loader' then
+      local sr, did = svc.starter, svc.starter.host_did(name)
+      if did == 'ran' then return 'loaded' end
+      if did == nil and not sr.swept then return 'loading' end
+    end
     if on and st == 'running' then return 'loaded' end
     if on and st == nil then return 'loading' end
     return 'load failed: ' .. tostring(why or st or 'off')
@@ -3692,8 +4128,12 @@ function M.install(ctx)
     end
     return shim.game
   end
-  local function make_bingus(owner)
+  local function make_bingus(owner, life)
     local dir = ctx.DIR:gsub('\\$', '')
+    -- (the game-wide set serves every boot script: what a boot does through it is that boot's, ctx.boot_owner, code it
+    -- loaded with require too, so its crash keys read back as that boot's and its hooks end with it)
+    local wide = owner == 'bingus look-alike'
+    local function me() return wide and ctx.boot_owner or owner end
     local b = {
       api = 1, version = 17, revision = REVISION, loader = ctx.LOADER .. ' ' .. ctx.VERSION, log_directory = dir,
       capabilities = read_only(BINGUS_CAPS, 'CowboyBingusModLoader.capabilities'),
@@ -3703,14 +4143,25 @@ function M.install(ctx)
         __newindex = function() error('CowboyBingusModLoader.modules is read-only', 2) end }),
       jit = read_only({ managed = false, reason = 'Lua 5.1 standard interpreter (no JIT)' }, 'CowboyBingusModLoader.jit'),
       build = read_only({ supported = true }, 'CowboyBingusModLoader.build'),
-      after_startup = function(fn) return after_startup(owner, fn) end,
-      on_update = function(id, fn) return hook_set(shim.upd, 'on_update', owner, id, fn) end,
+      after_startup = function(fn)
+        if life and not life.on then return false, 'the mod is off' end
+        return after_startup(me(), fn)
+      end,
+      on_update = function(id, fn)
+        if life and not life.on then return false, 'the mod is off' end
+        return hook_set(shim.upd, 'on_update', me(), id, fn)
+      end,
       -- both forms: (id, fn) runs with the mods' shutdown hooks, (fn) after everything else, before the logs close
       on_shutdown = function(a1, a2)
-        if type(a1) == 'string' then return hook_set(shim.down, 'on_shutdown', owner, a1, a2) end
+        if life and not life.on then return false, 'the mod is off' end
+        if type(a1) == 'string' then return hook_set(shim.down, 'on_shutdown', me(), a1, a2) end
         if type(a1) ~= 'function' then return false, 'on_shutdown needs (id, fn) or (fn)' end
         if #shim.last >= 1024 then return false, 'on_shutdown: 1024 functions already registered' end
-        shim.last[#shim.last + 1] = { owner = owner, fn = a1, key = 'on_shutdown#' .. (#shim.last + 1) }
+        -- (numbered within the mod: counted across all of them a key would name another callback the launch a mod
+        -- ahead of this one is switched off)
+        local who, n = me(), 1
+        for _, c in ipairs(shim.last) do if c.owner == who then n = n + 1 end end
+        shim.last[#shim.last + 1] = { owner = who, fn = a1, key = 'on_shutdown#' .. n }
         return true
       end,
       open_log = function(name)
@@ -3721,11 +4172,18 @@ function M.install(ctx)
         -- never the loader's own log, a device (con.log is the console) or another mod's own_log
         if base:find('chef_loader', 1, true) == 1 or base:find(ctx.FILES:lower(), 1, true) == 1 then return nil, 'that log is the loader\'s own' end
         if DEVICES[base] then return nil, 'device names are off limits' end
-        local o = own_logs[name:sub(1, -5)]
+        local o = own_logs[base]
         if o and o.owner ~= owner then return nil, name .. ' is ' .. o.owner .. "'s" end
-        -- a fresh file on a name's first open each launch, added to after that (and always a mod's own_log)
-        local f = ctx.open(ctx.DIR .. name, (shim.logs[base] or o) and 'a' or 'w')
-        if f then shim.logs[base] = true end
+        -- a fresh file on a name's first open each launch, added to after that (and always a mod's own_log). The first
+        -- open holds the name, as sandbox.lua's sb.log_mode has it for io.open: nobody else empties it or reads it
+        -- back.
+        local sbx, file = svc.sandbox, base .. '.log'
+        local take = not (shim.logs[base] or o) and (not sbx or sbx.takes(file, owner))
+        local f = ctx.open(ctx.DIR .. name, take and 'w' or 'a')
+        if f then
+          shim.logs[base] = true
+          if sbx and take then sbx.claims[file] = owner end
+        end
         return f
       end,
     }
@@ -3750,13 +4208,15 @@ function M.install(ctx)
         and (st == nil or st == 0 or (finite(st) and st > 0 and st <= spec.max - spec.min))) then
       return nil, 'slider needs min < max and 0 < step <= max - min'
     end
-    local s = { type = ty, label = label, default = spec.default, choices = spec.choices, min = spec.min, max = spec.max,
+    -- (a copy of my own, as chef.option keeps: the menu runs as no mod and never touches the mod's list)
+    local ch = ty == 'choice' and svc.spec_list(spec.choices) or nil
+    local s = { type = ty, label = label, default = spec.default, choices = ch, min = spec.min, max = spec.max,
                 step = st, description = spec.description,
                 -- (its description is the row's hint in my menu, when it's text of a size I show)
                 hint = type(spec.description) == 'string' and #spec.description <= 200 and spec.description or nil }
     local d = spec.default
     if ty == 'toggle' then d = d == true elseif ty == 'choice' then d = d or 1 else d = d or spec.min end
-    return { kind = ty, s = s, default = clean(s, d), n = ty == 'choice' and #spec.choices or nil, min = s.min, max = s.max, step = st }
+    return { kind = ty, s = s, default = clean(s, d), n = ch and #ch or nil, min = s.min, max = s.max, step = st }
   end
   local function mom_same(a, b)
     if a.kind ~= b.kind or a.default ~= b.default then return false end
@@ -3799,13 +4259,19 @@ function M.install(ctx)
   -- An option I have no value saved for yet takes the one a player set with the other loaders: the settings
   -- window's mom_<mod>_settings.txt next to my log, else the old menu's ModOptionsMenu.values in %LOCALAPPDATA%.
   -- Once carried over it's mine (marked, so going back to the default later never brings the old value back).
-  local function seed(r, o, id, base)
+  -- (cut: the name a mod with a hyphen in its name went by when only its last piece counted, or nil: its file may still be
+  -- there under that name)
+  local function seed(r, o, id, base, cut)
     if get('ModOptionsMenu', r.key) ~= nil or get('ModOptionsMenu.seeded', r.key) ~= nil then return end
     local v, from = nil, nil
     local gdir, ldir = M.GAME_DIR or ctx.DIR, M.OLD_DIR or ctx.OLD_DIR
     if gdir and base then
       from = 'mom_' .. base .. '_settings.txt'
       v = mom_decode(o, old_values(gdir .. from)[(id:gsub('[^%w_]', '_'))])
+      if v == nil and cut then
+        from = 'mom_' .. cut .. '_settings.txt'
+        v = mom_decode(o, old_values(gdir .. from)[(id:gsub('[^%w_]', '_'))])
+      end
     end
     if v == nil and ldir then
       local p = ldir .. 'CowboyBingus\\Helldivers2\\Logs\\ModOptionsMenu.values'
@@ -3846,22 +4312,30 @@ function M.install(ctx)
     return g
   end
   local function mom_row(id) return rows_by_id['ModOptionsMenu|' .. tostring(id)] end
-  local function make_mom(owner)
+  local function make_mom(owner, life)
     local mom = { api = 1, version = 3, max_mods = MOM_MODS, max_options = MOM_PER_MOD, revision = REVISION,
                   window = ctx.LOADER .. ' options menu' }
     -- (the mod's own short name for its heading: mods/<author>/<name> -> "name")
-    local tail = owner:match('^mods/') and owner:match('([%w_]+)$') or nil
+    local tail = owner:match('^mods/') and owner:match('([^/]+)$') or nil
     function mom.register_option(id, spec)
+      if life and not life.on then return false, 'the mod is off' end
       local o, why = mom_option(id, spec)
       if not o then return false, why end
       local r = mom_row(id)
       if r then
+        -- (its own row, left by a copy of this mod that stopped: the new copy's, as add_row makes it)
+        if r.dead and r.owner == owner then
+          local took, err = add_row(owner, 'ModOptionsMenu', 'MODS', id, o.s)
+          if not took then return false, err end
+          r.mom = o
+          return true
+        end
         if not r.mom or mom_same(r.mom, o) then return true end
         return false, 'option already registered differently'
       end
       local mod_id = spec.mod_id
       if mod_id ~= nil and (type(mod_id) ~= 'string' or #mod_id > 64 or not mod_id:find('^[%w_%.%-/:]+$')) then return false, 'invalid mod_id' end
-      local title = spec.mod ~= nil and text_of(spec.mod) or (tail and (tail:gsub('_', ' '))) or 'MODS'
+      local title = spec.mod ~= nil and text_of(spec.mod) or (tail and svc.short_title(owner)) or 'MODS'
       -- (without a mod_id, an option joins the heading of that title, the one a mod_id made too)
       local key = mod_id and ('mom#' .. mod_id) or shim.titles[title] or ('mom:' .. title)
       local count, g, per = shim.count, group_of[key], owner .. '|' .. key
@@ -3880,7 +4354,8 @@ function M.install(ctx)
       shim.home[owner] = shim.home[owner] or key
       shim.titles[title] = shim.titles[title] or key
       local base = (mod_id or tail or title):lower():gsub('[^%w]+', '_'):match('^_*(.-)_*$')
-      seed(r, o, id, base ~= '' and base or 'mod')
+      local cut = not mod_id and tail and tail:find('-', 1, true) and tail:match('([%w_]+)$')
+      seed(r, o, id, base ~= '' and base or 'mod', cut and cut:lower())
       -- on_change callbacks asked for before the option existed
       local p = shim.pending[id]
       if p then
@@ -3891,6 +4366,7 @@ function M.install(ctx)
     end
     function mom.get(id) local r = mom_row(id); if r then return r.value end end
     function mom.set(id, v)
+      if life and not life.on then return false, 'the mod is off' end
       local r = mom_row(id)
       if not r then return false, 'unknown option' end
       local o = r.mom
@@ -3903,12 +4379,15 @@ function M.install(ctx)
       return true
     end
     function mom.on_change(id, fn)
+      if life and not life.on then return false, 'the mod is off' end
       if type(id) ~= 'string' or type(fn) ~= 'function' then return false, 'invalid callback' end
+      -- (a boot script's through the game-wide set is that boot's, as its hooks are: make_bingus)
+      local who = owner == 'ModOptionsMenu' and ctx.boot_owner or owner
       local r = mom_row(id)
-      if r then return on_change(r, owner, function(v) return fn(v, id) end) end
+      if r then return on_change(r, who, function(v) return fn(v, id) end) end
       local p = shim.pending[id] or {}
       if #p >= 64 then return false end
-      p[#p + 1] = { owner = owner, fn = fn }
+      p[#p + 1] = { owner = who, fn = fn }
       shim.pending[id] = p
       return true
     end
@@ -4003,14 +4482,24 @@ function M.install(ctx)
   -- in a frame reads it, and svc.frame reads the ones not asked that frame, so p.prev / p.now always give the frame it
   -- went down. Never while my menu is open (the controller is the menu's then): false, nothing read. No pad found
   -- yet: looked for every 5 s (my menu is closed then), as my menu does (nav.pad_find).
+  -- (nav.pad_kin: the buttons my menu doesn't use, by both families' names. Only ever looked up in the pad's own list, so
+  -- a name a pad doesn't have finds nothing; kept out of PAD_NAMES, which says what my menu lacks)
+  nav.pad_kin = { { 'y', 'triangle' }, { 'left_trigger', 'l2' }, { 'right_trigger', 'r2' }, { 'left_thumb', 'l3' },
+                  { 'right_thumb', 'r3' }, { 'start', 'options' } }
+  function nav.pad_in(list, name)
+    for _, c in ipairs(list) do
+      if c == name then for _, o in ipairs(list) do if nav.by[o] then return nav.by[o] end end end
+    end
+  end
   function nav.pad_ix(name)
-    local by = nav.by
-    if by[name] then return by[name] end
+    if nav.by[name] then return nav.by[name] end
     for _, a in ipairs(PAD_ORDER) do
-      local list = PAD_NAMES[a]
-      for _, c in ipairs(list) do
-        if c == name then for _, o in ipairs(list) do if by[o] then return by[o] end end end
-      end
+      local i = nav.pad_in(PAD_NAMES[a], name)
+      if i then return i end
+    end
+    for _, list in ipairs(nav.pad_kin) do
+      local i = nav.pad_in(list, name)
+      if i then return i end
     end
     return false
   end
@@ -4020,7 +4509,10 @@ function M.install(ctx)
     if not nav.pad then nav.pad_find() end
     local d = false
     if nav.pad then
-      if p.by ~= nav.by then p.by, p.ix = nav.by, nav.pad_ix(p.pad) end
+      if p.by ~= nav.by then
+        p.by, p.ix = nav.by, nav.pad_ix(p.pad)
+        if not p.ix then log(fmt('controller %s has no button for the binding pad:%s', nav.pname, p.pad)) end
+      end
       if p.ix then
         local v = eng(nav.calls.button, p.ix)
         d = v == true or (type(v) == 'number' and v > 0.5)
@@ -4051,12 +4543,13 @@ function M.install(ctx)
     b.asked = shim.frame
     return b.at == shim.frame and b.prev == true and not b.now
   end
-  local function make_mbm(owner)
-    local tail = owner:match('^mods/') and owner:match('([%w_]+)$') or nil
+  local function make_mbm(owner, life)
+    local tail = owner:match('^mods/') and owner:match('([^/]+)$') or nil
     local k = { api = 1, version = 4, capacity = 36, loader = REVISION, window = ctx.LOADER .. ' options menu',
                 extended = setmetatable({ devices = { 'keyboard', 'mouse' }, triggers = { 'press', 'release', 'hold' } },
                   { __index = function(_, f) if f == 'count' then return shim.count.keys end end }) }
     function k.register_binding(id, label, slot, options)
+      if life and not life.on then return false, 'the mod is off' end
       if type(id) ~= 'string' or id == '' or #id > 96 or id:find('%c') or (slot ~= nil and type(slot) ~= 'number')
          or (options ~= nil and type(options) ~= 'table') then
         return false, 'invalid binding registration'
@@ -4079,7 +4572,7 @@ function M.install(ctx)
       local r, err = add_row(owner, 'ModBindingsMenu', 'KEYS', id, { type = 'key', default = name ~= '' and name or 'off', label = text,
         combos = true })
       if not r then return false, err end
-      local title = category or (tail and (tail:gsub('_', ' '))) or 'MODS'
+      local title = category or (tail and svc.short_title(owner)) or 'MODS'
       local key = category and (shim.titles[category] or 'mom:' .. category) or shim.home[owner] or shim.titles[title] or ('mom:' .. title)
       place(r, 'ModBindingsMenu', key, title)
       shim.titles[title] = shim.titles[title] or key
@@ -4109,6 +4602,7 @@ function M.install(ctx)
     end
     -- set_binding(id, spec): {} clears it, nil gives the default back
     function k.set_binding(id, spec)
+      if life and not life.on then return false, 'the mod is off' end
       local b = shim.keys[id]
       if b == nil then return false, 'not an extended binding' end
       local name
@@ -4159,7 +4653,7 @@ function M.install(ctx)
     for _, x in ipairs(list) do if not drop(x) then out[#out + 1] = x end end
     return out
   end
-  local function make_rt(owner, env)
+  local function make_rt(owner, env, life)
     local core = shim.rt
     local own = {}
     -- this mod's views: of the statuses, of each guard's status (by the status table), of the other shared tables
@@ -4180,6 +4674,7 @@ function M.install(ctx)
       return own
     end
     function own.guard(spec)
+      if life and not life.on then error('the mod is off', 0) end
       local name = type(spec) == 'table' and spec.name
       if type(name) ~= 'string' or name == '' then error('guard name required', 0) end
       own.shared(spec.env)
@@ -4210,8 +4705,16 @@ function M.install(ctx)
         status.errors = g.errors
         local msg = err_text(e)
         status.first_error = status.first_error or msg
-        if g.errors == 1 then status.burst_error = msg; say(name .. ' error: ' .. msg) end
-        if g.errors >= most then stop('stopped after ' .. most .. ' errors: ' .. tostring(status.burst_error)) end
+        if recs[owner] and svc.util then svc.util.note_error(recs[owner], e) end
+        if g.errors == 1 then
+          status.burst_error = msg
+          say(name .. ' error: ' .. msg)
+          log(fmt('[%s] guard %s error: %s', owner, name, msg))
+        end
+        if g.errors >= most then
+          log(fmt('[%s] guard %s stopped after %d errors', owner, name, most))
+          stop('stopped after ' .. most .. ' errors: ' .. tostring(status.burst_error))
+        end
       end
       function g.tick(dt)
         if g.stopped or g.at == shim.frame then return end
@@ -4232,6 +4735,13 @@ function M.install(ctx)
             if not ok then status.stop_error = err_text(e) end
           end
         end
+        status.state = status.first_failure and ('stopped after: ' .. status.first_failure) or 'stopped'
+      end
+      -- my shim.forget calls this when the guard's mod stops: the guard ends with it and the mod's next copy can use its
+      -- name. In place: other mods read this status through their views, and an old handle answers running() = false.
+      -- g.installed stays, so the old copy's install() can't put a gone guard back on the list.
+      function g.free()
+        g.stopped, status.installed = true, false
         status.state = status.first_failure and ('stopped after: ' .. status.first_failure) or 'stopped'
       end
       local handle = { status = views.statuses[name] }
@@ -4277,13 +4787,17 @@ function M.install(ctx)
   -- saved values stay in my menu) and waiting on_change callbacks go. Lists a loop may be walking are replaced, not
   -- changed in place.
   function shim.forget(owner)
+    if shim.life[owner] then shim.life[owner].on, shim.life[owner] = false, nil end
     local mine = function(x) return x.owner == owner end
     for _, L in ipairs({ shim.upd, shim.down }) do
       for id, h in pairs(L.hooks) do if h.owner == owner then L.hooks[id], L.stale = nil, true end end
       if L.stale and not L.walking then compact_hooks(L) end
     end
     shim.last, shim.rel = list_without(shim.last, mine), list_without(shim.rel, mine)
-    for _, g in ipairs(shim.guards) do if g.owner == owner then g.gone = true end end
+    -- (one that stopped itself sits in shim.ended, still installed: it needs the same)
+    for _, list in ipairs({ shim.guards, shim.ended }) do
+      for _, g in ipairs(list) do if g.owner == owner then g.gone = true; g.free() end end
+    end
     shim.guards, shim.ended = list_without(shim.guards, mine), list_without(shim.ended, mine)
     for id, b in pairs(shim.keys) do
       if b.owner == owner then shim.keys[id], shim.count.keys = nil, shim.count.keys - 1 end
@@ -4298,7 +4812,13 @@ function M.install(ctx)
   function svc.module_of(name)
     if type(name) ~= 'string' or name:sub(1, 5) ~= 'mods/' then return nil end
     local a = ctx.addon(name)
-    if not a or not a.on then return nil end
+    if not a then
+      -- (a boot-style mod has no table: only that it runs, or is starting)
+      if ctx.loading and ctx.loading.name == name then return true end
+      for _, b in ipairs(ctx.boots or {}) do if b.a and b.owner == name and b.on then return true end end
+      return nil
+    end
+    if not a.on then return nil end
     local m = a.module
     -- (a trusted mod's module stays its own: only that it's running)
     local sbx = svc.sandbox
@@ -4331,13 +4851,15 @@ function M.install(ctx)
   -- table is a place other mods read.
   function svc.bind_lookalikes(env, owner)
     if type(env) ~= 'table' or type(owner) ~= 'string' then return false end
-    local b = make_bingus(owner)
+    local life = { on = true }
+    shim.life[owner] = life
+    local b = make_bingus(owner, life)
     rawset(env, 'CowboyBingusModLoader', b)
     rawset(env, 'HD2ModLoader', b)
-    rawset(env, 'ModOptionsMenu', make_mom(owner))
-    rawset(env, 'ModBindingsMenu', make_mbm(owner))
+    rawset(env, 'ModOptionsMenu', make_mom(owner, life))
+    rawset(env, 'ModBindingsMenu', make_mbm(owner, life))
     local sb = svc.sandbox
-    if not (sb and sb.trusted and sb.trusted(owner)) then rawset(env, 'BingusRuntime', make_rt(owner, env)) end
+    if not (sb and sb.trusted and sb.trusted(owner)) then rawset(env, 'BingusRuntime', make_rt(owner, env, life)) end
     return true
   end
 
@@ -4463,6 +4985,21 @@ function M.install(ctx)
   -- rows keep their values but drop its change callbacks, its event subscriptions and waiting after_startup callbacks
   -- end, the utilities drop its timers, jobs and what it spawned, the HD2Runtime look-alike undoes what it made, and
   -- its look-alike hooks (on_update, on_shutdown, guards) end.
+  -- Its rows stay for the session (the values are the player's), so nothing of the stopped copy may stay on them: a
+  -- function would keep that copy's whole environment alive, and run as a dead copy's code under its new copy's name.
+  -- Each one goes: a label, a value's text or a choice says '?', as text_of says for a mod that's off, and a button has
+  -- nothing to run. row.dead: the mod's new copy takes the row over when it registers it (add_row).
+  function svc.row_dead(row)
+    row.dead = true
+    local s = row.spec
+    for k, v in pairs(s) do
+      if type(v) == 'function' then s[k] = (k == 'label' or k == 'text') and '?' or nil end
+    end
+    local c = rawget(s, 'choices')
+    if type(c) == 'table' then
+      for i, v in pairs(c) do if type(v) == 'function' then c[i] = '?' end end
+    end
+  end
   function svc.forget(owner)
     -- (its change callbacks on any row, a look-alike's shared ones too)
     for _, row in pairs(rows_by_id) do
@@ -4471,6 +5008,7 @@ function M.install(ctx)
         if c.owner == owner then c.on = false; any = true else keep[#keep + 1] = c end
       end
       if any then row.changed = keep end
+      if row.owner == owner then svc.row_dead(row) end
     end
     for event, list in pairs(subs) do
       local any = false
@@ -4478,6 +5016,8 @@ function M.install(ctx)
       if any then ended(event) end
     end
     for i = #after, 1, -1 do if after[i].owner == owner then after[i].off = true; table.remove(after, i) end end
+    -- (what it shared goes with it: readers get nil, as chef.require does, and its value keeps nothing of it alive)
+    for k, s in pairs(shared) do if s.owner == owner then shared[k] = nil end end
     if svc.util then svc.util.forget(owner) end
     if svc.runtime then svc.runtime.forget(owner) end
     shim.forget(owner)
@@ -4495,12 +5035,95 @@ function M.install(ctx)
     for _, c in ipairs(list) do
       -- (one that a mod stopping in an earlier callback took away is skipped)
       if not c.off then
-        local ok, err = call_as(c.owner, c.fn)
+        local ok, err = call_as(c.owner, 'after_startup', c)
         if not ok then log(fmt('[%s] after_startup: %s', c.owner, err_text(err))) end
       end
     end
     emit('startup')
     note_conflicts()
+    saving.live = true
+  end
+  -- A mod that starts after start-up (the loader's starter.restart) gets what it missed, in the order a launch has
+  -- them, and only it: right after its start the after_startup callbacks it made as it started and the startup event,
+  -- then past its first update (svc.late_world, svc.late_replay) the world it finds itself in and a mission already under
+  -- way. The other mods hear nothing twice. The event protection is emit's. What's left out: players (the first look only
+  -- notes the count, as at launch) and menu (the menu is closed by then, as a mod takes it).
+  function svc.late_start(owner)
+    local list = {}
+    for i = #after, 1, -1 do
+      if after[i].owner == owner then table.insert(list, 1, after[i]); table.remove(after, i) end
+    end
+    for _, c in ipairs(list) do
+      if not c.off then
+        local ok, err = call_as(c.owner, 'after_startup', c)
+        if not ok then log(fmt('[%s] after_startup: %s', c.owner, err_text(err))) end
+      end
+    end
+    emit_as(owner, 'startup')
+  end
+  -- At launch a mod hears its first world after its first updates, so what a start hears of it waits for those: queued
+  -- here with the world it's for, and sent at the end of the next frame (the loader's frame), past that mod's first
+  -- update, a boot-style one's too. A world that moved in that one frame is the live emit's: it told the mod or it will
+  -- once that world settles, so the mod never hears a world twice or one that's gone. A mod stopped meanwhile has no
+  -- listeners left, so emit_as passes it by. was: a resume's record (svc.resume), what the mod heard last, so it hears
+  -- what moved since and no more, in the order a running mod hears it at a world change: the end of the mission it was
+  -- in, the world if that's a new one, a mission it hasn't heard start.
+  function svc.late_world(owner, was)
+    ctx.late_worlds = ctx.late_worlds or {}
+    local l = ctx.late_worlds
+    for i = #l, 1, -1 do if l[i].owner == owner then table.remove(l, i) end end   -- (two starts in one frame: one replay)
+    l[#l + 1] = { owner = owner, world = last_world, was = was }
+    note_conflicts()
+  end
+  function svc.late_replay()
+    local l, w = ctx.late_worlds, ctx.world
+    ctx.late_worlds = nil
+    for _, e in ipairs(l) do
+      if w.stable and e.world ~= nil and e.world == last_world then
+        local p = e.was
+        local moved = not p or p.world ~= last_world
+        if p and p.mission and (moved or not last_mission) then emit_as(e.owner, 'mission_end', w.id) end
+        if moved then emit_as(e.owner, 'world', last_world, w.mission == true) end
+        if last_mission and (moved or not p.mission) then emit_as(e.owner, 'mission_start', w.id) end
+      end
+    end
+  end
+  -- A paused mod: switched off with no stop callback (the loader's starter.halt), so I keep it all, the same as if it
+  -- were on: module, environment, listeners, timers, jobs, watches, rows, shares, what it spawned and changed. It just
+  -- isn't called: run_hook and call_boots read a.on, the rest a.paused (call_as, emit_as, run_as, the utilities' timers
+  -- and jobs). Only its hold of the mouse can't wait with it, or the camera stays frozen for as long as it's off, so
+  -- that goes for the pause, and so do a look-alike's dead zones and GUIs (rt.pause). As it's resumed it gets those back
+  -- and what it would have heard: a row changed meanwhile, once, with its value now, the menu's close if it heard the
+  -- menu open (that frame's emit comes before the resume), and the world and mission if they moved, the way a late start
+  -- hears them (svc.late_world). Nothing else is replayed.
+  function svc.pause(a)
+    a.paused, a.on = { hold = nav.holds.by[a.name], world = last_world, mission = last_mission, menu = menu.told == true }, false
+    svc.hold_mouse(a.name, false)
+    if svc.runtime then
+      local ok, err = pcall(svc.runtime.pause, a.name)
+      if not ok then log(fmt('[%s] pausing: %s', a.name, err_text(err))) end
+    end
+  end
+  function svc.resume(a)
+    local p = a.paused
+    a.paused, a.on = nil, true
+    if p.hold then svc.hold_mouse(a.name, true) end
+    if svc.runtime then
+      local ok, err = pcall(svc.runtime.resume, a.name)
+      if not ok then log(fmt('[%s] resuming: %s', a.name, err_text(err))) end
+    end
+    if svc.util then svc.util.timers_look() end
+    for _, row in pairs(rows_by_id) do
+      for _, c in ipairs(row.changed) do
+        if c.due and c.owner == a.name then
+          c.due = nil
+          local ok, err = call_as(c.owner, 'on_change', c, row.value)
+          if not ok then log(fmt('[%s] on_change %s: %s', c.owner, row.id, err_text(err))) end
+        end
+      end
+    end
+    if p.menu then emit_as(a.name, 'menu', false) end
+    if p.world ~= last_world or p.mission ~= last_mission then svc.late_world(a.name, p) end
   end
   -- dt: the game's update argument, handed on to the look-alike on_update hooks and guards
   function svc.frame(dt)
@@ -4570,10 +5193,11 @@ function M.install(ctx)
       end
     elseif seen.n then seen.n, seen.j, seen.at = nil, nil, 0 end
     if nav.holds.n > 0 then nav.hold_mods() end
-    if dirty and ctx.now() >= save_at then save_at = ctx.now() + 3; save_now() end
+    if dirty and ctx.now() >= save_at then saving.timed() end
+    -- (the reload itself comes at the end of the loader's frame, with the late starts: starter.dev_due)
     if dev.on and reload_key and pressed(reload_key) then
       log('dev mode: reloading')
-      ctx.dev_reload(svc.dev_files())
+      ctx.reload_due = true
     end
     -- (the look-alike hooks, guards and events above each ran in a color scope of their own; my menu gets one too,
     -- only in a frame it draws: menu_frame)
@@ -4582,6 +5206,7 @@ function M.install(ctx)
     if menu.open ~= (menu.told == true) then menu.told = menu.open; emit('menu', menu.open == true) end
   end
   function svc.shutdown()
+    ctx.closing = true
     -- (the mouse back to the game first, mods' holds too, and never taken again: a shutdown hook below asking for it is
     -- refused, so nothing below may keep it)
     nav.hold.down = true

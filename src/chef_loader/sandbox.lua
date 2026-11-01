@@ -20,9 +20,12 @@
 -- GameSession's writes, the engine's console and save files (Console, CommandWindow, ConsoleHelp, SaveSystem, Cloud,
 -- CloudToken), Application's calls that write files, change the player's saved settings or open a browser
 -- (save_render_target, set_user_setting, open_url_in_browser ...), Steam's overlay and the player's Steam id
--- (Steam.open_url, Steam.user_id ...), the friend list and its invites (Friends), and Steam's voice chat (SteamVoip,
--- SteamVoipClient, SteamVoipRoom). A function left out stays out by identity too: reached through another table, a
--- metatable or a function __index, a mod finds nothing there (and chef.call refuses it by any name).
+-- (Steam.open_url, Steam.user_id ...), the friend list and its invites (Friends), Steam's voice chat (SteamVoip,
+-- SteamVoipClient, SteamVoipRoom), the engine's network messages (RPC), the LAN lobby browser (LanClient), and what
+-- writes to the player's Steam account or what friends see (Leaderboard, LeaderboardTransactionToken, Presence, and
+-- Achievement and Stats but for their reads), and AI.find_intersecting_units (it ends the game). A function left out
+-- stays out by identity too: reached through another table, a metatable or a function __index, a mod finds nothing
+-- there (and chef.call refuses it by any name).
 -- A mod the loader trusts by name (loader.lua, TRUSTED) is marked through sb.grant: chef.capture's pictures (which the
 -- loader saves itself), never a file of its own the others can't write. The lobby, for those mods, goes through the
 -- HD2Runtime look-alike (runtime.lua), whose Steam.user_id and Friends.playing_game are the loader's own calls (the
@@ -31,7 +34,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.4.1' }
+local M = { version = '1.5.0' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset = rawset
@@ -57,20 +60,28 @@ local REQUIRE_OK = { bit = 'bit', string = 'string', table = 'table', math = 'ma
 -- engine tables that aren't for mods (M.engine_off), and calls left out of engine tables mods otherwise keep
 -- (M.CALLS_OFF): Network, GameSession and UnitSynchronizer keep only their reads (no lobby, connection or writes to
 -- what other players see); Application loses what reaches the disk or past the game; Steam keeps only what it says
--- about this game and this client.
+-- about this game and this client; Achievement and Stats keep only their reads; AI loses the one call that ends the
+-- game.
 -- (utilities.lua refuses the same through chef.call.) engine_off answers why (a text) or false; a CALLS_OFF rule
 -- answers true, or a text saying why, for a call that's left out.
 -- Whole tables: Console, CommandWindow and ConsoleHelp run the engine's own commands (and CommandWindow opens a window
 -- of its own, which can crash the game); SaveSystem, Cloud and CloudToken keep save files that outlast the game. No mod
 -- I know of uses any of them. Friends is the friend list (other people's Steam ids, names, what they play) and the
--- invites sent from it; SteamClient has only lobby_browser, the way into other lobbies (SteamLobbyBrowser is off by
--- the Lobby rule already). SteamVoip, SteamVoipClient and SteamVoipRoom are Steam's voice chat: their calls create,
--- join and leave rooms, select the client's voice in and out, and add or remove other players in a room.
+-- invites sent from it; SteamClient and LanClient have only lobby_browser, the way into other lobbies
+-- (SteamLobbyBrowser is off by the Lobby rule already). SteamVoip, SteamVoipClient and SteamVoipRoom are Steam's voice
+-- chat: their calls create, join and leave rooms, select the client's voice in and out, and add or remove other players
+-- in a room. RPC has no calls of its own: a C __index makes one for any name, so stock Stingray's network messages to
+-- other players can only go with the whole table. Leaderboard and LeaderboardTransactionToken post scores to the
+-- player's Steam account, and Presence sets what friends see. What they have besides is no plain read of the player's
+-- own data (Leaderboard.ranking_for_friends, Presence.presence), so nothing of them is kept. (Achievement and Stats
+-- have clear reads: ACCOUNT_KEEP, below.)
 M.TABLES_OFF = { PluginManager = 'native code', Http = 'the network', WebSocket = 'the network',
   Localizer = 'it ends the game', Console = "the engine's commands", CommandWindow = "the engine's commands",
   ConsoleHelp = "the engine's commands", SaveSystem = 'files on disk', Cloud = 'files on disk', CloudToken = 'files on disk',
   Friends = "other players' Steam data", SteamClient = 'the lobby', SteamVoip = 'voice chat with other players',
-  SteamVoipClient = 'voice chat with other players', SteamVoipRoom = 'voice chat with other players' }
+  SteamVoipClient = 'voice chat with other players', SteamVoipRoom = 'voice chat with other players',
+  RPC = "other players' game", LanClient = 'the lobby', Leaderboard = "the player's Steam account",
+  LeaderboardTransactionToken = "the player's Steam account", Presence = 'what friends see on Steam' }
 -- The real functions left out (below and in CALLS_OFF), by identity: function -> why. Filled as I install (the tables
 -- are the game's), so chef.call refuses one whatever table it's reached through (utilities.lua asks engine_off with
 -- the function a name resolves to). Weak keys: a function the game drops isn't kept alive here.
@@ -108,9 +119,21 @@ end
 M.STEAM_KEEP = { app_id = true, client_running = true, connected = true, is_installed = true, language = true,
   overlay_active = true, owns_app = true, user_name = true }
 M.STEAM_WHY = 'the Steam overlay or the player\'s Steam id'
+-- Achievement and Stats keep what plainly reads the player's own account, and nothing else: an unlock can't be taken
+-- back, and set and reset change the account. progress and close stay out with them: neither name says it's a read.
+-- An allow list like Steam's, so a call a game update adds stays out until it's known to be a read.
+M.ACCOUNT_KEEP = { Achievement = { unlocked = true }, Stats = { get = true } }
+M.ACCOUNT_WHY = "the player's Steam account"
+-- AI keeps everything but the call that ends the game (world, position, 5 did; other arguments are unknown). chef.call
+-- refuses it behind its crash guard, but a mod's own AI and the look-alike's handle.raw have no such guard, so the name
+-- goes from the view too. A deny list like Application's: the rest of AI stays, and so does a call a game update adds.
+M.AI_OFF = { find_intersecting_units = 'it ends the game' }
 M.CALLS_OFF = {
   Application = function(f) return (M.APP_OFF[s_lower(f)] or M.writes(f)) and M.WRITES or false end,
   Steam = function(f) return not M.STEAM_KEEP[s_lower(f)] and M.STEAM_WHY or false end,
+  Achievement = function(f) return not M.ACCOUNT_KEEP.Achievement[s_lower(f)] and M.ACCOUNT_WHY or false end,
+  Stats = function(f) return not M.ACCOUNT_KEEP.Stats[s_lower(f)] and M.ACCOUNT_WHY or false end,
+  AI = function(f) return M.AI_OFF[s_lower(f)] or false end,
   -- Network keeps only what reads like a read (peer_id, game_session, is_ / has_ / get_ / num_ ...), and never a name
   -- that mentions the lobby or a connection: a new call in a game update is left out until it's known to be a read
   Network = function(f)
@@ -153,9 +176,11 @@ M.CALLS_OFF = {
   end,
 }
 
--- what a mod's key and mouse-button reads answer while the loader's options menu is open (sb.guard_engine)
+-- what a mod's key and mouse-button reads answer while the loader's options menu is open (sb.guard_engine; chef.call
+-- answers the same, from this table: utilities.lua)
 local QUIET_READS = { pressed = false, released = false, any_pressed = false, any_released = false, button = 0,
                       keystrokes = true }
+M.QUIET_READS = QUIET_READS
 
 local function copy(t)
   local c = {}
@@ -191,15 +216,32 @@ function M.install(ctx)
   local real_open = type(io_) == 'table' and io_.open or nil
   local io_type = type(io_) == 'table' and io_.type or function() return nil end
   local overrides = ctx.overrides or {}
-  -- (the loader sets sb.module_of and sb.on_global once I'm installed; sb.claims: '<owner>|<file>' for each .log a mod
-  -- opened to write in my folder this launch, the logs it may read back)
-  local sb = { denied = 0, claims = {} }
+  -- (the loader sets sb.module_of and sb.on_global once I'm installed; sb.claims: each .log in my folder that's held
+  -- this launch, by its lower case name -> the mod that holds it and may read it back (sb.log_mode), or false for one
+  -- held that no mod reads. chef.own_log and the look-alike's open_log fill it too: one registry for the three.
+  -- sb.writer: a log held with no reader -> the one mod that may still take it (sb.takes). sb.set_envs: a mod's
+  -- environment -> the custom ones it set (own_envs in sb.env), for sb.set_env)
+  local sb = { denied = 0, claims = {}, writer = {}, set_envs = setmetatable({}, { __mode = 'k' }) }
   -- sb.chunk: my own chunk name. Spliced into loader.lua it's the loader's, the name its hang watchdog never stops code
   -- in (starter.dog.me), so a mod's loadstring and load can't give its code that name.
   if type(dbg) == 'table' and type(dbg.getinfo) == 'function' then
     local ok, info = pcall(dbg.getinfo, M.install, 'S')
     if ok and type(info) == 'table' and type(info.source) == 'string' then sb.chunk = info.source end
   end
+  -- A load reader's pieces, drained in code of its own: the watchdog leaves code under my chunk name running, and a
+  -- reader from C (os.date, say) has no Lua frame for it to stop, so an endless one would spin in my code past it.
+  -- -> the pieces, or nil when one isn't a string. (type comes in as an argument: this chunk has no globals of mine.)
+  sb.drain = real_loadstring([[
+    local chunk, type = ...
+    local parts, n = {}, 0
+    while true do
+      local piece = chunk()
+      if piece == nil or piece == '' then return parts end
+      if type(piece) ~= 'string' then return nil end
+      n = n + 1
+      parts[n] = piece
+    end
+  ]], '=load reader')
   local envs = setmetatable({}, { __mode = 'k' })        -- every mod environment I made -> its mod's name
   local full = setmetatable({}, { __mode = 'k' })        -- environments with the game's whole Lua (other boot scripts)
 
@@ -228,6 +270,9 @@ function M.install(ctx)
   local WDIR = ctx.DIR and ctx.DIR ~= '' and low(ctx.DIR) or nil
   local GDIR = ctx.GAME_DIR and low(ctx.GAME_DIR) or nil
   local ODIR = ctx.OLD_DIR and low(ctx.OLD_DIR) or nil
+  -- (sb.old: %LOCALAPPDATA% in any role. With the game's folder not writable it's my folder too, and ODIR goes nil, but
+  -- it's still everyone's programs' folder: sb.check holds it to the same rule either way)
+  sb.old = ODIR
   if ODIR == WDIR then ODIR = nil end
   -- the roots a mod's path may start with, in the order sb.check tries them: the loader's folder, the game's settings
   -- folder, my old folder, the game's data folder (false for one I don't have)
@@ -277,7 +322,7 @@ function M.install(ctx)
     if not names then return nil, why end
     local file = names[#names]
     local ext = s_match(file, '%.(%w+)$')
-    if root == ODIR and not (#names == 1 and ext and MOD_EXT[ext]) then
+    if root == sb.old and not (#names == 1 and ext and MOD_EXT[ext]) then
       return nil, 'from the old %LOCALAPPDATA% folder mods read only their own .log .txt .json .csv .dat .ini .marker '
         .. '.fatal files'
     end
@@ -285,7 +330,7 @@ function M.install(ctx)
       -- My folder is the game's settings folder, shared by every mod: a read there (or in my old folder) never gets the
       -- loader's own files (the settings, the crash state, the trace), another mod's saved tables or another mod's
       -- log. A mod's own saved tables start chef_data_<its name, as M.data_name writes it>__ (no other mod's can: "__"
-      -- only ever stands after the name), and its own logs are the ones it opened to write this launch. Below the
+      -- only ever stands after the name), and its own logs are the ones it holds this launch (sb.log_mode). Below the
       -- game's folder (crash reports, dumps) a mod reads only the game's own settings, saves\<id>_user_settings.config.
       if root ~= 'data\\' then
         if #names == 1 then
@@ -299,7 +344,7 @@ function M.install(ctx)
               return nil, 'another mod\'s saved tables are off limits (chef.load_table reads a mod\'s own)'
             end
           end
-          if ext == 'log' and not (type(owner) == 'string' and sb.claims[owner .. '|' .. file]) then
+          if ext == 'log' and not (type(owner) == 'string' and sb.claims[file] == owner) then
             return nil, 'mods read only the logs they write themselves'
           end
         elseif GDIR and s_sub(p, 1, #GDIR) == GDIR
@@ -319,6 +364,40 @@ function M.install(ctx)
       return nil, 'the loader\'s own files and saved tables are off limits (chef.save_table saves a table)'
     end
     return true, root, names, ext
+  end
+  -- Whether owner's open takes a log's name: nobody holds it, or it's held with no reader and owner is its one writer
+  -- (sb.writer: the first to hold it so). Any other mod writing there ends that for good: the log is shared from then on,
+  -- and nobody empties it to read what the others write next.
+  function sb.takes(file, owner)
+    local who = sb.claims[file]
+    if who == nil then return true end
+    if who ~= false then return false end
+    if sb.writer[file] == owner then return true end
+    sb.writer[file] = nil
+    return false
+  end
+  -- How a mod opens a .log (path, file: its name as sb.check gave it) to write: -> the mode to use, and what the open
+  -- does once it worked: true makes the log its own for this launch, 'hold' holds it with no reader; nil and why when
+  -- it's refused. A log a mod may read back is one that
+  -- holds only what it wrote itself: a new file, or one it emptied with 'w', and the first to do either holds the name
+  -- (sb.claims). Without that, appending nothing to another mod's log would hand over all of it. So for a log it
+  -- doesn't hold: r+ is a read, refused; a and a+ write on as 'a', with no read on the handle and no claim, so a logger's
+  -- second launch keeps working. The first of those holds the log for that launch with no reader, or another mod's w or
+  -- open_log would empty a live log to read what comes next; its own w still takes the name (sb.takes). w on a log
+  -- another mod holds appends instead.
+  function sb.log_mode(path, file, mode, owner)
+    local who = sb.claims[file]
+    if who == owner then return mode, false end
+    local how = s_sub(mode, 1, 1)
+    if who == nil then
+      if how == 'w' then return mode, true end
+      local f = real_open(path, 'r')
+      if not f then return mode, true end
+      f:close()
+    end
+    if how == 'r' then return nil, 'mods read only the logs they write themselves' end
+    if who == false and sb.takes(file, owner) and how == 'w' then return mode, true end
+    return s_find(mode, 'b', 1, true) and 'ab' or 'a', who == nil and 'hold'
   end
 
   local function blocked(name, instead)
@@ -340,6 +419,9 @@ function M.install(ctx)
     -- what this space takes away (its open_log writes any path)
     __boot_mod_loader = false, CowboyBingusModLoader = false, HD2ModLoader = false, ModOptionsMenu = false,
     ModBindingsMenu = false, BingusRuntime = false, ChefSharedLoaderHandoff = false,   -- (ChefSharedLoader: read-only, kept)
+    -- (a loader that bundles the HD2 Lua Runtime sets these two, in either deploy order, and a mod handle of its gives the
+    -- real stingray: a mod's own look-alike HD2Runtime goes on top of this, and nothing reaches the real ones)
+    HD2Runtime = false, SharedLoader = false,
   }
   local string_mt = getmetatable('')
   -- the engine as mods see it: stingray and the globals without the tables (and calls) that aren't for them. A table
@@ -688,14 +770,36 @@ function M.install(ctx)
     end
     for k, v in pairs(engine_names) do rawset(env, k, own(v)) end
     sb.guard_engine(owner, env)
-    -- the metatables of this mod's own newproxy(true) userdata: its own, handed back as they are
+    -- the metatables of this mod's own newproxy(true) userdata: its own, handed back as they are. All but __gc: Lua
+    -- runs a finalizer with hooks off and no pcall around it, so one that loops freezes the game past the watchdog, one
+    -- that raises comes out of some other pcall, and it still runs after the mod stopped. The real metatable stays (a
+    -- stand-in per userdata is a leak, and the real one is reachable), with a locked one on it that drops the name.
     local made, np = setmetatable({}, { __mode = 'k' }), G.newproxy
+    local gc_said = false
+    local function no_gc()
+      if not gc_said and ctx.log then
+        gc_said = true
+        ctx.log(s_format('[%s] a __gc on its newproxy is dropped: a finalizer runs past the hang watchdog',
+          tostring(owner)))
+      end
+    end
+    local gc_guard = { __metatable = 'locked', __newindex = function(t, k, v)
+      if k == '__gc' then no_gc() else rawset(t, k, v) end
+    end }
     if type(np) == 'function' then
       env.newproxy = function(x)
         local u = np(x)
-        if x == true then made[getmetatable(u)] = true end
+        if x == true then
+          local mt = getmetatable(u)
+          made[mt] = true
+          setmetatable(mt, gc_guard)
+        end
         return u
       end
+    end
+    env.rawset = function(t, k, v)
+      if k == '__gc' and made[t] then no_gc(); return t end
+      return rawset(t, k, v)
     end
     local seen_mt = setmetatable({}, { __mode = 'k' }) -- an engine metatable -> this mod's copy of it
     local asked_native = false                       -- this mod's first require('ffi'/'jit') is logged
@@ -778,16 +882,18 @@ function M.install(ctx)
         local asked, moved_name = path, nil
         path, moved_name = redirect(path)
         local ok, root, names, ext = sb.check(path, mode, owner)
-        if ok then
-          said_moved(moved_name)
-          -- (a log it writes is one it may read back: sb.check)
-          if ext == 'log' and mode and s_find(mode, '[wa%+]') and type(owner) == 'string' then
-            sb.claims[owner .. '|' .. names[1]] = true
-          end
-        end
+        if ok then said_moved(moved_name) end
         if not ok then return deny('open', asked, mode, root) end
         if not real_open then return nil, 'no io' end
-        local f, err, code = real_open(path, mode or 'r')
+        -- (a log it writes: sb.log_mode says how, and whether it may read it back)
+        local how, claim = mode, false
+        if ext == 'log' and mode and s_find(mode, '[wa%+]') and type(owner) == 'string' then
+          how, claim = sb.log_mode(path, names[1], mode, owner)
+          if not how then return deny('open', asked, mode, claim) end
+        end
+        local f, err, code = real_open(path, how or 'r')
+        if f and claim == 'hold' then sb.claims[names[1]], sb.writer[names[1]] = false, owner
+        elseif f and claim then sb.claims[names[1]] = owner end
         if f and not files_locked then lock_files(f) end
         -- a mod's own file read from the loader's folder that isn't there yet comes from the old folder
         -- (%LOCALAPPDATA%) if it's there: a mod's saved settings carry over,
@@ -808,8 +914,17 @@ function M.install(ctx)
           local f = sb.check(path, 'r', owner) and real_open and real_open(path, 'r')
           if f then f:close(); said_moved(moved_name) else path = asked end
         end
-        local ok, why = sb.check(path, 'r', owner)
-        if not ok then deny('read', path, 'r', why); error(why, 2) end
+        local ok, root, names, ext = sb.check(path, 'r', owner)
+        if not ok then deny('read', path, 'r', root); error(root, 2) end
+        -- (a mod's own file not here yet: from the old folder, as io.open has it)
+        if root == WDIR and ODIR and ctx.OLD_DIR and real_open and #names == 1 and ext and MOD_EXT[ext] then
+          local f = real_open(path, 'r')
+          if f then f:close()
+          else
+            local g = real_open(ctx.OLD_DIR .. names[1], 'r')
+            if g then g:close(); path = ctx.OLD_DIR .. names[1] end
+          end
+        end
         return io_.lines(path)
       end,
       type = io_type,
@@ -822,6 +937,8 @@ function M.install(ctx)
     -- code it loads: text only, and it lands in this environment (or one the mod hands load); never under my own chunk
     -- name (sb.chunk: the loader's, whose code the hang watchdog leaves running)
     local NAMED = 'that chunk name is the loader\'s own (off limits to Chef Shared Loader mods)'
+    local own_envs = setmetatable({}, { __mode = 'k' })   -- the custom environments this mod set: foreign, below
+    sb.set_envs[env] = own_envs
     -- Nor under another mod's: my menu finds the mod a label function belongs to by its chunk name minus the first
     -- character (text_of in services.lua: '@mods/<author>/<name>', and '=' or any other first character reads the
     -- same), runs it under the watchdog as that mod and skips it once that mod is off. So a name whose rest starts
@@ -831,6 +948,7 @@ function M.install(ctx)
     -- name can only stand for a mod under that name in its own author's folder, never someone else's.
     local function named(n)
       if type(n) ~= 'string' then return nil end
+      n = s_match(n, '^[^%z]*')                 -- (Lua cuts a chunk name at its first zero byte: I check what it keeps)
       if sb.chunk and n == sb.chunk then return NAMED end
       local tail = s_sub(n, 2)
       if not (s_find(tail, '^mods/') or s_find(tail, '^boot:')) then return nil end
@@ -849,13 +967,8 @@ function M.install(ctx)
     end
     env.load = function(chunk, name, mode, e)
       if type(chunk) == 'function' then
-        local parts = {}
-        while true do
-          local piece = chunk()
-          if piece == nil or piece == '' then break end
-          if type(piece) ~= 'string' then return nil, 'reader function must return a string' end
-          parts[#parts + 1] = piece
-        end
+        local parts = sb.drain(chunk, type)
+        if not parts then return nil, 'reader function must return a string' end
         chunk = t_concat(parts)
       end
       if type(chunk) ~= 'string' then return nil, 'bad argument #1 to \'load\' (string or function expected)' end
@@ -865,20 +978,37 @@ function M.install(ctx)
       if bad then return nil, bad end
       if e ~= nil and type(e) ~= 'table' then return nil, 'bad argument #4 to \'load\' (table expected)' end
       local f, err = real_loadstring(chunk, name)
-      if f then real_setfenv(f, e or env) end
+      if f then
+        if e then own_envs[e] = true end
+        real_setfenv(f, e or env)
+      end
       return f, err
     end
     if overrides.xpcall then env.xpcall = overrides.xpcall end
 
     -- getfenv/setfenv: a function of the game's, the loader's or another mod's reads as this mod's own environment,
-    -- and can't be changed. Levels count one more here (this wrapper is a level of its own).
-    local function foreign(e) return e == G or full[e] ~= nil or (envs[e] ~= nil and e ~= env) end
+    -- and can't be changed. Levels count one more here (this wrapper is a level of its own). A custom environment is
+    -- this mod's only if it set it (own_envs: load and setfenv); the refusals stay first, so naming another mod's
+    -- environment there doesn't make it this mod's. Otherwise another mod's custom one, with its __index to that mod's
+    -- own environment, would be one getfenv away.
+    local function foreign(e)
+      return e ~= env and (e == G or full[e] ~= nil or envs[e] ~= nil or not own_envs[e])
+    end
     env.getfenv = function(f)
       if f == nil then f = 1 end
       if type(f) == 'number' then
         if f == 0 then return env end
         if f < 0 then error('bad argument #1 to \'getfenv\' (level must be non-negative)', 2) end
-        local e = real_getfenv(f + 1)
+        local e
+        if f == 1 then
+          -- (`return getfenv()` is a real tail call of this wrapper, as it never is of the C function: no level is left
+          -- to ask, so it's this mod's own. Through pcall the caller is two levels up, past pcall and me.)
+          local ok
+          ok, e = pcall(real_getfenv, 3)
+          if not ok then return env end
+        else
+          e = real_getfenv(f + 1)
+        end
         if foreign(e) then return env end
         return e
       end
@@ -892,10 +1022,12 @@ function M.install(ctx)
       if type(f) == 'number' then
         if f <= 0 then error('setfenv on the whole game is off limits to Chef Shared Loader mods', 2) end
         if foreign(real_getfenv(f + 1)) then error('that function isn\'t this mod\'s (off limits)', 2) end
+        own_envs[t] = true
         return real_setfenv(f + 1, t)
       end
       if type(f) ~= 'function' then error('bad argument #1 to \'setfenv\' (number or function expected)', 2) end
       if foreign(real_getfenv(f)) then error('that function isn\'t this mod\'s (off limits)', 2) end
+      own_envs[t] = true
       return real_setfenv(f, t)
     end
 
@@ -905,6 +1037,10 @@ function M.install(ctx)
       if dbg.traceback then d.traceback = function(...) return dbg.traceback(...) end end
       if dbg.getinfo then
         d.getinfo = function(f, what)
+          -- (a leading '>' makes lua_getinfo take a function off the stack top; given a level, that's the option string
+          -- itself read as a closure, which crashes past pcall or reads any memory. Given a function, Lua's own debug
+          -- library answers 'invalid option' to the same string.)
+          if type(what) == 'string' and s_byte(what, 1) == 62 then error('invalid option', 2) end
           if type(f) == 'number' then f = f + 1 end
           local info = (what ~= nil) and dbg.getinfo(f, what) or dbg.getinfo(f)
           if type(info) == 'table' then info.func = nil end
@@ -965,13 +1101,18 @@ function M.install(ctx)
     -- (the base functions this environment doesn't replace above, and the game's other lower case globals: a table as
     -- this mod's own copy)
     for k, v in pairs(plain) do
-      if rawget(env, k) == nil then rawset(env, k, type(v) == 'table' and own(v, true) or v) end
+      if rawget(env, k) == nil then rawset(env, k, own(v, true)) end
     end
     return env
   end
 
   -- is this table a mod environment of mine? (the loader's own checks)
   function sb.owner_of(t) return envs[t] end
+  -- e is a custom environment env's mod set itself, as env.setfenv's foreign has it: no mod's own, and not the game's
+  function sb.set_env(env, e)
+    local own = sb.set_envs[env]
+    return own ~= nil and own[e] == true and not (rawequal(e, G) or full[e] ~= nil or envs[e] ~= nil)
+  end
   -- an environment with the game's whole Lua (another mod's boot script): to every loader mod it's someone else's, so
   -- getfenv on one of its functions gives the mod its own environment and setfenv refuses
   function sb.register_full(e, owner) if type(e) == 'table' then full[e] = owner or true end end
