@@ -90,10 +90,7 @@
     patch file share a row named for the main mod; the log, the health file and `chef.mods()` still name each of them. The
     core itself isn't listed.
   - With it on top, a crash in a mod's start no longer gets this loader blocked by it: this loader starts its mods at its
-    first `init` call, once Rat's Shared Loader has finished loading it, so the crash guard settles that crash. A player it
-    already blocked stays blocked until they add the line `allow boot@patch_N` to `SharedLoader-choices.txt` in
-    `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs` (its blocked message gives the exact line), or a redeploy changes this
-    loader's patch number.
+    first `init` call, once Rat's Shared Loader has finished loading it, so the crash guard settles that crash.
 - A stopped mod lets go of its memory: its environment, its module and its hooks aren't kept for the session.
 - The performance monitor folds mods past 12 into a +N MORE line.
 - The status line's loader time no longer includes the mods' time.
