@@ -1209,7 +1209,7 @@ function M.install(ctx)
   -- (where the compact panel sits: the player keeps it clear of what they want to see)
   local menu_place = add_row('loader', loader_mod, ctx.LOADER, 'menu_place', { type = 'choice', label = 'Menu position',
     choices = { 'Left', 'Center', 'Right' }, default = 1, section = 'compact' })
-  -- (how see-through the compact panel is, text included: 100 is as it always was, 30 the least, so it's never lost;
+  -- (how see-through the compact panel's background is, the text stays solid: 100 is as it always was, 30 the least;
   -- the full screen look stays opaque)
   local menu_alpha = add_row('loader', loader_mod, ctx.LOADER, 'menu_alpha', { type = 'slider',
     label = 'Menu opacity (%)', min = 30, max = 100, step = 10, default = 100, section = 'compact' })
@@ -2988,8 +2988,11 @@ function M.install(ctx)
     elseif s.type == 'button' and go then press(r)
     elseif s.type == 'color' and dir ~= 0 then step_color(r, dir) end
   end
-  -- ("Menu opacity (%)": every color of the compact panel has its alpha scaled by it, menu_op set each
-  -- frame it's drawn; my cursor, drawn on its own, stays solid)
+  -- ("Menu opacity (%)": menu_col scales the alpha of the compact panel's backgrounds by it, menu_op set each frame
+  -- it's drawn: the panel, its frame, the lit row's glow, the thin lines and the scroll track. All the rest stays solid
+  -- at its normal color, through ctx.color: the text, what dark text sits on (the title bar, the key chips: faded, the
+  -- ink on them would be lost), the lit row's edge (the glow alone can't show the row at 30), the swatches, the scroll
+  -- thumb and my cursor.)
   local menu_op = 1
   local function menu_col(r, g, bl, a) return ctx.color(r, g, bl, floor(a * menu_op + 0.5)) end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
@@ -3222,17 +3225,17 @@ function M.install(ctx)
     local ph = hb + gap + shown * rh + 3 * px + rh + 2 * px + nh
     for i = menu.top, menu.top + shown - 1 do if ls[i].sep then ph = ph - rh + sh end end
     menu_op = (menu_alpha and tonumber(menu_alpha.value) or 100) / 100
-    local col = menu_col
+    local col, bg = ctx.color, menu_col        -- (bg: the backgrounds, faded; col: everything else)
     local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
     local white, green, gray = col(232, 232, 226, 255), nav.st_c(1, col), nav.pc('gray', col)
     local subc = nav.pc('sub', col)            -- a subheading: a muted gold, well under the headings' yellow
     local orange = nav.st_c(2, col)            -- a reset button asking SURE?
     local midy = nav.midy
     -- panel, frame, title bar
-    ctx.rect(x0, y0 - ph, pw, ph, col(9, 11, 10, 238), top)
-    local b = max(1, floor(px * 0.75))
-    ctx.rect(x0, y0 - ph, pw, b, yellow, top + 3); ctx.rect(x0, y0 - b, pw, b, yellow, top + 3)
-    ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
+    ctx.rect(x0, y0 - ph, pw, ph, bg(9, 11, 10, 238), top)
+    local b, fr = max(1, floor(px * 0.75)), bg(255, 231, 16, 255)
+    ctx.rect(x0, y0 - ph, pw, b, fr, top + 3); ctx.rect(x0, y0 - b, pw, b, fr, top + 3)
+    ctx.rect(x0, y0 - ph, b, ph, fr, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, fr, top + 3)
     ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
     local head = menu.group and text_of(menu.group.title) or 'MOD OPTIONS'
     local right = fit((menu.typing or menu.search ~= '') and nav.search_line(P)
@@ -3260,7 +3263,7 @@ function M.install(ctx)
       if l.sep then y = y + rh - sh end        -- (a separator's short line: the top of a row's room)
       local sel = i == menu.sel and not l.head
       if sel then
-        ctx.rect(x0 + b, y, pw - 2 * b, rh, col(255, 231, 16, 42), top + 1)
+        ctx.rect(x0 + b, y, pw - 2 * b, rh, bg(255, 231, 16, 42), top + 1)
         ctx.rect(x0 + b, y, 2 * px, rh, yellow, top + 2)
       end
       local ty = midy(y, rh, px)
@@ -3271,7 +3274,7 @@ function M.install(ctx)
       elseif l.sep then
         -- (a separator: a thin faint rule (rule) from where a row's label starts to where its value ends, mid line)
         local th = max(1, floor(px / 2))
-        ctx.rect(x0 + tx + 2 * px, y + floor((sh - th) / 2), inner - 2 * px, th, nav.pc('rule', col), top + 2)
+        ctx.rect(x0 + tx + 2 * px, y + floor((sh - th) / 2), inner - 2 * px, th, nav.pc('rule', bg), top + 2)
       elseif l.head and l.sub then
         -- (a subheading two letters in from a heading, its rows two letters in from the others)
         ctx.text(x0 + tx + 12 * px, ty, fit(P(l.text), px, inner - 12 * px), px, subc, top + 2)
@@ -3288,7 +3291,7 @@ function M.install(ctx)
           local ve = nav.ver_row(s1, x0 + tx, ty, tt, tr, px, gray, top + 2)
           nav.status_bar(s1, ve or x0 + tx + tw(tt, px), x0 + pw - tx, ty, px, P, gray, col, false, top + 2)
         end
-        ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+        ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), bg(255, 231, 16, 90), top + 2)
       elseif l.head then
         ctx.text(x0 + tx, ty, fit(P(l.text), px, inner), px, yellow, top + 2)
       elseif l.fold then
@@ -3319,7 +3322,7 @@ function M.install(ctx)
         end
         -- (a thin line under my own entry, between it and the mods)
         if l.pick.mod == loader_mod and ls[i + 1] then
-          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), bg(255, 231, 16, 90), top + 2)
         end
       else
         local r = l.row
@@ -3341,7 +3344,7 @@ function M.install(ctx)
         nav.fwhole(fc, 6, value_text(r, users), px, P)
         local v, vw = nav.fcut(fc, 6, max(floor(inner * 0.4) - 2 * aw, xe - aw - 6 * px - lx - ltw), px, fit, true)
         local vx = xe - vw
-        if sz > 0 then swatch(r, xe + 3 * px, y + 2 * px, sz, top + 3, floor(255 * menu_op + 0.5)) end
+        if sz > 0 then swatch(r, xe + 3 * px, y + 2 * px, sz, top + 3) end
         if arr then
           -- (each arrow a box of its own for the mouse: a click steps it that way)
           local ax = xe + 3 * px
@@ -3370,11 +3373,11 @@ function M.install(ctx)
     end
     -- (more lines than room: a scroll track on the right edge)
     if menu.top > 1 or #ls > visible then
-      nav.sbar(x0 + pw - b - px, y0 - hb - gap, y + rh, menu.top, visible, #ls, px, top + 3, nav.pc('rule', col), col(255, 231, 16, 150))
+      nav.sbar(x0 + pw - b - px, y0 - hb - gap, y + rh, menu.top, visible, #ls, px, top + 3, nav.pc('rule', bg), col(255, 231, 16, 150))
     end
     -- the hints under a thin line: the note's lines (dim gray; a clash in yellow), then the key hints
     local fy = y0 - ph + rh + 2 * px + nh
-    ctx.rect(x0 + b, fy, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
+    ctx.rect(x0 + b, fy, pw - 2 * b, max(1, floor(px / 2)), bg(255, 231, 16, 70), top + 1)
     local nc = clash and yellow or nav.pc('hint', col)
     for k = 1, nl do
       local s = nav.hw[k]

@@ -1660,7 +1660,13 @@ function M.install(ctx, L)
     -- isn't what a mod asked for)
     if not world.stable then return nil, 'no world yet' end
     local now = ctx.now and ctx.now() or 0
-    if s.at and now - s.at < C.every and now >= s.at then return nil, 'one capture a second at most' end
+    -- (the limit runs on real seconds: a mod that stops the world's time gets dt 0 every frame, the game's clock stands
+    -- still, and on it the second after a picture would never end. Without os.clock L.clock answers 0 for good, and a
+    -- clock that never moves would hold the limit shut the same way, so then the game's clock times it. The header
+    -- looks below stay on the game's clock, the one util.dds_frame gets.)
+    local real = L.clock()
+    if real <= 0 then real = now end
+    if s.at and real - s.at < C.every and real >= s.at then return nil, 'one capture a second at most' end
     -- (patch-proofing: a game build without the call, or one where it errors, answers nil and why, logged once)
     local fn = fn_of('Application.save_render_target')
     if fn == nil then
@@ -1670,7 +1676,7 @@ function M.install(ctx, L)
     if not ctx.DIR then return nil, 'no folder for pictures' end
     local n = s.n % P.keep + 1
     local file = fmt('%s_%s_%02d%s', flat, P.word, n, C.ext)
-    s.at = now
+    s.at = real
     -- (the picture 50 shots ago, often from an earlier launch, goes first: it's about to be written over anyway,
     -- and a whole old file sitting there would pass for the new one if the engine finishes writing a moment later.
     -- A save that fails doesn't use the number up, so the next one takes this name again.)
@@ -2446,7 +2452,10 @@ function M.install(ctx, L)
   -- frame only makes the few colors and draws the rects. The look matches the options menu: a dark panel in a thin
   -- yellow frame with a yellow bar on top, the title in yellow.
   local PM_COLORS = { { 255, 231, 16, 255 }, { 150, 255, 180, 255 }, { 255, 255, 255, 255 }, { 220, 222, 216, 255 },
-                      { 255, 150, 90, 255 }, { 146, 154, 147, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
+                      { 255, 150, 90, 255 }, { 146, 154, 147, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 },
+                      { 255, 231, 16, 255 } }
+  -- (1 to 6 color the text, 7 up the panel's own rects: the panel, the frame and the yellow bar on top, the ones
+  -- "Monitor opacity (%)" fades)
   -- (the green, light gray, orange and gray as I want them on screen, toned once here for the top world's curve:
   -- the menu's nav.tone, handed over as ctx.tone; the yellow, the white and the panel go in as they are. Installed
   -- without services.lua, as a test does: the colors as they are)
@@ -2507,7 +2516,7 @@ function M.install(ctx, L)
     R[2][1], R[2][2], R[2][3], R[2][4], R[2][5] = x0, y1 - ph, pw, b, 8                 -- frame
     R[3][1], R[3][2], R[3][3], R[3][4], R[3][5] = x0, y1 - ph, b, ph, 8
     R[4][1], R[4][2], R[4][3], R[4][4], R[4][5] = x0 + pw - b, y1 - ph, b, ph, 8
-    R[5][1], R[5][2], R[5][3], R[5][4], R[5][5] = x0, y1 - 2 * px, pw, 2 * px, 1        -- the yellow bar on top
+    R[5][1], R[5][2], R[5][3], R[5][4], R[5][5] = x0, y1 - 2 * px, pw, 2 * px, 9        -- the yellow bar on top
     local txt, width = pm.txt, pm.width
     local tx = 5 * px
     txt(out, x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
@@ -2701,9 +2710,9 @@ function M.install(ctx, L)
     end
     local cs = pm.cs or {}
     pm.cs = cs
-    -- ("Monitor opacity (%)": every color's alpha scaled by it, the panel and its text alike)
+    -- ("Monitor opacity (%)": the alpha of the panel's own rects scaled by it, its text stays solid: PM_COLORS)
     local op = (util.perf_alpha and tonumber(util.perf_alpha.value) or 100) / 100
-    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], floor(c[4] * op + 0.5)) end
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], i >= 7 and floor(c[4] * op + 0.5) or c[4]) end
     -- (over the options menu's compact panel while it can be dragged there: the menu draws from 950, its cursor at 958)
     local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects

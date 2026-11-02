@@ -56,7 +56,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.5.0'
+local VERSION = '1.5.1'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
@@ -1787,7 +1787,7 @@ function M.install(ctx)
   -- (where the compact panel sits: the player keeps it clear of what they want to see)
   local menu_place = add_row('loader', loader_mod, ctx.LOADER, 'menu_place', { type = 'choice', label = 'Menu position',
     choices = { 'Left', 'Center', 'Right' }, default = 1, section = 'compact' })
-  -- (how see-through the compact panel is, text included: 100 is as it always was, 30 the least, so it's never lost;
+  -- (how see-through the compact panel's background is, the text stays solid: 100 is as it always was, 30 the least;
   -- the full screen look stays opaque)
   local menu_alpha = add_row('loader', loader_mod, ctx.LOADER, 'menu_alpha', { type = 'slider',
     label = 'Menu opacity (%)', min = 30, max = 100, step = 10, default = 100, section = 'compact' })
@@ -3566,8 +3566,11 @@ function M.install(ctx)
     elseif s.type == 'button' and go then press(r)
     elseif s.type == 'color' and dir ~= 0 then step_color(r, dir) end
   end
-  -- ("Menu opacity (%)": every color of the compact panel has its alpha scaled by it, menu_op set each
-  -- frame it's drawn; my cursor, drawn on its own, stays solid)
+  -- ("Menu opacity (%)": menu_col scales the alpha of the compact panel's backgrounds by it, menu_op set each frame
+  -- it's drawn: the panel, its frame, the lit row's glow, the thin lines and the scroll track. All the rest stays solid
+  -- at its normal color, through ctx.color: the text, what dark text sits on (the title bar, the key chips: faded, the
+  -- ink on them would be lost), the lit row's edge (the glow alone can't show the row at 30), the swatches, the scroll
+  -- thumb and my cursor.)
   local menu_op = 1
   local function menu_col(r, g, bl, a) return ctx.color(r, g, bl, floor(a * menu_op + 0.5)) end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
@@ -3800,17 +3803,17 @@ function M.install(ctx)
     local ph = hb + gap + shown * rh + 3 * px + rh + 2 * px + nh
     for i = menu.top, menu.top + shown - 1 do if ls[i].sep then ph = ph - rh + sh end end
     menu_op = (menu_alpha and tonumber(menu_alpha.value) or 100) / 100
-    local col = menu_col
+    local col, bg = ctx.color, menu_col        -- (bg: the backgrounds, faded; col: everything else)
     local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
     local white, green, gray = col(232, 232, 226, 255), nav.st_c(1, col), nav.pc('gray', col)
     local subc = nav.pc('sub', col)            -- a subheading: a muted gold, well under the headings' yellow
     local orange = nav.st_c(2, col)            -- a reset button asking SURE?
     local midy = nav.midy
     -- panel, frame, title bar
-    ctx.rect(x0, y0 - ph, pw, ph, col(9, 11, 10, 238), top)
-    local b = max(1, floor(px * 0.75))
-    ctx.rect(x0, y0 - ph, pw, b, yellow, top + 3); ctx.rect(x0, y0 - b, pw, b, yellow, top + 3)
-    ctx.rect(x0, y0 - ph, b, ph, yellow, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, yellow, top + 3)
+    ctx.rect(x0, y0 - ph, pw, ph, bg(9, 11, 10, 238), top)
+    local b, fr = max(1, floor(px * 0.75)), bg(255, 231, 16, 255)
+    ctx.rect(x0, y0 - ph, pw, b, fr, top + 3); ctx.rect(x0, y0 - b, pw, b, fr, top + 3)
+    ctx.rect(x0, y0 - ph, b, ph, fr, top + 3); ctx.rect(x0 + pw - b, y0 - ph, b, ph, fr, top + 3)
     ctx.rect(x0, y0 - hb, pw, hb, yellow, top + 1)
     local head = menu.group and text_of(menu.group.title) or 'MOD OPTIONS'
     local right = fit((menu.typing or menu.search ~= '') and nav.search_line(P)
@@ -3838,7 +3841,7 @@ function M.install(ctx)
       if l.sep then y = y + rh - sh end        -- (a separator's short line: the top of a row's room)
       local sel = i == menu.sel and not l.head
       if sel then
-        ctx.rect(x0 + b, y, pw - 2 * b, rh, col(255, 231, 16, 42), top + 1)
+        ctx.rect(x0 + b, y, pw - 2 * b, rh, bg(255, 231, 16, 42), top + 1)
         ctx.rect(x0 + b, y, 2 * px, rh, yellow, top + 2)
       end
       local ty = midy(y, rh, px)
@@ -3849,7 +3852,7 @@ function M.install(ctx)
       elseif l.sep then
         -- (a separator: a thin faint rule (rule) from where a row's label starts to where its value ends, mid line)
         local th = max(1, floor(px / 2))
-        ctx.rect(x0 + tx + 2 * px, y + floor((sh - th) / 2), inner - 2 * px, th, nav.pc('rule', col), top + 2)
+        ctx.rect(x0 + tx + 2 * px, y + floor((sh - th) / 2), inner - 2 * px, th, nav.pc('rule', bg), top + 2)
       elseif l.head and l.sub then
         -- (a subheading two letters in from a heading, its rows two letters in from the others)
         ctx.text(x0 + tx + 12 * px, ty, fit(P(l.text), px, inner - 12 * px), px, subc, top + 2)
@@ -3866,7 +3869,7 @@ function M.install(ctx)
           local ve = nav.ver_row(s1, x0 + tx, ty, tt, tr, px, gray, top + 2)
           nav.status_bar(s1, ve or x0 + tx + tw(tt, px), x0 + pw - tx, ty, px, P, gray, col, false, top + 2)
         end
-        ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+        ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), bg(255, 231, 16, 90), top + 2)
       elseif l.head then
         ctx.text(x0 + tx, ty, fit(P(l.text), px, inner), px, yellow, top + 2)
       elseif l.fold then
@@ -3897,7 +3900,7 @@ function M.install(ctx)
         end
         -- (a thin line under my own entry, between it and the mods)
         if l.pick.mod == loader_mod and ls[i + 1] then
-          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), col(255, 231, 16, 90), top + 2)
+          ctx.rect(x0 + tx, y, inner, max(1, floor(px / 2)), bg(255, 231, 16, 90), top + 2)
         end
       else
         local r = l.row
@@ -3919,7 +3922,7 @@ function M.install(ctx)
         nav.fwhole(fc, 6, value_text(r, users), px, P)
         local v, vw = nav.fcut(fc, 6, max(floor(inner * 0.4) - 2 * aw, xe - aw - 6 * px - lx - ltw), px, fit, true)
         local vx = xe - vw
-        if sz > 0 then swatch(r, xe + 3 * px, y + 2 * px, sz, top + 3, floor(255 * menu_op + 0.5)) end
+        if sz > 0 then swatch(r, xe + 3 * px, y + 2 * px, sz, top + 3) end
         if arr then
           -- (each arrow a box of its own for the mouse: a click steps it that way)
           local ax = xe + 3 * px
@@ -3948,11 +3951,11 @@ function M.install(ctx)
     end
     -- (more lines than room: a scroll track on the right edge)
     if menu.top > 1 or #ls > visible then
-      nav.sbar(x0 + pw - b - px, y0 - hb - gap, y + rh, menu.top, visible, #ls, px, top + 3, nav.pc('rule', col), col(255, 231, 16, 150))
+      nav.sbar(x0 + pw - b - px, y0 - hb - gap, y + rh, menu.top, visible, #ls, px, top + 3, nav.pc('rule', bg), col(255, 231, 16, 150))
     end
     -- the hints under a thin line: the note's lines (dim gray; a clash in yellow), then the key hints
     local fy = y0 - ph + rh + 2 * px + nh
-    ctx.rect(x0 + b, fy, pw - 2 * b, max(1, floor(px / 2)), col(255, 231, 16, 70), top + 1)
+    ctx.rect(x0 + b, fy, pw - 2 * b, max(1, floor(px / 2)), bg(255, 231, 16, 70), top + 1)
     local nc = clash and yellow or nav.pc('hint', col)
     for k = 1, nl do
       local s = nav.hw[k]
@@ -7474,7 +7477,13 @@ function M.install(ctx, L)
     -- isn't what a mod asked for)
     if not world.stable then return nil, 'no world yet' end
     local now = ctx.now and ctx.now() or 0
-    if s.at and now - s.at < C.every and now >= s.at then return nil, 'one capture a second at most' end
+    -- (the limit runs on real seconds: a mod that stops the world's time gets dt 0 every frame, the game's clock stands
+    -- still, and on it the second after a picture would never end. Without os.clock L.clock answers 0 for good, and a
+    -- clock that never moves would hold the limit shut the same way, so then the game's clock times it. The header
+    -- looks below stay on the game's clock, the one util.dds_frame gets.)
+    local real = L.clock()
+    if real <= 0 then real = now end
+    if s.at and real - s.at < C.every and real >= s.at then return nil, 'one capture a second at most' end
     -- (patch-proofing: a game build without the call, or one where it errors, answers nil and why, logged once)
     local fn = fn_of('Application.save_render_target')
     if fn == nil then
@@ -7484,7 +7493,7 @@ function M.install(ctx, L)
     if not ctx.DIR then return nil, 'no folder for pictures' end
     local n = s.n % P.keep + 1
     local file = fmt('%s_%s_%02d%s', flat, P.word, n, C.ext)
-    s.at = now
+    s.at = real
     -- (the picture 50 shots ago, often from an earlier launch, goes first: it's about to be written over anyway,
     -- and a whole old file sitting there would pass for the new one if the engine finishes writing a moment later.
     -- A save that fails doesn't use the number up, so the next one takes this name again.)
@@ -8260,7 +8269,10 @@ function M.install(ctx, L)
   -- frame only makes the few colors and draws the rects. The look matches the options menu: a dark panel in a thin
   -- yellow frame with a yellow bar on top, the title in yellow.
   local PM_COLORS = { { 255, 231, 16, 255 }, { 150, 255, 180, 255 }, { 255, 255, 255, 255 }, { 220, 222, 216, 255 },
-                      { 255, 150, 90, 255 }, { 146, 154, 147, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 } }
+                      { 255, 150, 90, 255 }, { 146, 154, 147, 255 }, { 9, 11, 10, 235 }, { 255, 231, 16, 150 },
+                      { 255, 231, 16, 255 } }
+  -- (1 to 6 color the text, 7 up the panel's own rects: the panel, the frame and the yellow bar on top, the ones
+  -- "Monitor opacity (%)" fades)
   -- (the green, light gray, orange and gray as I want them on screen, toned once here for the top world's curve:
   -- the menu's nav.tone, handed over as ctx.tone; the yellow, the white and the panel go in as they are. Installed
   -- without services.lua, as a test does: the colors as they are)
@@ -8321,7 +8333,7 @@ function M.install(ctx, L)
     R[2][1], R[2][2], R[2][3], R[2][4], R[2][5] = x0, y1 - ph, pw, b, 8                 -- frame
     R[3][1], R[3][2], R[3][3], R[3][4], R[3][5] = x0, y1 - ph, b, ph, 8
     R[4][1], R[4][2], R[4][3], R[4][4], R[4][5] = x0 + pw - b, y1 - ph, b, ph, 8
-    R[5][1], R[5][2], R[5][3], R[5][4], R[5][5] = x0, y1 - 2 * px, pw, 2 * px, 1        -- the yellow bar on top
+    R[5][1], R[5][2], R[5][3], R[5][4], R[5][5] = x0, y1 - 2 * px, pw, 2 * px, 9        -- the yellow bar on top
     local txt, width = pm.txt, pm.width
     local tx = 5 * px
     txt(out, x0 + tx, y1 - rh - px, 'PERFORMANCE MONITOR', 1)
@@ -8515,9 +8527,9 @@ function M.install(ctx, L)
     end
     local cs = pm.cs or {}
     pm.cs = cs
-    -- ("Monitor opacity (%)": every color's alpha scaled by it, the panel and its text alike)
+    -- ("Monitor opacity (%)": the alpha of the panel's own rects scaled by it, its text stays solid: PM_COLORS)
     local op = (util.perf_alpha and tonumber(util.perf_alpha.value) or 100) / 100
-    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], floor(c[4] * op + 0.5)) end
+    for i, c in ipairs(PM_COLORS) do cs[i] = ctx.color(c[1], c[2], c[3], i >= 7 and floor(c[4] * op + 0.5) or c[4]) end
     -- (over the options menu's compact panel while it can be dragged there: the menu draws from 950, its cursor at 958)
     local top = ctx.TOP + (pm.over_menu and 955 or 940)
     local lay = pm.rects
@@ -8686,7 +8698,7 @@ services.sandbox = (function()
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.5.0' }
+local M = { version = '1.5.1' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset = rawset
@@ -14737,7 +14749,7 @@ svc.util.perf_place = svc.loader_option('perf_place', { type = 'choice', label =
   choices = { 'Adjustable', 'Top right', 'Top left', 'Middle right', 'Middle left', 'Bottom right', 'Bottom left',
     'Center' },
   section = 'monitor_look' })
--- (how see-through the whole panel is, text included: 100 is as it always was)
+-- (how see-through the panel's background is, the text stays solid: 100 is as it always was)
 svc.util.perf_alpha = svc.loader_option('perf_alpha', { type = 'slider', label = 'Monitor opacity (%)', min = 10,
   max = 100, step = 10, default = 100, section = 'monitor_look' })
 -- (shown only while the game's pause screen is up: nothing over the HUD while playing. Off; in missions (on the ship
@@ -15156,7 +15168,13 @@ end
 --   time without a loop. A later count of the same call, after a million more instructions ran past the limit (a few
 --   ms), says it hung, in my helpers too: a count can land on the same instruction every time when a loop's length
 --   divides the gap, so a mod that keeps calling a helper of mine must not get away with it. So a mod inside a helper
---   of mine that long is switched off even if its call then ends clean.
+--   of mine that long is switched off even if its call then ends clean. The same goes for enter and leave, which have no
+--   owner for a few instructions: a count landing there is taken again as soon as there's one, so no loop hides in them.
+-- - Time the mod's Lua didn't run is no hang. A million instructions take milliseconds, so a gap over dog.gap seconds
+--   between two counts of a call (dog.tick: the last count, at first the outermost call's start) is an engine call or a
+--   stall of the game. At a count past the call's limit or the outermost call's, the call's clock starts again, its
+--   callers' and the outermost one's with it (dog.n, as after a hang). Once an outermost call (dog.stalled): a loop around
+--   a slow engine call shows that gap at every count, and it still has to stop, one limit later.
 -- - A loop can spend nearly all its time inside callbacks it runs (an event's listener, an on_change), each a short call
 --   with a clock of its own, so a count almost never lands on the mod looping. A nested call by the same mod gets no
 --   fresh time. For the others I keep the outermost call's clock too (dog.root, rsince, rlim): counts past that limit in
@@ -15181,7 +15199,7 @@ end
 --   dog.start seconds. A late start (svc.ctx.late, a mission may be under way) gets a call's dog.limit: a real start
 --   takes a few milliseconds.
 starter.dog = { limit = 3, start = 10, lim = 3, owner = false, since = 0, n = 0, hung = {}, armed = false, at = 0, clock = clock,
-                root = false, rsince = 0, rlim = 3, rover = 0,
+                root = false, rsince = 0, rlim = 3, rover = 0, tick = 0, stalled = false, gap = 1,
                 sethook = type(debug) == 'table' and debug.sethook or nil,
                 gethook = type(debug) == 'table' and debug.gethook or nil,
                 getinfo = type(debug) == 'table' and debug.getinfo or nil }
@@ -15198,6 +15216,15 @@ end
 function starter.dog.hook()
   local D = starter.dog
   local a, now = D.owner, clock()
+  -- (a count in enter or leave, with a call running: taken again on the next instruction, until there's an owner to read)
+  if not a and D.root then D.sethook(D.hook, '', 1); return end
+  if a then
+    -- (only past a limit: a gap that cost the call nothing doesn't use its one forgiveness up)
+    if now - D.tick > D.gap and not D.stalled and not D.hung[a] and (now - D.since > D.lim or now - D.rsince > D.rlim) then
+      D.stalled, D.since, D.rsince, D.rover, D.n = true, now, now, 0, D.n + 1
+    end
+    D.tick = now
+  end
   if a and D.root and now - D.rsince > D.rlim then D.rover = D.rover + 1 end
   if not (a and now - D.since > D.lim) then
     -- (a thread left counting every instruction after its call ended: back to every million, once no hang is running)
@@ -15208,7 +15235,11 @@ function starter.dog.hook()
     return
   end
   if not D.hung[a] then
-    if D.over ~= D.since then D.over = D.since; return end
+    if D.over ~= D.since then
+      D.over = D.since
+      if not D.fast then D.sethook(D.hook, '', 1000000) end      -- (a count taken again above left it at 1)
+      return
+    end
     D.hung[a] = D.lim; D.hung[#D.hung + 1] = a
     D.n = D.n + 1                                -- (once a hang: a mod that hung, called again, renews no caller's clock)
   end
@@ -15221,20 +15252,27 @@ function starter.dog.hook()
   error(fmt('stopped by the hang watchdog: it ran over %d s (an endless loop?)', D.lim), 0)
 end
 -- (not armed: nothing to note. A mod that hung already gets no time: its next count past my check raises.)
+-- There's no owner while since and lim change, here and in leave: the hook counts in my code too, and a count landing
+-- between the two writes must never read one mod with another's since. Between calls since rests at an old value, and
+-- that read with the mod on its way out says a short call ran past the limit; a hung mod's -1e9 read with its caller says
+-- the same of the caller.
 function starter.dog.enter(a, t0, lim)
   local D = starter.dog
   if not D.armed then return end
   local po, ps, pl, pn = D.owner, D.since, D.lim, D.n
-  D.owner, D.since, D.lim = a, D.hung[a] and -1e9 or (po == a and ps or t0), lim or (po == a and pl) or D.limit
-  if not po then D.root, D.rsince, D.rlim, D.rover = a, D.since, D.lim, 0 end
+  D.owner = false
+  D.since, D.lim = D.hung[a] and -1e9 or (po == a and ps or t0), lim or (po == a and pl) or D.limit
+  if not po then D.root, D.rsince, D.rlim, D.rover, D.tick, D.stalled = a, D.since, D.lim, 0, t0, false end
+  D.owner = a
   return po, ps, pl, pn
 end
 -- (a hang during the call: the caller's own count starts again now, and the outermost call's with it, so it isn't blamed
 -- for the time that hang took, unless the caller is the one that hung; the hook stays on every instruction while that
--- caller runs. since goes back first: a count landing here must never read the caller with the callee's fresh time)
+-- caller runs. I read dog.n with no owner: no count can move it between that read and since going back)
 function starter.dog.leave(po, ps, pl, pn)
   local D = starter.dog
   if pn == nil then return end
+  D.owner = false
   local fresh = D.n ~= pn and not (po and D.hung[po])
   D.since = fresh and clock() or ps
   if fresh then D.rsince, D.rover = D.since, 0 end
