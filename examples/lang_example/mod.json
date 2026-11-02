@@ -1,0 +1,7 @@
+{
+  "name": "Language Example",
+  "version": "1.0.0",
+  "guid": "3e7b9d41-6a2c-4f85-b0d3-8c1e5f7a9b26",
+  "description": "A Chef Shared Loader example: a language file that renames a few of the loader's texts. Needs Chef Shared Loader 1.2.0 or newer.",
+  "lua": [ { "resource": "mods/example/lang_example", "file": "lang_example.lua" } ]
+}
