@@ -1023,8 +1023,9 @@ function M.install(ctx, L)
   -- a file written whole as tmp put in place of path. Windows' rename won't replace a file, so the old one goes first
   -- (a crash in between leaves the .tmp, which is read when the file isn't there); os.rename answers nil and why
   -- when it fails, so its answer is checked, not just the pcall.
-  -- Without os.rename, or when it fails, the .tmp's text is written in place instead, so path ends up whole (and the
-  -- .tmp stays as a second copy until the next save).
+  -- Without os.rename, or when it fails, the .tmp's text is written in place instead, so path ends up whole, and the
+  -- .tmp goes: a whole settings .tmp is read ahead of its file (a save that couldn't be put in place), so one may only
+  -- be left when the file is the older copy.
   function util.replace(tmp, path)
     local o = L.os
     local why = 'no os.rename'
@@ -1043,7 +1044,10 @@ function M.install(ctx, L)
     if not g then return false, why end
     local okw = io_ok(pcall(g.write, g, text))
     local okc = io_ok(pcall(g.close, g))
-    if okw and okc then return true end
+    if okw and okc then
+      if o and o.remove then pcall(o.remove, tmp) end
+      return true
+    end
     -- a cut-off copy would be read before the whole .tmp: it goes
     if o and o.remove then pcall(o.remove, path) end
     return false, why
@@ -1288,6 +1292,9 @@ function M.install(ctx, L)
   local labels = {}                       -- ([0]: how many controller labels it keeps; names are strings)
   local function key_label(name)
     if type(name) ~= 'string' then return '' end
+    -- (no binding's name comes near 64 bytes: a longer one comes back as it is, so a mod's 'ctrl+ctrl+...' can't
+    -- make me keep a label for every one of its combos)
+    if #name > 64 then return name end
     local l = labels[name]
     if l == nil then
       -- a binding's combo ('ctrl+f6': 'Ctrl+' and the key's own name, kept once the key's is) or controller button
@@ -1430,6 +1437,7 @@ function M.install(ctx, L)
     if r_out <= 0 or r_in >= r_out then return end
     if a1 < a0 then a0, a1 = a1, a0 end
     local span = min(360, a1 - a0)
+    if span <= 0 then return end                      -- (no angle, no arc: the rects below would draw a square)
     local n = segments(r_out, span)
     if L.tri_ok() ~= false then
       -- a fan of engine triangles; if the first one isn't drawn, rects instead
@@ -1485,7 +1493,6 @@ function M.install(ctx, L)
       end
     end
   end
-  util.arc = arc
 
   -- ---------------------------------------------------------------- a ray against a box (chef.ray_box)
   -- The game gives Lua no physics world, so there's no raycast against the world: only Math.ray_box_intersection, a
@@ -1649,9 +1656,49 @@ function M.install(ctx, L)
     local slot = kind and kind.word .. '|' .. owner or owner
     local s = util.shots[slot]
     if not s then
-      local flat = M.flat_owner(owner)
+      -- (the mod's name as data_enc writes it, one to one: mods/a/b_c and mods/a_b/c get pictures and numbers of their
+      -- own, where the old flat name, a_b_c for both, gave them one. A mod with no number under its new key that has one
+      -- under its old key took pictures under the old name: those are renamed to the new one, once (the new key is
+      -- saved at once), and the number carries on, so it goes on writing over its oldest)
+      local flat = data_enc((owner:gsub('^mods/', '')))
       local key = (P.word .. '.' .. flat):sub(1, 64)
-      local n = L.saved_get and tonumber(L.saved_get(key)) or 0
+      local v = L.saved_get and L.saved_get(key)
+      if v == nil and L.saved_get then
+        local old = M.flat_owner(owner)
+        v = L.saved_get((P.word .. '.' .. old):sub(1, 64))
+        -- (only pictures that can be its own, as with chef.save_table's older names: never under an old name that
+        -- reads as a new one, '_2f' for the slash (mods/a/2fb's old a_2fb is mods/a/b's new name and key), nor one
+        -- another mod the loader found had too. Lower case first: Windows folds it. Then its number starts over and
+        -- what's under that name stays put.)
+        local mine = v ~= nil and not old:lower():find('_2f', 1, true)
+        for _, o in ipairs(mine and L.found and L.found() or {}) do
+          if type(o) == 'string' and o ~= owner and M.flat_owner(o):lower() == old:lower() then mine = false end
+        end
+        if v ~= nil and not mine then
+          once(P.word .. '_old:' .. owner, fmt('[%s] chef.capture: pictures under the older name %s_%s_<nn>%s could be another mod\'s too; left as they are', owner, old, P.word, C.ext))
+          v = nil
+        elseif v ~= nil then
+          -- (a picture still under its old name after this, held open or with no os.rename, is named in the log, so
+          -- the player can delete it: I never write to that name again. One that was never taken isn't there.)
+          local o, left, first = L.os, 0, nil
+          for i = 1, P.keep do
+            local from = fmt('%s_%s_%02d%s', old, P.word, i, C.ext)
+            local ok, done = false, nil
+            if o and o.rename and ctx.DIR then
+              ok, done = pcall(o.rename, ctx.DIR .. from, ctx.DIR .. fmt('%s_%s_%02d%s', flat, P.word, i, C.ext))
+            end
+            if not (ok and done) and ctx.open and ctx.DIR then
+              local f = ctx.open(ctx.DIR .. from, 'rb')
+              if f then pcall(f.close, f); left, first = left + 1, first or from end
+            end
+          end
+          if left > 0 then
+            once(P.word .. '_left:' .. owner, fmt('[%s] chef.capture: %d older picture(s) couldn\'t be renamed to its new name (%s first) and stay in my folder; they can be deleted', owner, left, first))
+          end
+          if L.saved_put then L.saved_put(key, v) end
+        end
+      end
+      local n = v ~= nil and tonumber(v) or 0
       s = { n = (n >= 0 and n <= P.keep) and floor(n) or 0, flat = flat, saved = key }
       util.shots[slot] = s
     end
@@ -1923,6 +1970,7 @@ function M.install(ctx, L)
     function chef.units_near(x, y, z, r, w)
       local out = {}
       if type(x) ~= 'number' or type(y) ~= 'number' or type(z) ~= 'number' or type(r) ~= 'number' then return out end
+      if r < 0 then return out end                    -- (squared, a negative radius would pass for its positive)
       local r2 = r * r
       for i = 1, w and 1 or #mine do
         local items = (w or mine[i]).items
@@ -1948,12 +1996,16 @@ function M.install(ctx, L)
       end
       return res
     end
+    -- (a position goes to the engine only as finite numbers, as chef.ray_box has it: a NaN or an infinity where a unit
+    -- or an effect should go is refused here, and nothing is asked of the engine; a missing one is 0)
     function chef.spawn(res, x, y, z)
       if not world.stable then return nil, 'no world yet' end
+      x, y, z = x or 0, y or 0, z or 0
+      if not (finite(x) and finite(y) and finite(z)) then return nil, 'x, y, z: finite numbers' end
       local id = id_of(res)
       if id == nil then return nil, 'no id' end
       if guarded(owner, 'Application.can_get', fn_of('Application.can_get'), 'unit', id) ~= true then return nil, 'unit ' .. tostring(res) .. ' is not loaded' end
-      local p = api('Vector3', x or 0, y or 0, z or 0)
+      local p = api('Vector3', x, y, z)
       if not p then return nil, 'no position' end
       local u, err = base_call('World.spawn_unit', world.main, id, p)
       if not u then return nil, err end
@@ -1999,8 +2051,10 @@ function M.install(ctx, L)
     end
     function chef.particles(res, x, y, z)
       if not world.stable then return nil, 'no world yet' end
+      x, y, z = x or 0, y or 0, z or 0
+      if not (finite(x) and finite(y) and finite(z)) then return nil, 'x, y, z: finite numbers' end
       local id = id_of(res)
-      local p = api('Vector3', x or 0, y or 0, z or 0)
+      local p = api('Vector3', x, y, z)
       if not (id and p) then return nil, 'no id or position' end
       local h, err = base_call('World.create_particles', world.main, id, p)
       if h == nil then return nil, err end

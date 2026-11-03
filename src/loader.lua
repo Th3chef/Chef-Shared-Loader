@@ -56,7 +56,7 @@ local loader_ok, loader_err = pcall(function()
 local LOADER = 'Chef Shared Loader'      --@@LOADER@@
 local FILES = 'chef_loader'              --@@FILES@@
 local ALLOW = '^mods/[%w_%-]+/[%w_%-/]*[%w_%-]$' --@@ALLOW@@ any author's mods/<author>/<name>[/...] (mine first)
-local VERSION = '1.5.1'
+local VERSION = '1.5.2'
 local TEST = nil --@@TEST@@               a test build's number (tools/build.py --test N); release: nil
 local STABLE_FOR = 3                     -- seconds a main world must last before addons may draw in it
 local MISSION_UNITS = 5000               -- without a level count: a main world bigger than this is a mission
@@ -135,7 +135,11 @@ local TWO32, TWO31 = 4294967296, 2147483648
 local ROUND = 6755399441055744
 
 -- I work in unsigned 0 .. 2^32-1 internally and only convert to signed on the way out.
+-- A missing value (nil, the usual mistake) is a bad argument at the mod's own line: level 3 is the caller of the bit
+-- function that called me, so the log doesn't blame my line. Only nil: a type() call on every operand costs a third
+-- more on the cheap calls, and anything else that isn't a number is rare enough to raise the arithmetic error below.
 local function tou(x)
+  if x == nil then error('bad argument to bit (number expected, got nil)', 3) end
   x = ((x + ROUND) - ROUND) % TWO32
   if x ~= x then return 0 end -- NaN and +-inf come out as 0, like LuaJIT
   return x
@@ -254,8 +258,12 @@ function bit.rol(x, n)
   return tos((u * POW[n + 1]) % TWO32 + floor(u / POW[32 - n + 1]))
 end
 
+-- (rol's sum with the shift turned around, not a call of rol: a tail call to it would leave no frame for tou's level 3,
+-- and a bad argument would come out with no line at all)
 function bit.ror(x, n)
-  return bit.rol(x, 32 - tou(n) % 32)
+  n = tou(n) % 32
+  local u = tou(x)
+  return tos((u * POW[32 - n + 1]) % TWO32 + floor(u / POW[n + 1]))
 end
 
 function bit.bswap(x)
@@ -672,15 +680,17 @@ end
 -- the menu's own key, named when drawn), and what they do. A pair is drawn whole or not at all; opt: a pair left out
 -- when the whole line doesn't fit. Each key and word is translated on its own.
 -- The keys shown are the ones the game ignores: the arrows ('<' and '>' are Left and Right, the only arrows both fonts
--- have), Delete, '/' and the menu's own key. Enter, Escape and Backspace still work in my menu but the game hears them
--- too (Enter opens its chat and the letters typed after it go there, Escape and Backspace its pause screen), so the
--- hints never offer them where another key does the same.
+-- have), Delete and the menu's own key, plus the search's keys. The game hears those too, on purpose: Enter opens its
+-- chat, which keeps the letters from its controls while I read them (a second Enter sends them), and Escape closes the
+-- chat unsent. Backspace and Escape are its pause screen when no chat is open, so the hints never offer them where
+-- another key does the same.
+-- (the typing line's order is what's left in a narrow panel: the pairs go from the end, so ENTER SENDS is the last)
 local KEY_NOW = false
 local HINTS = {
   capture_default = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'DEFAULT' } },
   capture_none = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'NONE' } },
-  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'DOWN', word = 'RESULTS' }, { 'BKSP', word = 'ERASE' },
-             { '/', word = 'EXIT' } },
+  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ENTER', word = 'SENDS' }, { 'ESC', word = 'DONE' },
+             { 'BKSP', word = 'ERASE' } },
   -- (in an entry or a search: on a key or a button, Right acts and Left goes back; value is a toggle's, a choice's, a
   -- slider's or a color's, where Left and Right change it; back is the Back row's, where both go back)
   group = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
@@ -698,7 +708,7 @@ local HINTS = {
                   { KEY_NOW, word = 'CLOSE' } },
   value = { { 'ARROWS', word = 'MOVE', opt = true }, { '<', '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
             { KEY_NOW, word = 'CLOSE' } },
-  list = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'OPEN' }, { '/', word = 'SEARCH' },
+  list = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'OPEN' }, { 'ENTER', word = 'SEARCH' },
            { KEY_NOW, word = 'CLOSE' } },
   -- (on a mod's heading, a fold: closed, Right opens it and Left goes back; open, Left closes it, FOLD so it doesn't
   -- read as the menu's own CLOSE next to it)
@@ -885,13 +895,30 @@ function M.install(ctx)
       return UNESCAPE[c] and UNESCAPE[c] .. hex
     end
     -- The file's lines into t. False and the code when the main file is there but wouldn't open: 2 is "no such file", and
-    -- a code that isn't a number tells me nothing, so neither counts.
+    -- a code that isn't a number tells me nothing, so neither counts. A .tmp that ends in save_now's last line is a
+    -- whole save that couldn't be put in place (a read-only or locked file): the newest copy there is, so it goes ahead
+    -- of the file it couldn't replace, as the crash state's does. Any other .tmp is read only when there's no file, and
+    -- one that's there but wouldn't open, with no file, counts as a file that wouldn't: it may be the only copy.
     function saving.read(t)
-      local f, _, code = ctx.open(SETTINGS_FILE, 'rb')
-      local refused = f == nil and type(code) == 'number' and code ~= 2
+      local tmp = SETTINGS_FILE .. '.tmp'
+      local f, _, tcode = ctx.open(tmp, 'rb')
+      local whole, refused, code, held = false, false, nil, SETTINGS_FILE
+      if f then
+        local oks, size = pcall(f.seek, f, 'end')
+        if oks and type(size) == 'number' and pcall(f.seek, f, 'set', max(0, size - 8)) then
+          local okr, tail = pcall(f.read, f, '*a')
+          whole = okr and type(tail) == 'string' and ('\n' .. tail):find('\nend\r?\n$') ~= nil
+        end
+        if whole then pcall(f.seek, f, 'set', 0) else pcall(f.close, f); f = nil end
+      end
+      if not f then
+        f, _, code = ctx.open(SETTINGS_FILE, 'rb')
+        refused = f == nil and type(code) == 'number' and code ~= 2
+        if not f and not refused and type(tcode) == 'number' and tcode ~= 2 then refused, code, held = true, tcode, tmp end
+      end
       -- (only the .tmp is there when the game ended between taking the old file away and putting the new one in place;
       -- only the old folder's copy when the one-time move failed this launch: M.UNMOVED)
-      f = f or ctx.open(SETTINGS_FILE .. '.tmp', 'rb') or (M.UNMOVED and M.UNMOVED['_settings.txt'] and ctx.open(M.UNMOVED['_settings.txt'], 'rb'))
+      f = f or ctx.open(tmp, 'rb') or (M.UNMOVED and M.UNMOVED['_settings.txt'] and ctx.open(M.UNMOVED['_settings.txt'], 'rb'))
       if f then
         for line in f:lines() do
           if line:sub(-1) == '\r' then line = line:sub(1, -2) end
@@ -905,7 +932,7 @@ function M.install(ctx)
         end
         f:close()
       end
-      if refused then return false, code end
+      if refused then return false, code, held end   -- (held: the file that wouldn't open, the .tmp or the main one)
       return true
     end
     -- the file again, while it's blocked: true once it read and the changes since start-up went on top of it
@@ -922,10 +949,10 @@ function M.install(ctx)
       log('the settings file reads again: its values are kept, with what changed since start-up on top')
       return true
     end
-    local ok, code = saving.read(store)
+    local ok, code, held = saving.read(store)
     if not ok then
       saving.blocked = {}
-      log(fmt('the settings in %s could not be read (error %s): this launch runs without them, and nothing is saved over the file until it reads', SETTINGS_FILE, tostring(code)))
+      log(fmt('the settings in %s could not be read (error %s): this launch runs without them, and nothing is saved over the file until it reads', held, tostring(code)))
     end
   end
   -- a number as text that reads back as the same number (tostring alone keeps 14 digits)
@@ -956,6 +983,8 @@ function M.install(ctx)
           if ok then ok = io_ok(pcall(f.write, f, m, '\t', k, '\t', ty, '\t', text, '\n')) end
         end
       end
+      -- (the last line tells a whole .tmp from one cut off, saving.read; every reader skips a line it doesn't know)
+      if ok then ok = io_ok(pcall(f.write, f, 'end\n')) end
       ok = io_ok(pcall(f.close, f)) and ok
       if ok and replace then ok = replace(tmp, SETTINGS_FILE) end
     end
@@ -1033,7 +1062,8 @@ function M.install(ctx)
   local function call_as(owner, what, c, ...)
     if owner == 'loader' then return pcall(c.fn, ...) end
     local p = recs[owner]
-    if p and p.paused then return true end         -- (nothing of a paused mod is called: svc.pause)
+    -- (nothing of a paused mod is called, svc.pause: of its events, emit_as lets only the game's shutdown by)
+    if p and p.paused and what ~= 'event' then return true end
     local k = c.key
     if k == nil then k = ctx.place_key(what, c.fn); c.key = k end
     if k then return svc.run_as(owner, k, c.fn, ...) end
@@ -1088,11 +1118,14 @@ function M.install(ctx)
     local list = subs[event]
     if not list then return 0 end
     local n = 0
+    -- (a paused mod hears the game's shutdown as the game closes, and no other event: not one a running mod's shutdown
+    -- listener emits then)
+    local wake = ctx.closing and event == 'shutdown'
     emitting = emitting + 1
     for i = 1, #list do
       local sb = list[i]
-      local p = sb and recs[sb.owner]              -- (a paused mod's listener stays, uncalled and not counted)
-      if sb and sb.on and (only == nil or sb.owner == only) and not (p and p.paused) then
+      local p = sb and recs[sb.owner]              -- (a paused mod's stays, uncalled and uncounted but by wake)
+      if sb and sb.on and (only == nil or sb.owner == only) and not (p and p.paused and not wake) then
         local ok, err = call_as(sb.owner, 'event', sb, ...)
         -- (one the crash guard skips didn't run: it isn't counted, and it's no error of its own; said once)
         local held = not ok and err == 'skipped'
@@ -1402,6 +1435,9 @@ function M.install(ctx)
     if not ok then log(fmt('[%s] option %s not saved: %s', row.owner, row.id, tostring(err))) end
     -- each callback runs as the mod that asked for it ({ fn, owner, on }; a mod that stops has its own switched off)
     for _, c in ipairs(row.changed) do
+      -- (a callback that set the row again, a clamp say, already ran them all with that value: the rest of this
+      -- pass is stale)
+      if row.value ~= v then break end
       if c.on then
         local p = recs[c.owner]
         c.due = p and p.paused                     -- (a paused mod hears the row's value as it's resumed: svc.resume)
@@ -1410,9 +1446,10 @@ function M.install(ctx)
       end
     end
   end
-  local function on_change(row, owner, fn)
+  -- (key: the crash key, for a wrapper of mine around the mod's own function: call_as)
+  local function on_change(row, owner, fn, key)
     if #row.changed >= 64 then return false end
-    row.changed[#row.changed + 1] = { fn = fn, owner = owner, on = true }
+    row.changed[#row.changed + 1] = { fn = fn, owner = owner, on = true, key = key }
     return true
   end
   -- a button pressed: its run(), then its on_change callbacks (with true), each as the mod that asked for it. Nothing
@@ -1592,7 +1629,10 @@ function M.install(ctx)
     end
     -- saved settings
     -- (keys starting with opt. are my options menu's: a mod's rows are saved under them, chef.option)
+    -- (a copy that stopped saves and sets nothing: a library's shared function can still run its code. A paused one
+    -- still does: it's the copy that carries on, and its shutdown may save)
     function chef.save(key, value)
+      if a.on == false and not a.paused then return nil, 'the mod is off' end
       if type(key) == 'string' and key:find('^opt%.') then return nil, 'keys starting with opt. are the options menu\'s' end
       if type(key) == 'string' and saving.over(owner, key, value) then return false, 'a mod saves 256 KB at most' end
       return put(owner, key, value)
@@ -1675,6 +1715,7 @@ function M.install(ctx)
     -- (a # row is mine, not the mod's: its switch and its reset are the player's. By the row, not the id: an id can be a
     -- table whose tostring reads #on)
     function chef.set(id, v)
+      if a.on == false and not a.paused then return nil, 'the mod is off' end
       local r = rows_by_id[owner .. '|' .. tostring(id)]
       if r and tostring(r.short):sub(1, 1) ~= '#' then as_caller(a, set_row, r, v); return r.value end
     end
@@ -1683,7 +1724,8 @@ function M.install(ctx)
       if r and type(fn) == 'function' and a.on ~= false then return on_change(r, owner, fn) end
       return false
     end
-    -- a button row: Right (Enter too, or a click) runs fn as this mod; text is what the row shows on its right ('RUN')
+    -- a button row: Right (the pad's confirm, or a click) runs fn as this mod; text is what the row shows on its right
+    -- ('RUN')
     function chef.button(id, label, fn, text)
       return chef.option(id, { type = 'button', label = label, run = fn, text = text })
     end
@@ -2081,7 +2123,6 @@ function M.install(ctx)
   -- the loader's own saved values that aren't a row (the language picked, by name)
   function svc.loader_get(key) return get(loader_mod, key) end
   function svc.loader_put(key, v) return put(loader_mod, key, v) end
-  function svc.menu_key_name() return menu_key.value end
   -- ---------------------------------------------- the menu's look, controller and mouse
   -- Rows of their own in the loader's group. The controller: the engine's own pads (Pad1..Pad8, the first one active,
   -- its buttons found by the names the pad lists), the D-pad moves, cross/A picks, circle/B goes back (and closes
@@ -2214,7 +2255,8 @@ function M.install(ctx)
   -- cursor axis (mouse_read asks for it; without one the camera turns while the menu is open); a mod's hold needs just
   -- the delta axis, since only svc.mouse_delta reads the cursor while it's held.
   -- on: mine; had: what I found; off: not this session; paused: not until the menu closes; ever: a cursor was read
-  -- down: the game is closing (svc.shutdown gave it back): never taken again
+  -- down: the game is closing (svc.shutdown gave it back): never taken again; nocur: no cursor was ever read, so my
+  -- menu doesn't take it this session (a mod's hold still does)
   local HOLD = 917351
   -- (clean: the looks in a row since the hold was let go that found the dead zone not mine: hold_heal)
   nav.hold = { on = false, had = nil, off = false, paused = false, other = nil, ever = false, heal_at = 0, bad = 0, clean = 0 }
@@ -2322,12 +2364,7 @@ function M.install(ctx)
       H.res_at = 0                                       -- (asked again next frame: the window may have changed size)
       return nil
     end
-    local mx, my = x * w / rw, y * h / rh
-    if ctx.TEST and (H.logs or 0) < 40 and ctx.now() >= (H.log_at or 0) then        -- (test builds: where it reads)
-      H.logs, H.log_at = (H.logs or 0) + 1, ctx.now() + 1
-      log(fmt('options menu (test): cursor %.0f, %.0f of %.0f x %.0f -> menu %.0f, %.0f of %d x %d', x, y, rw, rh, mx, my, w, h))
-    end
-    return mx, my
+    return x * w / rw, y * h / rh
   end
   -- the mouse's axes and buttons (no answer yet, the mouse not ready in the first frames on some setups: asked again
   -- every 2 s)
@@ -2363,7 +2400,7 @@ function M.install(ctx)
     nav.game_cursor = shown                             -- (then the game's own cursor is the one drawn: not mine)
     local H = nav.hold
     H.quiet = nil                                       -- (my menu has the mouse: its next give-back is logged)
-    if not shown and A.cursor then nav.hold_take() end
+    if not shown and A.cursor and not H.nocur then nav.hold_take() end
     if shown then
       if H.on then nav.hold_give() end
       local cx, cy = nav.cursor_at(w, h)
@@ -2398,8 +2435,10 @@ function M.install(ctx)
           nav.hold_give(); H.other, H.bad = nil, 0
           if H.ever then H.paused = true
           else
-            H.off = true
-            log('options menu: the mouse turns the camera while the menu is open (no cursor position)')
+            -- (my menu's own take alone: a mod's hold needs no cursor, H.off would refuse it every hold. Said once: a
+            -- mod's hold that my menu lands on comes back here at each opening)
+            if not H.nocur then log('options menu: the mouse turns the camera while the menu is open (no cursor position)') end
+            H.nocur = true
           end
         end
       end
@@ -2557,9 +2596,9 @@ function M.install(ctx)
   end
   -- the cursor: an arrow, ink edged. Not drawn while the controller is what was used last (a button pressed, or the
   -- menu opened by its hold): the mouse moving, a click or the wheel brings it back in that frame, a key too (the
-  -- hints change with them). The pad gone, it's back.
+  -- hints change with them). The pad gone, or the controller row set to Off, it's back.
   function nav.draw_cursor(top, h)
-    if not (nav.mouse and nav.mx) or nav.game_cursor or (menu.dev == 'pad' and nav.pad) then return end
+    if not (nav.mouse and nav.mx) or nav.game_cursor or (menu.dev == 'pad' and nav.pad and pad_row.value ~= 3) then return end
     local c = max(2, floor(h / 400 + 0.5))
     local x, y, col = floor(nav.mx), floor(nav.my), ctx.color
     local edge, fill = col(17, 17, 17, 255), col(255, 231, 16, 255)
@@ -2589,9 +2628,9 @@ function M.install(ctx)
     sorted_cache.ver, sorted_cache.gs = ver.layout, gs
     return gs
   end
-  -- the lines shown: the list of mods; the open mod's options; or, with a search typed after '/', every mod whose
-  -- title has it (whole) and every option whose label (or heading) has it, under its mod's title and the headings it's
-  -- under in its entry
+  -- the lines shown: the list of mods; the open mod's options; or, with a search typed, every mod whose title has it
+  -- (whole) and every option whose label (or heading) has it, under its mod's title and the headings it's under in its
+  -- entry
   local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
   -- A group's rows as lines. My own rows carry a section: they're shown by section, each under its heading, in the
   -- order below (any other row of a section after those, in the order it was made).
@@ -3372,37 +3411,62 @@ function M.install(ctx)
     end
     return got
   end
-  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace (or Delete) takes one off, Down or Up
-  -- (or Enter) keeps it (the list filtered by it), '/' again or Escape leaves it (the typed text comes from
-  -- Keyboard.keystrokes, through the utilities)
+  -- The search: Enter starts typing, anywhere in my menu. The game opens its chat on that same press, and the chat keeps
+  -- the letters from its controls; the search box is the chat's. I never open it or read it: the text comes from
+  -- Keyboard.keystrokes, through the utilities, so with no chat to open (the title screen, say) the search works the
+  -- same and the letters reach the game too. No call tells me the chat is open and none can stop it
+  -- sending, so menu.typing is my guess at it, kept in step by what closes it: Escape or a click close it unsent, Enter
+  -- sends what's in it (with nothing in it, it just closes). Each of those ends the typing and keeps what it found, the
+  -- cursor on the first line found (none found: the Back row; nothing typed: the whole list). A guess that goes wrong
+  -- costs a stray letter in the game until the next Escape. The arrows and the menu's key wait for that: the chat stays
+  -- open until then, and a menu closed over it would leave the text one Enter from being sent. A click counts with my
+  -- menu's mouse off too: the two buttons are read here then, only while typing, from how they stood when the typing
+  -- began (a button already down is no click, nav.tl and nav.tr). It ends the typing and presses no row.
+  -- Letters, digits and spaces go in. Backspace follows the box: one letter off for each 8 in the keystrokes, so a held
+  -- key takes them as fast as the box loses them; a press that brings no 8 still takes one. Delete takes one off too.
+  -- (one press can land in two frames, the key's edge in one and its keystroke in the next: nav.tgap is the frame after
+  -- the typing started or ended, where Enter or Escape is still that press, menu_frame asks it for Escape; nav.bs is
+  -- where last frame's Backspace came from, 'list' or 'key', so its other half takes no second letter)
   local function search_input()
-    local typed = svc.util and svc.util.typed() or ''
+    local typed, raw = '', nil
+    if svc.util then typed, raw = svc.util.typed() end
+    local same = nav.tgap
+    nav.tgap = false
     if not menu.typing then
       -- (the list is still drawn with nothing typed: line 1, line 2 is for the results under the Back row)
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top, nav.drag = true, '', 1, 1, nil end
-      if menu.typing then menu.group = nil end
+      if pressed('enter') and not same then
+        menu.typing, menu.search, menu.sel, menu.top, nav.drag, menu.group = true, '', 1, 1, nil, nil
+        nav.tgap, nav.bs, nav.tl, nav.tr = true, nil, true, true
+      end
       return false
     end
     for ch in typed:gmatch('[%w ]') do
       if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('delete') or pressed('backspace') then
-      menu.search = menu.search:sub(1, -2)
+    local stop, off = pressed('enter') or pressed('escape'), 0
+    for i = 1, raw and #raw or 0 do
+      local k = raw[i]
+      if k == 13 or k == 27 then stop = true elseif k == 8 then off = off + 1 end
+    end
+    local was = nav.bs
+    nav.bs = nil
+    if off > 0 then
+      nav.bs = 'list'
+      if was == 'key' then off = off - 1 end
+    elseif pressed('backspace') and was ~= 'list' then off, nav.bs = 1, 'key' end
+    if pressed('delete') then off = off + 1 end
+    if off > 0 then
+      menu.search = menu.search:sub(1, -1 - off)
       menu.sel, menu.top = menu.search == '' and 1 or 2, 1
     end
-    if pressed('enter') then menu.typing = false end
-    -- Down keeps it with the cursor on the first line found, Up on the last (none found: the Back row; nothing typed:
-    -- the list's first mod), so a search never needs Enter, which also opens the game's chat. The keys only: this
-    -- frame's press is used up here, the cursor never steps on with it
-    local d = pressed('down') and 1 or (pressed('up') and -1 or 0)
-    if d ~= 0 then
-      menu.typing, menu.sel, menu.top = false, 1, 1
-      if menu.search ~= '' then local ls = lines(); nav.step(ls, #ls, d) end
+    local click = nav.click or nav.rclick
+    if not nav.mouse then
+      local A = nav.find_axes()
+      local l, r = nav.button_down(A.l), nav.button_down(A.r)
+      click = (l and not nav.tl) or (r and not nav.tr)
+      nav.tl, nav.tr = l, r
     end
-    -- ('/' again or Escape leaves the search: the whole list back)
-    if typed:find('/', 1, true) or pressed('escape') then
-      menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1
-    end
+    if (stop and not same) or click then menu.typing, nav.tgap = false, true end
     return true
   end
   -- The search as the header draws it (word: my word for it, the full screen look's; the language translates that word
@@ -3512,20 +3576,22 @@ function M.install(ctx)
     elseif act('page down') then for _ = 1, 8 do step(ls, n, 1) end
     elseif act('page up') then for _ = 1, 8 do step(ls, n, -1) end end
     local l = ls[menu.sel]
-    -- a mod in the list: Enter (or Right) opens its options, the cursor on its first option (Back is just above it)
+    -- (nav.act.enter is the pad's confirm or a click: the keyboard's Enter is the search's, search_input)
+    -- a mod in the list: Right (or the pad's confirm, a click) opens its options, the cursor on its first option (Back is
+    -- just above it)
     if l and l.pick then
-      if act('enter') or act('right') then open_group(menu.sel, l.pick) end
+      if nav.act.enter or act('right') then open_group(menu.sel, l.pick) end
       return
     end
     -- (the Back row: on the keyboard Right goes back too, as it acts on a key or a button row)
     if l and l.back then
-      if act('enter') or act('left') or pressed('right') then go_back() end
+      if nav.act.enter or act('left') or pressed('right') then go_back() end
       return
     end
-    -- a fold (a mod's heading): Enter (the pad's confirm, a click) opens or closes it; Right opens it, or steps into it
-    -- when it's open; Left closes it, or goes back to the list when it's closed (the keyboard's, as on a key row)
+    -- a fold (a mod's heading): the pad's confirm or a click opens or closes it; Right opens it, or steps into it when
+    -- it's open; Left closes it, or goes back to the list when it's closed (the keyboard's, as on a key row)
     if l and l.fold then
-      if act('enter') or (l.open and act('left')) or (not l.open and act('right')) then
+      if nav.act.enter or (l.open and act('left')) or (not l.open and act('right')) then
         -- (the hold that opened it does no more, as open_group's: it has to be let go first)
         if not l.open then nav.rep.right = math.huge end
         nav.fold_set(l, l.open)
@@ -3538,10 +3604,10 @@ function M.install(ctx)
     local s = r.spec
     local dir = act('right') and 1 or (act('left') and -1 or 0)
     if act('delete') then set_row(r, r.default); return end
-    -- A key or a button has no value to step: on the keyboard, Right does what Enter does (a capture, a press) and Left
-    -- goes back to the list, so neither needs Enter or Backspace, which the game hears too. The controller and the
-    -- mouse keep theirs (their arrows step values only).
-    local go = act('enter')
+    -- A key or a button has no value to step: on the keyboard, Right does what the pad's confirm does (a capture, a
+    -- press) and Left goes back to the list, so neither needs Backspace, which the game hears too. The controller and
+    -- the mouse keep theirs (their arrows step values only).
+    local go = nav.act.enter
     if s.type == 'key' or s.type == 'button' then
       -- (in a fold, Left closes it with the cursor on it, as a file tree does; only then back to the list)
       if pressed('left') then
@@ -3556,7 +3622,7 @@ function M.install(ctx)
     -- (a held D-pad steps a value along, but a toggle or a two-way choice has only two: one flip a press, or a hold
     -- turns a mod off and on)
     local rep = nav.act[dir > 0 and 'right' or 'left'] == 'rep'
-    if s.type == 'toggle' and ((dir ~= 0 and not rep) or act('enter')) then set_row(r, not r.value)
+    if s.type == 'toggle' and ((dir ~= 0 and not rep) or nav.act.enter) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 and not (rep and #s.choices == 2) then
       local v = r.value + dir
       if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
@@ -3650,12 +3716,13 @@ function M.install(ctx)
   end
   -- The selected row's hint (or what else its clashing key is bound to) as lines of its own, w wide, at most `most`,
   -- the last one cut with dots when there's more. Wrapped again only when the text, its size, its room, the font or
-  -- the language changed: nav.hw keeps the lines and how many, so a frame makes nothing new.
+  -- the language changed, or the font measures anew (nav.fk): nav.hw keeps the lines and how many, so a frame makes
+  -- nothing new.
   nav.hw, nav.nf, nav.hl = {}, {}, {}          -- (nav.nf: the full screen look's note line, as drawn; nav.hl: nav.hint)
   function nav.hwrap(s, P, px, w, fit, most)
     local c, lv = nav.hw, ctx.lang_v and ctx.lang_v() or 0
-    if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most then return c.n end
-    c.s, c.px, c.w, c.P, c.lv, c.most = s, px, w, P, lv, most
+    if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most and c.fk == nav.fk then return c.n end
+    c.s, c.px, c.w, c.P, c.lv, c.most, c.fk = s, px, w, P, lv, most, nav.fk
     local cut = ctx.tr_cut
     if cut then cut(true) end
     local t, ws = P(s), nil
@@ -3965,7 +4032,7 @@ function M.install(ctx)
     -- (for what was used last, the keyboard, the mouse or the controller, as the full screen look's)
     local hy = y0 - ph + px
     local dev = menu.dev
-    if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
+    if dev == 'pad' and (not nav.pad or pad_row.value == 3 or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
     if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
     else
@@ -4354,7 +4421,7 @@ function M.install(ctx)
     -- the hints: for what was used last, the keyboard, the mouse or the controller (its buttons as pictures)
     ctx.rect(0, fh, w, b, line, top + 1)
     local dev = menu.dev
-    if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
+    if dev == 'pad' and (not nav.pad or pad_row.value == 3 or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
     local close_key = svc.util and svc.util.key_label(menu_key.value) or menu_key.value
     -- (a key bound more than once: the hint line says what else uses it, whatever was used last)
@@ -4363,10 +4430,11 @@ function M.install(ctx)
     -- strip has that room under its rule; the key hints stay)
     local note = clash and clash_drawn(clash, P) or (not menu.capture and not menu.typing and row_hint(ls[menu.sel]))
     if note then
-      -- (as drawn, kept on nav.nf: made again only when the note, its size, its room, the font or the language change)
+      -- (as drawn, kept on nav.nf: made again only when the note, its size, its room, the font or the language change,
+      -- or the font measures anew: nav.fk)
       local npx, nf, lv = max(2, px - 1), nav.nf, ctx.lang_v and ctx.lang_v() or 0
-      if nf.s ~= note or nf.px ~= npx or nf.w ~= w - 2 * m or nf.P ~= P or nf.lv ~= lv then
-        nf.s, nf.px, nf.w, nf.P, nf.lv, nf.t = note, npx, w - 2 * m, P, lv, fit(P(note), npx, w - 2 * m)
+      if nf.s ~= note or nf.px ~= npx or nf.w ~= w - 2 * m or nf.P ~= P or nf.lv ~= lv or nf.fk ~= nav.fk then
+        nf.s, nf.px, nf.w, nf.P, nf.lv, nf.fk, nf.t = note, npx, w - 2 * m, P, lv, nav.fk, fit(P(note), npx, w - 2 * m)
       end
       ctx.text(m, hy + rh, nf.t, npx, clash and yellow or nav.pc('hint', col), top + 2)
     end
@@ -4401,9 +4469,10 @@ function M.install(ctx)
     return s
   end
   function svc.menu_ever() return menu.ever == true end
+  -- (a whole .tmp beside the file is read ahead of it, saving.read: a hand-made line in the file needs that one gone)
   function svc.menu_key_note()
-    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt, see the README)',
-      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES))
+    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt and delete %s_settings.txt.tmp if it\'s there, see the README)',
+      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES, ctx.FILES))
   end
   -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
   -- menu is open and has the mouse (nil otherwise)
@@ -4470,12 +4539,11 @@ function M.install(ctx)
       -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
       go_back(); stepped = true
     end
-    -- (while a search is typed, a menu key that types what the search takes, a letter, a digit or a space, is part of
-    -- the search, not a close; F9 and the like still close it)
-    if not stepped and menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing)
-       or (mk ~= 'off' and pressed(mk)
-           and not (menu.typing and (mk:find('^%w$') or mk == 'space' or mk:find('^numpad %d$'))))) then
-      menu.open, menu.typing, nav.drag, svc.menu_up = false, false, nil, false
+    -- (nothing closes me while a search is typed, the menu's key included: search_input ends the typing first. Escape
+    -- the frame after it ended the typing is that same press, nav.tgap)
+    if not stepped and menu.open and menu.capture == nil and not menu.typing
+       and ((pressed('escape') and not nav.tgap) or (mk ~= 'off' and pressed(mk))) then
+      menu.open, nav.drag, svc.menu_up = false, nil, false
       if menu.ask then reset_ask(menu.ask, false) end
       return
     end
@@ -4573,8 +4641,15 @@ function M.install(ctx)
   -- that's off, so the hang watchdog stops that one call and there's no mod to switch off: a hook that hung is dropped as
   -- one that raised, and the boot goes on. Not once the game closes (ctx.closing, svc.shutdown): a boot script's
   -- on_shutdown may be swapping game files, and stopped half-way it leaves a broken one. A row that hung has no time left,
-  -- so the next callback gets a new one. A boot's own callback here is that boot's as its update is (ctx.boot_owner).
-  ctx.wide = { on = false }
+  -- so the next callback gets a new one (wide_row), but not inside the call it hung in: there it stays hung, so a mod
+  -- looping around a boot script's callback that hangs every time runs out of its own time, instead of getting it back
+  -- at every hang (a hang inside a call gives its caller a fresh clock). A boot's own callback here is that boot's as
+  -- its update is (ctx.boot_owner).
+  ctx.wide = { on = false, who = 'a boot script\'s look-alike callback' }
+  local function wide_row(D)
+    if D and D.hung[ctx.wide] and not D.owner then ctx.wide = { on = false, who = ctx.wide.who } end
+    return ctx.wide
+  end
   local box = {}
   local function boxed(owner, key, fn, ...)
     box[1], box[2] = guarded(owner, key, pcall, fn, ...)
@@ -4583,7 +4658,9 @@ function M.install(ctx)
   local function run_as(owner, key, fn, ...)
     box[1], box[2] = nil, nil
     local a, u = recs[owner], svc.util
-    if a and a.paused then return true end         -- (its look-alike hooks and guards wait, none of them dropped)
+    -- (a paused mod's look-alike hooks and guards wait, none dropped. As the game closes only its shutdown comes here:
+    -- svc.shutdown's guard stops and on_shutdown hooks, and the shutdown event emit_as let by; call_as holds the rest)
+    if a and a.paused and not ctx.closing then return true end
     if a and u then u.timed(a, boxed, owner, key, fn, ...)
     else
       if ctx.color_scope then ctx.color_scope() end
@@ -4591,11 +4668,11 @@ function M.install(ctx)
       local was = ctx.boot_owner
       if owner:find('^boot:') then ctx.boot_owner = owner end
       local po, ps, pl, pn
-      if D then po, ps, pl, pn = D.enter(ctx.wide, D.clock()) end
+      if D then po, ps, pl, pn = D.enter(wide_row(D), D.clock()) end
       boxed(owner, key, fn, ...)
       if D then
         D.leave(po, ps, pl, pn)
-        if D.hung[ctx.wide] then ctx.wide = { on = false } end
+        wide_row(D)
       end
       ctx.boot_owner = was
     end
@@ -4746,6 +4823,7 @@ function M.install(ctx)
         return true
       end,
       open_log = function(name)
+        if life and not life.on then return nil, 'the mod is off' end
         if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') or #name > 52 then
           return nil, 'log names are letters, digits, _ - and end in .log'
         end
@@ -4941,7 +5019,7 @@ function M.install(ctx)
       local p = shim.pending[id]
       if p then
         shim.pending[id] = nil
-        for _, c in ipairs(p) do on_change(r, c.owner, function(v) return c.fn(v, id) end) end
+        for _, c in ipairs(p) do on_change(r, c.owner, function(v) return c.fn(v, id) end, ctx.place_key('on_change', c.fn)) end
       end
       return true
     end
@@ -4965,7 +5043,8 @@ function M.install(ctx)
       -- (a boot script's through the game-wide set is that boot's, as its hooks are: make_bingus)
       local who = owner == 'ModOptionsMenu' and ctx.boot_owner or owner
       local r = mom_row(id)
-      if r then return on_change(r, who, function(v) return fn(v, id) end) end
+      -- (keyed by the mod's own function: my wrappers all sit in one place, and one key would skip every one of them)
+      if r then return on_change(r, who, function(v) return fn(v, id) end, ctx.place_key('on_change', fn)) end
       local p = shim.pending[id] or {}
       if #p >= 64 then return false end
       p[#p + 1] = { owner = who, fn = fn }
@@ -5327,6 +5406,8 @@ function M.install(ctx)
       end
       local handle = { status = views.statuses[name] }
       function handle.install()
+        -- (a guard a stopped copy made and kept: listed, it would run for that copy and keep its name from the next)
+        if life and not life.on then error('the mod is off', 0) end
         if g.installed then error('guard ' .. name .. ' already installed', 0) end
         if #shim.guards >= 256 then error('256 guards already installed', 0) end
         g.installed, status.installed, status.state = true, true, 'running'
@@ -5468,7 +5549,10 @@ function M.install(ctx)
       if g then g:close() end
       if type(src) == 'string' then
         local kind, mod = src:match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
-        if mod and mod:match(ctx.ALLOW) and not mod:find('//', 1, true) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
+        if mod and mod:sub(1, 24) == 'mods/chef_shared_loader/' then
+          -- (as at discovery: a mod there would compile under my chunk name, code my hang watchdog never stops)
+          log(fmt('skipped "-- HD2-%s: %s" in %s: mods/chef_shared_loader/ is my own folder, not one for mods', kind, mod, path))
+        elseif mod and mod:match(ctx.ALLOW) and not mod:find('//', 1, true) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
           out[#out + 1] = { kind = kind, name = mod, file = 'dev:' .. (path:match('[^\\/]+$') or path), src = src, dev = true, path = path }
         else
           log('dev mode: ' .. path .. ' has no "-- HD2-Addon/Boot/Options: mods/<author>/<name>" first line')
@@ -5616,7 +5700,14 @@ function M.install(ctx)
     for _, c in ipairs(list) do
       -- (one that a mod stopping in an earlier callback took away is skipped)
       if not c.off then
+        -- (start-up work: a start's time on the hang watchdog, under the record the call below enters as, so it takes
+        -- this clock and limit as its own. Only here, at launch: a late start's after_startup gets a call's.)
+        local D = not ctx.closing and ctx.dog or nil
+        local r = c.owner ~= 'loader' and (recs[c.owner] or wide_row(D)) or nil
+        local po, ps, pl, pn
+        if D and r then po, ps, pl, pn = D.enter(r, D.clock(), D.start) end
         local ok, err = call_as(c.owner, 'after_startup', c)
+        if D and r then D.leave(po, ps, pl, pn) end
         if not ok then log(fmt('[%s] after_startup: %s', c.owner, err_text(err))) end
       end
     end
@@ -5628,7 +5719,8 @@ function M.install(ctx)
   -- them, and only it: right after its start the after_startup callbacks it made as it started and the startup event,
   -- then past its first update (svc.late_world, svc.late_replay) the world it finds itself in and a mission already under
   -- way. The other mods hear nothing twice. The event protection is emit's. What's left out: players (the first look only
-  -- notes the count, as at launch) and menu (the menu is closed by then, as a mod takes it).
+  -- notes the count, as at launch) and menu (the menu is closed by then, as a mod takes it; a dev reload doesn't wait
+  -- for that, so its new copy hears the menu open, or the close would be the first it hears of it).
   function svc.late_start(owner)
     local list = {}
     for i = #after, 1, -1 do
@@ -5641,6 +5733,7 @@ function M.install(ctx)
       end
     end
     emit_as(owner, 'startup')
+    if menu.told then emit_as(owner, 'menu', true) end
   end
   -- At launch a mod hears its first world after its first updates, so what a start hears of it waits for those: queued
   -- here with the world it's for, and sent at the end of the next frame (the loader's frame), past that mod's first
@@ -5663,9 +5756,13 @@ function M.install(ctx)
       if w.stable and e.world ~= nil and e.world == last_world then
         local p = e.was
         local moved = not p or p.world ~= last_world
-        if p and p.mission and (moved or not last_mission) then emit_as(e.owner, 'mission_end', w.id) end
+        if p and p.mission and (moved or not last_mission) then emit_as(e.owner, 'mission_end', p.world) end
         if moved then emit_as(e.owner, 'world', last_world, w.mission == true) end
         if last_mission and (moved or not p.mission) then emit_as(e.owner, 'mission_start', w.id) end
+      -- (a load under way: the end of the mission it was in, which the others heard while it was paused, comes now;
+      -- the next world is the live emit's once it settles)
+      elseif e.was and e.was.mission and not last_mission and e.world ~= nil and e.world == last_world then
+        emit_as(e.owner, 'mission_end', e.was.world)
       end
     end
   end
@@ -5676,7 +5773,8 @@ function M.install(ctx)
   -- that goes for the pause, and so do a look-alike's dead zones and GUIs (rt.pause). As it's resumed it gets those back
   -- and what it would have heard: a row changed meanwhile, once, with its value now, the menu's close if it heard the
   -- menu open (that frame's emit comes before the resume), and the world and mission if they moved, the way a late start
-  -- hears them (svc.late_world). Nothing else is replayed.
+  -- hears them (svc.late_world). Nothing else is replayed. Its shutdown is the one call it still gets, as the game
+  -- closes (run_hook, and here ctx.closing): what it has to save is in that copy.
   function svc.pause(a)
     a.paused, a.on = { hold = nav.holds.by[a.name], world = last_world, mission = last_mission, menu = menu.told == true }, false
     svc.hold_mouse(a.name, false)
@@ -5751,7 +5849,12 @@ function M.install(ctx)
       end
     end
     local w = ctx.world
-    if w.stable and w.id ~= last_world then last_world = w.id; emit('world', w.id, w.mission == true) end
+    if w.stable and w.id ~= last_world then
+      -- (a mission that ends with the move, the ship loaded into its world, ends first and as its own world:
+      -- mission_end, then world, as with a new main world)
+      if last_mission and not w.mission and not w.checking then last_mission = false; emit('mission_end', last_world) end
+      last_world = w.id; emit('world', w.id, w.mission == true)
+    end
     -- while the loader looks again at a mission that may have ended (w.checking), it's still the mission it was: no
     -- mission_end and mission_start for a look
     if not w.checking then
@@ -5762,15 +5865,24 @@ function M.install(ctx)
       end
     end
     -- players: the session's player count and how many are still joining, looked at once a second, only while a mod
-    -- listens (the first look only notes them: a change since then is the event)
+    -- listens (the first look only notes them: a change since then is the event). A paused mod's listener isn't called,
+    -- so with only those there's no look, and the first one after a resume only notes them, as a resume replays none.
     if subs.players and svc.util then
       if ctx.now() >= seen.at then
         seen.at = ctx.now() + 1
-        local s = svc.util.session_now()
-        local n, j = s.on and max(1, s.peers) or 1, s.on and s.joining or 0
-        local was = seen.n
-        if was and (n ~= was or j ~= seen.j) then seen.n, seen.j = n, j; emit('players', n, j, was)
-        else seen.n, seen.j = n, j end
+        local live = false
+        for _, sb in ipairs(subs.players) do
+          local p = recs[sb.owner]
+          if sb.on and not (p and p.paused) then live = true; break end
+        end
+        if not live then seen.n, seen.j = nil, nil
+        else
+          local s = svc.util.session_now()
+          local n, j = s.on and max(1, s.peers) or 1, s.on and s.joining or 0
+          local was = seen.n
+          if was and (n ~= was or j ~= seen.j) then seen.n, seen.j = n, j; emit('players', n, j, was)
+          else seen.n, seen.j = n, j end
+        end
       end
     elseif seen.n then seen.n, seen.j, seen.at = nil, nil, 0 end
     if nav.holds.n > 0 then nav.hold_mods() end
@@ -6840,8 +6952,9 @@ function M.install(ctx, L)
   -- a file written whole as tmp put in place of path. Windows' rename won't replace a file, so the old one goes first
   -- (a crash in between leaves the .tmp, which is read when the file isn't there); os.rename answers nil and why
   -- when it fails, so its answer is checked, not just the pcall.
-  -- Without os.rename, or when it fails, the .tmp's text is written in place instead, so path ends up whole (and the
-  -- .tmp stays as a second copy until the next save).
+  -- Without os.rename, or when it fails, the .tmp's text is written in place instead, so path ends up whole, and the
+  -- .tmp goes: a whole settings .tmp is read ahead of its file (a save that couldn't be put in place), so one may only
+  -- be left when the file is the older copy.
   function util.replace(tmp, path)
     local o = L.os
     local why = 'no os.rename'
@@ -6860,7 +6973,10 @@ function M.install(ctx, L)
     if not g then return false, why end
     local okw = io_ok(pcall(g.write, g, text))
     local okc = io_ok(pcall(g.close, g))
-    if okw and okc then return true end
+    if okw and okc then
+      if o and o.remove then pcall(o.remove, tmp) end
+      return true
+    end
     -- a cut-off copy would be read before the whole .tmp: it goes
     if o and o.remove then pcall(o.remove, path) end
     return false, why
@@ -7105,6 +7221,9 @@ function M.install(ctx, L)
   local labels = {}                       -- ([0]: how many controller labels it keeps; names are strings)
   local function key_label(name)
     if type(name) ~= 'string' then return '' end
+    -- (no binding's name comes near 64 bytes: a longer one comes back as it is, so a mod's 'ctrl+ctrl+...' can't
+    -- make me keep a label for every one of its combos)
+    if #name > 64 then return name end
     local l = labels[name]
     if l == nil then
       -- a binding's combo ('ctrl+f6': 'Ctrl+' and the key's own name, kept once the key's is) or controller button
@@ -7247,6 +7366,7 @@ function M.install(ctx, L)
     if r_out <= 0 or r_in >= r_out then return end
     if a1 < a0 then a0, a1 = a1, a0 end
     local span = min(360, a1 - a0)
+    if span <= 0 then return end                      -- (no angle, no arc: the rects below would draw a square)
     local n = segments(r_out, span)
     if L.tri_ok() ~= false then
       -- a fan of engine triangles; if the first one isn't drawn, rects instead
@@ -7302,7 +7422,6 @@ function M.install(ctx, L)
       end
     end
   end
-  util.arc = arc
 
   -- ---------------------------------------------------------------- a ray against a box (chef.ray_box)
   -- The game gives Lua no physics world, so there's no raycast against the world: only Math.ray_box_intersection, a
@@ -7466,9 +7585,49 @@ function M.install(ctx, L)
     local slot = kind and kind.word .. '|' .. owner or owner
     local s = util.shots[slot]
     if not s then
-      local flat = M.flat_owner(owner)
+      -- (the mod's name as data_enc writes it, one to one: mods/a/b_c and mods/a_b/c get pictures and numbers of their
+      -- own, where the old flat name, a_b_c for both, gave them one. A mod with no number under its new key that has one
+      -- under its old key took pictures under the old name: those are renamed to the new one, once (the new key is
+      -- saved at once), and the number carries on, so it goes on writing over its oldest)
+      local flat = data_enc((owner:gsub('^mods/', '')))
       local key = (P.word .. '.' .. flat):sub(1, 64)
-      local n = L.saved_get and tonumber(L.saved_get(key)) or 0
+      local v = L.saved_get and L.saved_get(key)
+      if v == nil and L.saved_get then
+        local old = M.flat_owner(owner)
+        v = L.saved_get((P.word .. '.' .. old):sub(1, 64))
+        -- (only pictures that can be its own, as with chef.save_table's older names: never under an old name that
+        -- reads as a new one, '_2f' for the slash (mods/a/2fb's old a_2fb is mods/a/b's new name and key), nor one
+        -- another mod the loader found had too. Lower case first: Windows folds it. Then its number starts over and
+        -- what's under that name stays put.)
+        local mine = v ~= nil and not old:lower():find('_2f', 1, true)
+        for _, o in ipairs(mine and L.found and L.found() or {}) do
+          if type(o) == 'string' and o ~= owner and M.flat_owner(o):lower() == old:lower() then mine = false end
+        end
+        if v ~= nil and not mine then
+          once(P.word .. '_old:' .. owner, fmt('[%s] chef.capture: pictures under the older name %s_%s_<nn>%s could be another mod\'s too; left as they are', owner, old, P.word, C.ext))
+          v = nil
+        elseif v ~= nil then
+          -- (a picture still under its old name after this, held open or with no os.rename, is named in the log, so
+          -- the player can delete it: I never write to that name again. One that was never taken isn't there.)
+          local o, left, first = L.os, 0, nil
+          for i = 1, P.keep do
+            local from = fmt('%s_%s_%02d%s', old, P.word, i, C.ext)
+            local ok, done = false, nil
+            if o and o.rename and ctx.DIR then
+              ok, done = pcall(o.rename, ctx.DIR .. from, ctx.DIR .. fmt('%s_%s_%02d%s', flat, P.word, i, C.ext))
+            end
+            if not (ok and done) and ctx.open and ctx.DIR then
+              local f = ctx.open(ctx.DIR .. from, 'rb')
+              if f then pcall(f.close, f); left, first = left + 1, first or from end
+            end
+          end
+          if left > 0 then
+            once(P.word .. '_left:' .. owner, fmt('[%s] chef.capture: %d older picture(s) couldn\'t be renamed to its new name (%s first) and stay in my folder; they can be deleted', owner, left, first))
+          end
+          if L.saved_put then L.saved_put(key, v) end
+        end
+      end
+      local n = v ~= nil and tonumber(v) or 0
       s = { n = (n >= 0 and n <= P.keep) and floor(n) or 0, flat = flat, saved = key }
       util.shots[slot] = s
     end
@@ -7740,6 +7899,7 @@ function M.install(ctx, L)
     function chef.units_near(x, y, z, r, w)
       local out = {}
       if type(x) ~= 'number' or type(y) ~= 'number' or type(z) ~= 'number' or type(r) ~= 'number' then return out end
+      if r < 0 then return out end                    -- (squared, a negative radius would pass for its positive)
       local r2 = r * r
       for i = 1, w and 1 or #mine do
         local items = (w or mine[i]).items
@@ -7765,12 +7925,16 @@ function M.install(ctx, L)
       end
       return res
     end
+    -- (a position goes to the engine only as finite numbers, as chef.ray_box has it: a NaN or an infinity where a unit
+    -- or an effect should go is refused here, and nothing is asked of the engine; a missing one is 0)
     function chef.spawn(res, x, y, z)
       if not world.stable then return nil, 'no world yet' end
+      x, y, z = x or 0, y or 0, z or 0
+      if not (finite(x) and finite(y) and finite(z)) then return nil, 'x, y, z: finite numbers' end
       local id = id_of(res)
       if id == nil then return nil, 'no id' end
       if guarded(owner, 'Application.can_get', fn_of('Application.can_get'), 'unit', id) ~= true then return nil, 'unit ' .. tostring(res) .. ' is not loaded' end
-      local p = api('Vector3', x or 0, y or 0, z or 0)
+      local p = api('Vector3', x, y, z)
       if not p then return nil, 'no position' end
       local u, err = base_call('World.spawn_unit', world.main, id, p)
       if not u then return nil, err end
@@ -7816,8 +7980,10 @@ function M.install(ctx, L)
     end
     function chef.particles(res, x, y, z)
       if not world.stable then return nil, 'no world yet' end
+      x, y, z = x or 0, y or 0, z or 0
+      if not (finite(x) and finite(y) and finite(z)) then return nil, 'x, y, z: finite numbers' end
       local id = id_of(res)
-      local p = api('Vector3', x or 0, y or 0, z or 0)
+      local p = api('Vector3', x, y, z)
       if not (id and p) then return nil, 'no id or position' end
       local h, err = base_call('World.create_particles', world.main, id, p)
       if h == nil then return nil, err end
@@ -8698,7 +8864,7 @@ services.sandbox = (function()
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.5.1' }
+local M = { version = '1.5.2' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset = rawset
@@ -8709,6 +8875,65 @@ local s_find, s_match, s_gsub, s_sub, s_lower, s_byte, s_gmatch, s_rep = string.
 local s_format = string.format
 local t_concat = table.concat
 local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
+
+-- Patterns. Lua 5.1's matcher (match in lstrlib.c) has no depth limit of its own: each ?, *, + and - item recurses in C,
+-- so a long enough pattern runs the thread out of stack past any pcall, and the hang watchdog can't stop C. The depth
+-- can't pass the pattern's item count (plain characters loop, and a gsub callback runs after match has returned), so a
+-- cap on the length caps the stack. The worst case is a row of a* or .*, two C frames for two bytes: 96 to 100 bytes an
+-- item in x64 Linux's lua5.1, about 100 KB at this cap. Windows x64 adds a 32-byte shadow space to each call, and the
+-- game's own frames and stack size aren't known to me, so this is the power of two that stays under 256 KB with frames
+-- up to 2.5 times what I measured.
+local MAX_PATTERN = 2048
+M.MAX_PATTERN = MAX_PATTERN
+-- The capped find, match, gmatch, gsub and gfind, one set built here: each mod's string copy holds them (sb.env), and so
+-- do string methods (M.install). They read upvalues only, so the environment of these functions is never looked at, and
+-- a mod can't change it anyway (setfenv refuses, getfenv answers the mod's own: they're the loader's functions).
+-- Each takes ... and passes ... on, so C sees the arguments as the mod gave them (a missing one stays missing, an explicit
+-- nil stays nil).
+-- Why the pcall: a Lua tail call of a C function isn't a real one in 5.1, so my frame sits under C and C's errors (a
+-- malformed pattern, a bad argument) would name my line, and the log would blame the loader for a mod's mistake. Called
+-- from pcall C has no Lua caller, so no position at all, and back adds the mod's. The mods' errors go up through pcall
+-- places of mine that keep no stack, so this can't be mended where they're caught.
+do
+  -- the first word of each error of C's in these calls (lstrlib.c, and luaL_argerror's bad argument)
+  local C_WORDS = { bad = true, malformed = true, unbalanced = true, missing = true, invalid = true, too = true,
+                    unfinished = true }
+  -- What came out of pcall. C's own error goes out at the mod's line (1 is me, 2 the wrapper's tail call, 3 its caller),
+  -- with the name C couldn't see. Anything else comes from a gsub callback or a table's __index, and goes out as it came,
+  -- whatever it is: its own position stays, and the hang watchdog's stop is text with no position, so it isn't mistaken
+  -- for C's (the dog reads its error by text, and error(e, 0) hands back the same value).
+  local function back(name, ok, ...)
+    if ok then return ... end
+    local e = ...
+    if type(e) == 'string' and C_WORDS[s_match(e, '^%a+')] then
+      error((s_gsub(e, "'%?'", "'" .. name .. "'", 1)), 3)
+    end
+    error(e, 0)
+  end
+  local function too_long(name)
+    return s_format('string.%s: a pattern over %d bytes is off limits to Chef Shared Loader mods', name, MAX_PATTERN)
+  end
+  local function capped(name, real)
+    return function(...)
+      local _, p = ...
+      if type(p) == 'string' and #p > MAX_PATTERN then error(too_long(name), 2) end
+      return back(name, pcall(real, ...))
+    end
+  end
+  local find = string.find
+  M.capped = {
+    find = function(...)
+      local s, p, i, plain = ...
+      -- (a plain find of a string in a string, from a number or the start, has nothing C could raise, so it goes
+      -- straight to C, with no pcall: most finds a mod makes, s:find('x', 1, true))
+      if plain and type(s) == 'string' and type(p) == 'string' and (i == nil or type(i) == 'number') then return find(...) end
+      if type(p) == 'string' and #p > MAX_PATTERN and not plain then error(too_long('find'), 2) end   -- (plain never reaches match)
+      return back('find', pcall(find, ...))
+    end,
+    match = capped('match', string.match), gmatch = capped('gmatch', string.gmatch), gsub = capped('gsub', string.gsub),
+  }
+  if string.gfind then M.capped.gfind = capped('gfind', string.gfind) end   -- (stock 5.1's old name for gmatch)
+end
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
 local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true,
@@ -9088,6 +9313,14 @@ function M.install(ctx)
     HD2Runtime = false, SharedLoader = false,
   }
   local string_mt = getmetatable('')
+  -- s:find(...) never sees a mod's string copy: the VM reads the one metatable all strings share, whose __index is the
+  -- game's string table (a mod's getmetatable('') only shows it string_view, below). Nothing there can tell mods apart, so
+  -- the capped five go in front of that table for all the Lua in this state, and every other name still falls through
+  -- to the real one. My patterns are far under the cap. No mod holds this table: its only way in is the metatable.
+  if type(string_mt) == 'table' and rawget(string_mt, '__index') ~= M.capped then
+    setmetatable(M.capped, { __index = rawget(string_mt, '__index') })
+    rawset(string_mt, '__index', M.capped)
+  end
   -- the engine as mods see it: stingray and the globals without the tables (and calls) that aren't for them. A table
   -- left out reads as false in a mod's globals (nil would fall through to the game's).
   local engine_off = M.engine_off
@@ -9356,7 +9589,10 @@ function M.install(ctx)
       if type(lib) == 'table' then env[n] = copy(lib) end
     end
     -- (string.dump only makes bytecode, which load and loadstring refuse anyway)
-    if env.string then env.string.dump = nil end
+    if env.string then
+      env.string.dump = nil
+      for k, f in pairs(M.capped) do if env.string[k] then env.string[k] = f end end
+    end
     local string_view = { __index = env.string }     -- getmetatable('') gives this, not the game's
     -- this mod's copies of the engine tables (one per table: its Unit and its stingray.Unit are the same copy), and
     -- what the game's own globals and libraries are for it (its environment, its copies)
@@ -9569,8 +9805,9 @@ function M.install(ctx)
         end
         return f, err, code
       end,
+      -- (no path is refused like any other that isn't a file: io.lines() would read the game's console input, a C read
+      -- the hang watchdog can't stop)
       lines = function(path)
-        if path == nil then return io_.lines() end
         local asked, moved_name = path, nil
         path, moved_name = redirect(path)
         if moved_name then
@@ -9698,7 +9935,9 @@ function M.install(ctx)
     -- debug: the traceback and getinfo (without the function itself), nothing that reaches locals or upvalues
     local d = {}
     if type(dbg) == 'table' then
-      if dbg.traceback then d.traceback = function(...) return dbg.traceback(...) end end
+      -- (the C function itself: a wrapper of mine would be its first frame, and a mod's level one off, as a Lua call of a
+      -- C function is never a real tail call in 5.1)
+      if dbg.traceback then d.traceback = dbg.traceback end
       if dbg.getinfo then
         d.getinfo = function(f, what)
           -- (a leading '>' makes lua_getinfo take a function off the stack top; given a level, that's the option string
@@ -9862,8 +10101,18 @@ local USES = { ['Gui.rects'] = { 'Gui.rect', 'Vector3', 'Vector2', 'Color' },
                ['Gui.update_rect'] = { 'Gui.update_rect', 'Vector3', 'Vector2', 'Color' },
                ['Window.ui_state'] = { 'Window.get_main_window', 'Window.has_focus', 'Window.show_cursor', 'Window.mouse_focus' },
                ['Unit.set_material_at'] = { 'Unit.set_material', 'Unit.num_meshes', 'Unit.mesh', 'Mesh.num_materials',
-                                            'Mesh.material_slot_id' },
-               ['Keyboard.pressed'] = { 'Keyboard.pressed', 'Keyboard.button_index', 'Keyboard.num_buttons' } }
+                                            'Mesh.material_slot_id', 'Application.can_get' },
+               ['Keyboard.pressed'] = { 'Keyboard.pressed', 'Keyboard.button_index', 'Keyboard.num_buttons' },
+               -- (a resource or a font is asked about with Application.can_get before it's used)
+               ['World.spawn_unit'] = { 'World.spawn_unit', 'Application.can_get' },
+               ['Material.set_texture'] = { 'Material.set_texture', 'Application.can_get' },
+               ['Gui.text'] = { 'Gui.text', 'Application.can_get', 'Vector3', 'Color' },
+               ['Gui.update_text'] = { 'Gui.update_text', 'Application.can_get', 'Vector3', 'Color' },
+               ['Gui.text_extents'] = { 'Gui.text_extents', 'Application.can_get' },
+               -- and what every binding of a namespace asks first, keyed by the namespace alone (no need is a bare
+               -- name): a live unit (Unit.alive) for a unit, a mesh or a material, a listed world for a world or a GUI
+               Unit = { 'Unit.alive' }, Mesh = { 'Unit.alive' }, Material = { 'Unit.alive' },
+               World = { 'Application.worlds' }, Gui = { 'Application.worlds' } }
 -- the engine tables only a mod the loader trusts with the lobby gets anything from
 local LOBBY = { Steam = true, Friends = true, Network = true, SteamLobby = true }
 
@@ -9914,14 +10163,19 @@ function M.install(ctx)
     return worlds.list
   end
   -- once-a-frame answers (a world listed, a userdata a Unit): one table each, reused and emptied when the frame
-  -- changes, so they hold only what this frame asked about
+  -- changes, so they hold only what this frame asked about. (An emptied table keeps its size, and each emptying walks
+  -- all of it: after a frame that asked about more than 1,024 units the units' table is a new one.)
   local memo = { frame = -1, listed = {}, unit = {} }
   local function memo_frame()
     local f = ctx.frame()
     if memo.frame ~= f then
       memo.frame = f
       if next(memo.listed) then for k in pairs(memo.listed) do memo.listed[k] = nil end end
-      if next(memo.unit) then for k in pairs(memo.unit) do memo.unit[k] = nil end end
+      if next(memo.unit) then
+        local n = 0
+        for k in pairs(memo.unit) do memo.unit[k] = nil; n = n + 1 end
+        if n > 1024 then memo.unit = {} end
+      end
     end
   end
   -- a world the engine lists this frame
@@ -10316,7 +10570,11 @@ function M.install(ctx)
       for _ in pairs(guis) do n = n + 1 end
       if n >= GUIS_PER_MOD then return refuse(rec, b, 'GUI limit reached') end
       local g = once(rec, b, w, 'scale', 1, 1)
-      if g ~= nil then guis[g] = { world = w, count = 0, instance = ctx.instance and ctx.instance() } end
+      if g ~= nil then
+        guis[g] = { world = w, count = 0, instance = ctx.instance and ctx.instance() }
+        -- (made while paused, by a function it shared: hidden like its others, and shown at the resume as it sets it)
+        if rec.paused then guis[g].hid = true; once(rec, 'Gui.set_visible', g, false) end
+      end
       return g
     end
     function N.World.destroy_gui(w, g)
@@ -10918,11 +11176,15 @@ function M.install(ctx)
     end
     return o
   end
-  -- what a mod has of a grant: 'granted' (its list entry gives it), or nil (its entry doesn't give it, or it has none)
-  local function grant_state(owner, what)
-    local t = ctx.trusted(owner)
+  -- what a mod has of a grant: 'granted' (its list entry gives it), or nil (its entry doesn't give it, or it has none).
+  -- The lobby only under the key its entry names, as the Steam calls have it (net): another key would be granted here
+  -- and then refused there.
+  local function grant_state(rec, what)
+    local t = ctx.trusted(rec.owner)
     if not t then return nil end
-    if what == 'lobby' then return t.network and 'granted' or nil end
+    if what == 'lobby' then
+      return (t.network and rec.lobby_key ~= nil and rec.lobby_key == t.lobby_key) and 'granted' or nil
+    end
     return nil
   end
   local function new_mod(o, spec)
@@ -10987,9 +11249,10 @@ function M.install(ctx)
         have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
         -- (my wrapper is always there: what counts is what it asks of this build)
         for _, e in ipairs(have and USES[n] or {}) do if fn_of(e) == nil then have = false end end
+        for _, e in ipairs(have and USES[ns] or {}) do if fn_of(e) == nil then have = false end end
         if have and not USES[n] and fn_of(n) == nil then have = false end
-        if have and LOBBY[ns] then have = grant_state(o.name, 'lobby') ~= nil end
-      else have = grant_state(o.name, n) ~= nil end
+        if have and LOBBY[ns] then have = grant_state(rec, 'lobby') ~= nil end
+      else have = grant_state(rec, n) ~= nil end
       if not have then rec.missing[#rec.missing + 1] = n end
     end
     function handle.missing()
@@ -11004,7 +11267,7 @@ function M.install(ctx)
     function handle.request(what, why)
       if not GRANTS[what] then return nil, 'unknown request ' .. tostring(what) end
       if rec.state ~= 'active' then return nil, rec.state end
-      local state = grant_state(o.name, what)
+      local state = grant_state(rec, what)
       if state then return state end
       if not rec.said['request ' .. what] then
         rec.said['request ' .. what] = true
@@ -11965,8 +12228,9 @@ end
 -- suspected the first time ("suspect: <key>") and skipped if the next launch dies in it again: the game closed from
 -- outside mid-call, or ending for its own reasons mid-frame, mustn't switch a call or a feature off for good. Skips from
 -- the older rules are dropped once (except rule 2's certain ones). "version: <v>": the loader that wrote it. My own
--- skips (loader|...) are dropped when the loader changes: an update may well have fixed what crashed, and a skip of
--- mine can take away the drawing for every mod. "test: <n>": the Test build that wrote it, which counts as such a change.
+-- skips (loader|...) are dropped when the loader changes, and my suspicions with them: an update may well have fixed
+-- what crashed, and a skip of mine can take away the drawing for every mod. "test: <n>": the Test build that wrote it,
+-- which counts as such a change.
 -- "trace: stale": the crash trace wouldn't open, so its lines aren't this launch's to read (see below). "end": the
 -- last line, there only so a whole .tmp can be told from one cut off.
 -- "skip: shared|Unit.<call>:<kind>": a call on one kind of unit that ended the game for one mod, refused for every
@@ -11979,11 +12243,16 @@ end
 -- I record the fingerprint of the file that crashed when the trace names it (its "f" line); without one (a trace
 -- without them, or a boot script, whose key carries its fingerprint) it's 'pending' until a file is found. One
 -- still 'pending' at 0 has no file to compare: a mod's I mark 'gone', a boot script's goes (starter.unfound).
+-- "strikes: loader|scan <n> <version>": my unit scan's count, kept the same way. Its job is held over every frame of a
+-- scan, so a crash from anything else that lands while one is under way looks the same as one of its own, and a skip
+-- takes every mod's unit watch: it's skipped only at tr.CRASH_STRIKES. The count goes when I change, as my skips and
+-- suspicions do, so a new loader turns the scan off only after tr.CRASH_STRIKES launches of its own.
 local RULE = '3'
 local skip, off, dropped, suspect = {}, {}, {}, {}
 -- The crash trace's state (below) and the crash learning's: tr.shared (the refusals shared with every mod), tr.strikes
--- (name -> { n, fp }) and tr.CRASH_STRIKES, the launches in a row a mod ends the game before it's turned off (its call
--- is skipped once two launches in a row ended in it). (Fields, not locals: the loader is near Lua 5.1's 200 locals.)
+-- (name -> { n, fp }; my unit scan's under loader|scan) and tr.CRASH_STRIKES, the launches in a row a mod ends the game
+-- before it's turned off (its call is skipped once two launches in a row ended in it). (Fields, not locals: the loader
+-- is near Lua 5.1's 200 locals.)
 local tr = { bytes = 0, firsts = {}, singles = {}, last_tick = -1, cap = 200 * 1024, said = false,
   shared = { n = 0, of = {}, said = {} }, strikes = {}, CRASH_STRIKES = 4, fps = {}, crash_fps = {}, hseq = {}, hn = 0,
   -- the mods (and other mods' boot scripts, boot:<fingerprint>) the player asked to try again from my options menu
@@ -12047,6 +12316,12 @@ do
       if keep and ver ~= VERSION and (k:match('^loader|') or k:match('^shared|')) then keep = false end
       if keep then skip[k] = true else dropped[#dropped + 1] = k end
       if keep and k:match('^shared|') then tr.shared.n = tr.shared.n + 1 end
+    end
+    -- (my unit scan's count goes with my skips, and so does a suspicion of a call or job of mine: what they hold may be
+    -- what this loader fixed, and an older loader's suspicion kept would make its crash count as this one's first)
+    if ver ~= VERSION then
+      tr.strikes['loader|scan'] = nil
+      for k in pairs(suspect) do if sub(k, 1, 7) == 'loader|' then suspect[k] = nil end end
     end
     -- (the loader changed since the last launch: a crash from it isn't shared, it may be one I've fixed)
     tr.shared.moved = ver ~= VERSION
@@ -12397,18 +12672,30 @@ end
 -- of its own); its first call on each object breadcrumbed like any first call (a game that ends in it blames it for
 -- sure), and each run of calls held as a job while it goes on (blamed if a second launch ends in it). The sandbox
 -- checks the object exists first (sandbox.lua, sb.guard_engine). tr.reads: key -> { at = the last call (s), ids = the
--- objects already read in this world, n = how many (at most 4096 kept; emptied as a new world loads) }
+-- first 4096 objects read in this world, kept all world long, n = how many; more, old = the ones read past those, in
+-- two tables of 4096 in turn (a full more becomes old, and the old old goes), m = how many in more }, all emptied as a
+-- new world loads. An id in any of them is known (one found in old goes on into more), so an object read again and
+-- again is breadcrumbed once, and however many are read in turn, no read is breadcrumbed that the first 4096 alone
+-- wouldn't have breadcrumbed.
 tr.reads = {}
 function tr.guard_read(owner, key, id, fn, ...)
   local k = key_of(owner, key)
   if skip[k] then return nil, 'skipped' end
   local r = tr.reads[k]
-  if not r then r = { at = 0, ids = {}, n = 0 }; tr.reads[k] = r end
+  if not r then r = { at = 0, ids = {}, n = 0, more = {}, m = 0 }; tr.reads[k] = r end
   r.at = elapsed
   hold(k, true)
   tr.reads_held[k] = r
   if not r.ids[id] then
-    if r.n < 4096 then r.ids[id], r.n = true, r.n + 1 end
+    local known = false
+    if r.n < 4096 then r.ids[id], r.n = true, r.n + 1
+    elseif r.more[id] then known = true
+    else
+      known = r.old and r.old[id]
+      if r.m >= 4096 then r.old, r.more, r.m = r.more, {}, 0 end
+      r.more[id], r.m = true, r.m + 1
+    end
+    if known then return pass(pcall(fn, ...)) end
     crumb('> ' .. k)
     local a, b, c, d = pass(pcall(fn, ...))
     crumb('< ' .. k)
@@ -12513,9 +12800,13 @@ local function read_patch(f, name)
           local kind, mod = first:sub(9 + bom):match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
           local known = kind == 'Addon' or kind == 'Options' or kind == 'Boot' or kind == 'Lang'
           if known and mod and mod:find('//', 1, true) then known = nil end   -- (no empty part in a name)
+          -- (none in my own folder either: a mod there compiles under my chunk name, code my hang watchdog never stops)
+          local own = known and mod and mod:sub(1, 24) == 'mods/chef_shared_loader/'
+          if own then known = nil end
           if mod and not (known and mod:match(ALLOW)) and not scan.said[kind .. ' ' .. mod] then
             scan.said[kind .. ' ' .. mod] = true
-            log(fmt('skipped "-- HD2-%s: %s" in %s: %s', kind, mod, name:match('[^/]+$'), known
+            log(fmt('skipped "-- HD2-%s: %s" in %s: %s', kind, mod, name:match('[^/]+$'), own
+              and 'mods/chef_shared_loader/ is my own folder, not one for mods' or known
               and 'the name must be mods/<author>/<name>, more parts allowed (letters, digits, _ and -)' or known == false
               and 'HD2-Addon, HD2-Boot, HD2-Options or HD2-Lang was expected' or 'the name must be mods/<author>/<name> (no empty part)'))
           end
@@ -12568,6 +12859,23 @@ discover = function()
   end
   sort(found_addons, before)
   sort(found_named, before)
+  -- An addon and a boot-style script of one name share its switch and its crash key, so the same rule goes across both
+  -- kinds: every copy of a name joins the list of the one deployed last, after it, where the start loop skips it with
+  -- its two copies line (and an options file deployed with it is left out with it, scan.left_copy)
+  local first, moved = {}, false
+  for _, list in ipairs({ found_addons, found_named }) do
+    for _, r in ipairs(list) do
+      local f = first[r.name]
+      if not f or before(r, f.r) then first[r.name] = { r = r, list = list } end
+    end
+  end
+  for _, list in ipairs({ found_addons, found_named }) do
+    for i = #list, 1, -1 do
+      local to = first[list[i].name].list
+      if to ~= list then to[#to + 1] = table.remove(list, i); moved = true end
+    end
+  end
+  if moved then sort(found_addons, before); sort(found_named, before) end
 end
 end
 
@@ -12730,7 +13038,7 @@ local function update_world()
     world.instance = world.instance + 1
     -- (a new world, a new game session: its object ids start over, so a read's first call on each is breadcrumbed
     -- again)
-    for _, r in pairs(tr.reads) do r.ids, r.n = {}, 0 end
+    for _, r in pairs(tr.reads) do r.ids, r.n, r.more, r.m, r.old = {}, 0, {}, 0, nil end
     if was_stable then world_changed() end
   end
   if ask then world.time = type(t) == 'number' and t or -1 end
@@ -13096,7 +13404,7 @@ end
 
 local function scan_start()
   if skip['loader|scan'] then
-    if not scan_off_noted then scan_off_noted = true; log('the unit scan is off: the game ended twice while it ran (delete the state file to try again)') end
+    if not scan_off_noted then scan_off_noted = true; log(fmt('the unit scan is off: the game ended while it ran, %d launches in a row (delete the state file to try again)', tr.CRASH_STRIKES)) end
     return
   end
   -- nothing is built until a watcher is due: until then one number is compared each frame
@@ -13132,7 +13440,7 @@ local function scan_start()
     local t0 = clock()
     local list, why = res_lookup(kinds_of(due))
     if list and not (quiet and list[1]) then
-      for _, w in ipairs(due) do w.want_now, w.next = false, elapsed + w.every end
+      for _, w in ipairs(due) do w.want_now, w.next, w.at = false, elapsed + w.every, elapsed end
       hold('loader|scan', true)
       res_fill(due, list)
       hold('loader|scan', false)
@@ -13154,10 +13462,10 @@ local function scan_start()
     left_maybe(n)
     if world.checking or not world.mission then return end
   end
-  for _, w in ipairs(due) do w.want_now, w.next, w.building, w.walk_at = false, elapsed + w.every, {}, elapsed + res.QUIET end
+  for _, w in ipairs(due) do w.want_now, w.next, w.at, w.building, w.walk_at = false, elapsed + w.every, elapsed, {}, elapsed + res.QUIET end
   local kinds = kinds_of(due)
   job = { units = units, i = 0, due = due, kinds = kinds, world = world.id, instance = world.instance, t0 = clock(), cost = 0, frames = 0 }
-  hold('loader|scan', true)   -- a game that dies mid-scan twice in a row stops the scan (my crash rule for jobs)
+  hold('loader|scan', true)   -- held till the scan ends: a game that dies mid-scan is counted against it as a mod's crash is
   -- not trusted yet: the lookup's answer now, to compare with what this scan finds
   if res.state == nil and world.mission and not world.checking then
     local list, ms = res_lookup(kinds)
@@ -14835,7 +15143,7 @@ local function options_for(name)
         -- (on the hang watchdog's watch, on a record of its own: one that loops is stopped, and the mod isn't taken for
         -- hung, it starts without it)
         local D = svc.ctx.dog
-        local po, ps, pl, pn = D.enter({ on = false }, clock())
+        local po, ps, pl, pn = D.enter({ on = false, who = name .. '\'s options file' }, clock())
         ok, t = pcall(chunk)
         D.leave(po, ps, pl, pn)
         crumb('< ' .. k)
@@ -14918,6 +15226,8 @@ local function make_api(a)
     for k in pairs(kinds) do
       if type(k) == 'string' and k:match('^%x+$') then mission_kinds[k:lower()] = true; any = true end
     end
+    -- (once a mod: one that names its kinds every frame mustn't grow the list for good)
+    for i = 1, #kinds_from do if kinds_from[i] == a then any = false; break end end
     if any then kinds_from[#kinds_from + 1] = a end
     if world.stable and not world.mission and not world.probe_at and world.units >= PROBE_MIN and can_probe() then
       world.probe_at = elapsed
@@ -14950,20 +15260,24 @@ local function make_api(a)
   end
   function chef.watch(kinds, every)
     if type(kinds) ~= 'table' then return nil end
-    -- PERF: at most a list every 0.5 s (every = 0, or w.refresh() each frame, would keep the full scan running all the
-    -- time: 1,500 units a frame and two trace writes a scan, every frame in a small world)
+    -- PERF: at most a list every 0.5 s (every = 0, or w.refresh() or a pause and resume each frame, would keep the full
+    -- scan running all the time: 1,500 units a frame and two trace writes a scan, every frame in a small world). w.at:
+    -- when its last list started, which a refresh and a resume can't bring the next one nearer than 0.5 s to
     -- The record stays mine; the mod gets pub: the list and the calls, nothing the scan reads, so a mod can't reach its
     -- addon record or break the shared scan through it. Its kinds table is kept, not copied: a mod may change it in place.
     local pub = { items = {}, generation = 0, active = true }
-    local w = { owner = owner, a = a, kinds = kinds, every = max(0.5, tonumber(every) or 5), next = 0, generation = 0,
+    local w = { owner = owner, a = a, kinds = kinds, every = max(0.5, tonumber(every) or 5), next = 0, at = -1, generation = 0,
                 active = true, want_now = true, owner_on = function() return a.on end, scan_ms = 0, pub = pub, walk_at = 0 }
     watchers[#watchers + 1] = w
     watchers.next_at = 0
     function pub.pause() w.active = false; rawset(pub, 'active', false) end
     function pub.resume()
-      if not w.active and not w.stopped then w.active, w.want_now, w.walk_at, watchers.next_at = true, true, 0, 0; rawset(pub, 'active', true) end
+      if not w.active and not w.stopped then
+        w.active, w.next, w.walk_at, watchers.next_at = true, min(w.next, max(elapsed, w.at + 0.5)), 0, 0
+        rawset(pub, 'active', true)
+      end
     end
-    function pub.refresh() w.next, w.walk_at, watchers.next_at = min(w.next, max(elapsed, w.next - w.every + 0.5)), 0, 0 end
+    function pub.refresh() w.next, w.walk_at, watchers.next_at = min(w.next, max(elapsed, w.at + 0.5)), 0, 0 end
     -- for good: it leaves the scan's list
     -- (w.stopped: a scan under way holds w in its own list. Not w.active, which a pause clears too)
     function pub.stop()
@@ -15170,11 +15484,20 @@ end
 --   divides the gap, so a mod that keeps calling a helper of mine must not get away with it. So a mod inside a helper
 --   of mine that long is switched off even if its call then ends clean. The same goes for enter and leave, which have no
 --   owner for a few instructions: a count landing there is taken again as soon as there's one, so no loop hides in them.
--- - Time the mod's Lua didn't run is no hang. A million instructions take milliseconds, so a gap over dog.gap seconds
---   between two counts of a call (dog.tick: the last count, at first the outermost call's start) is an engine call or a
---   stall of the game. At a count past the call's limit or the outermost call's, the call's clock starts again, its
---   callers' and the outermost one's with it (dog.n, as after a hang). Once an outermost call (dog.stalled): a loop around
---   a slow engine call shows that gap at every count, and it still has to stop, one limit later.
+-- - Time the mod's Lua didn't run is no hang. A million instructions take milliseconds (under half a second even with
+--   the garbage collector working through a 125 MB heap), so a gap over dog.gap seconds between two counts of a call
+--   (dog.tick: the last count, at first the outermost call's start) is an engine call, a slow C function or a stall of
+--   the game. I take it off the clock of every call running, wherever it falls, short of a limit or past one: since,
+--   rsince and tick are on my clock less the time taken off in this outermost call (dog.skew), so the callers' clocks
+--   move on with the one the gap fell in. That time is one budget for the outermost call and every call inside it (a
+--   listener's gaps come out of the budget of the mod that sent the event): the first gap whole, however long (the
+--   machine stopped), and the rest up to twice the outermost call's limit in all. Twice, as the start-up work that
+--   needs most: a start's eight 2 s loads have 14 s taken off before the last one, 1.4 times its 10 s, and a call the
+--   machine stops twice for 3.5 s has 3.5 s taken off before the second, 1.2 times its 3. Past that a loop around a
+--   slow engine call, which shows that gap at every count, still stops, a limit after the budget ran out (an update's
+--   within about 13 s for a call of up to 5 s, a start's within about 40 s). A call that began inside the gap (a
+--   listener right after its sender's long engine call) starts from the gap's end, never earlier: its clock never
+--   reads below nothing.
 -- - A loop can spend nearly all its time inside callbacks it runs (an event's listener, an on_change), each a short call
 --   with a clock of its own, so a count almost never lands on the mod looping. A nested call by the same mod gets no
 --   fresh time. For the others I keep the outermost call's clock too (dog.root, rsince, rlim): counts past that limit in
@@ -15184,9 +15507,11 @@ end
 --   landing on that caller: the first one marks it, the next says it hung. So a call that runs one long callback last
 --   and ends isn't touched, and a loop is, on its second time around.
 -- - From then until the call ends the hook runs every instruction (on the thread it caught; another thread gets there
---   on its own next count, and a coroutine made meanwhile starts there), so the error lands on the mod's next
---   instruction of its own and a loop around its own pcall gets it again at once; a mod that hung gets no fresh time
---   on any other call before I switch it off.
+--   on its own next count, and a coroutine the mod that hung makes meanwhile starts there), so the error lands on the
+--   mod's next instruction of its own and a loop around its own pcall gets it again at once; a mod that hung gets no
+--   fresh time on any other call before I switch it off. Another mod's callback it runs meanwhile (a listener of its
+--   emit) goes back to every million while it runs (enter, leave): at every instruction it would run a hundred times
+--   slower and hang itself.
 -- - Armed, the hook stays set for the whole session while any mod is on, not only during a mod's call: my own code
 --   between the mods' calls runs under it too, the VM counting its count down on every instruction. That costs under one
 --   percent of the Lua's time on that thread (0.84%; a few microseconds a frame), about what setting and clearing it
@@ -15196,10 +15521,15 @@ end
 --   watchdog this session. The one exception is the hook of a loader that handed off to me (dog.take / dog.give).
 -- - It can't stop a stuck engine call: no Lua runs while one does. Nor a string pattern that backtracks: that's C too, no
 --   hook runs in it, and the crash guard doesn't help (it learns only a first call's hang). A start at launch gets
---   dog.start seconds. A late start (svc.ctx.late, a mission may be under way) gets a call's dog.limit: a real start
---   takes a few milliseconds.
+--   dog.start seconds, and so does the rest of the start-up work at launch: an HD2-Boot mod's or another boot script's
+--   init (call_boot) and the after_startup callbacks (svc.startup_done). A late start (svc.ctx.late, a mission may be
+--   under way) gets a call's dog.limit: a real start takes a few milliseconds.
+-- - Where it hung: the code the error first landed in (dog.where), for the log's stop line. A test build also logs each
+--   mark and hang with the call's numbers (dog.note: counts, biggest gap, gaps taken off), and at shutdown the biggest
+--   gap a mod's call had all session; only a test build keeps those numbers (TEST), a release spends nothing on them.
 starter.dog = { limit = 3, start = 10, lim = 3, owner = false, since = 0, n = 0, hung = {}, armed = false, at = 0, clock = clock,
-                root = false, rsince = 0, rlim = 3, rover = 0, tick = 0, stalled = false, gap = 1,
+                root = false, rsince = 0, rlim = 3, rover = 0, tick = 0, gap = 0.5, skew = 0, where = {},
+                cnt = 0, big = 0, nf = 0, t0 = 0, smax = 0, snf = 0,
                 sethook = type(debug) == 'table' and debug.sethook or nil,
                 gethook = type(debug) == 'table' and debug.gethook or nil,
                 getinfo = type(debug) == 'table' and debug.getinfo or nil }
@@ -15215,13 +15545,26 @@ function starter.dog.reset(count)
 end
 function starter.dog.hook()
   local D = starter.dog
-  local a, now = D.owner, clock()
+  local a, now = D.owner, clock() - D.skew
   -- (a count in enter or leave, with a call running: taken again on the next instruction, until there's an owner to read)
   if not a and D.root then D.sethook(D.hook, '', 1); return end
   if a then
-    -- (only past a limit: a gap that cost the call nothing doesn't use its one forgiveness up)
-    if now - D.tick > D.gap and not D.stalled and not D.hung[a] and (now - D.since > D.lim or now - D.rsince > D.rlim) then
-      D.stalled, D.since, D.rsince, D.rover, D.n = true, now, now, 0, D.n + 1
+    local g = now - D.tick
+    if TEST then
+      D.cnt = D.cnt + 1
+      if g > D.big then D.big = g end
+      if g > D.smax then D.smax, D.swho = g, D.who(a) end
+    end
+    -- (off every clock running, so off now too: the first gap whole, the rest out of what's left of the budget; a call
+    -- or the outermost one's clock that began inside the gap begins at its end)
+    if g > D.gap and not D.hung[a] then
+      local off = D.skew == 0 and g or min(g, 2 * D.rlim - D.skew)
+      if off > 0 then
+        D.skew, now, D.rover = D.skew + off, now - off, 0
+        if D.since > now then D.since = now end
+        if D.rsince > now then D.rsince = now end
+        if TEST then D.nf, D.snf = D.nf + 1, D.snf + 1 end
+      end
     end
     D.tick = now
   end
@@ -15237,11 +15580,13 @@ function starter.dog.hook()
   if not D.hung[a] then
     if D.over ~= D.since then
       D.over = D.since
+      if TEST then D.note(a, 'marked', now - D.since) end
       if not D.fast then D.sethook(D.hook, '', 1000000) end      -- (a count taken again above left it at 1)
       return
     end
     D.hung[a] = D.lim; D.hung[#D.hung + 1] = a
     D.n = D.n + 1                                -- (once a hang: a mod that hung, called again, renews no caller's clock)
+    if TEST then D.note(a, 'hung', now - D.since) end
   end
   -- (this thread's count, whatever thread set D.fast: hooks are per thread)
   D.fast = true
@@ -15249,8 +15594,20 @@ function starter.dog.hook()
   if c ~= 1 then D.sethook(D.hook, '', 1) end
   local info = D.getinfo(2, 'S')
   if not info or info.source == D.me then return end
+  if not D.where[a] then
+    D.where[a] = info.short_src .. ((info.linedefined or 0) > 0 and ', the function on line ' .. info.linedefined or ', its main chunk')
+  end
   error(fmt('stopped by the hang watchdog: it ran over %d s (an endless loop?)', D.lim), 0)
 end
+-- (test builds: a mark or a hang with the numbers of the call it's in)
+function starter.dog.note(a, what, ran)
+  local D = starter.dog
+  log(fmt('hang watchdog (test build): %s %s at %.2f s on its call\'s clock; the outermost call ran %.2f s, %d counts, '
+    .. 'biggest gap %.3f s, %d gap(s) taken off (%.2f s)', D.who(a), what, ran, clock() - D.t0, D.cnt, D.big, D.nf, D.skew))
+end
+-- (a row's name for those lines: a mod's or a boot's, else what the row says it is, a boot script's look-alike callback
+-- or an options file; one with none is mine)
+function starter.dog.who(a) return tostring(a.name or a.owner or a.who or 'the loader') end
 -- (not armed: nothing to note. A mod that hung already gets no time: its next count past my check raises.)
 -- There's no owner while since and lim change, here and in leave: the hook counts in my code too, and a count landing
 -- between the two writes must never read one mod with another's since. Between calls since rests at an old value, and
@@ -15261,9 +15618,15 @@ function starter.dog.enter(a, t0, lim)
   if not D.armed then return end
   local po, ps, pl, pn = D.owner, D.since, D.lim, D.n
   D.owner = false
-  D.since, D.lim = D.hung[a] and -1e9 or (po == a and ps or t0), lim or (po == a and pl) or D.limit
-  if not po then D.root, D.rsince, D.rlim, D.rover, D.tick, D.stalled = a, D.since, D.lim, 0, t0, false end
+  if not po then D.skew = 0 end
+  D.since, D.lim = D.hung[a] and -1e9 or (po == a and ps or t0 - D.skew), lim or (po == a and pl) or D.limit
+  if not po then
+    D.root, D.rsince, D.rlim, D.rover, D.tick = a, D.since, D.lim, 0, t0
+    if TEST then D.cnt, D.big, D.nf, D.t0 = 0, 0, 0, t0 end
+  end
   D.owner = a
+  -- (another mod's callback inside a call that hung: back to every million while it runs; leave puts the hung one's back)
+  if D.fast and not D.hung[a] then D.reset(1000000) end
   return po, ps, pl, pn
 end
 -- (a hang during the call: the caller's own count starts again now, and the outermost call's with it, so it isn't blamed
@@ -15273,22 +15636,28 @@ function starter.dog.leave(po, ps, pl, pn)
   local D = starter.dog
   if pn == nil then return end
   D.owner = false
+  local now = clock() - D.skew
   local fresh = D.n ~= pn and not (po and D.hung[po])
-  D.since = fresh and clock() or ps
-  if fresh then D.rsince, D.rover = D.since, 0 end
+  -- (a caller that came in after the last count, its callee's gap taken off from before it began: from now, as there)
+  local s = (fresh or ps > now) and now or ps
+  D.since = s
+  if fresh then D.rsince, D.rover = s, 0 end
   D.owner, D.lim = po, pl
   if not po then
     D.root = false
-  elseif D.rover > 1 and not D.hung[po] and clock() - ps > pl then
-    if D.over ~= ps then
-      D.over = ps
+  elseif D.rover > 1 and not D.hung[po] and now - s > pl then
+    if D.over ~= s then
+      D.over = s
+      if TEST then D.note(po, 'marked', now - s) end
     else
       D.hung[po] = pl; D.hung[#D.hung + 1] = po
       D.n, D.fast = D.n + 1, true
       D.reset(1)
+      if TEST then D.note(po, 'hung', now - s) end
     end
   end
-  if D.fast and not (po and D.hung[po]) then D.fast = false; D.reset(1000000) end
+  if D.fast and not (po and D.hung[po]) then D.fast = false; D.reset(1000000)
+  elseif D.fast then D.reset(1) end              -- (back in the call that hung: every instruction again)
 end
 -- On at start-up when there are mods to start (force), then looked at once a second (each thread that runs mods):
 -- off while no mod is on, on again when one is; another hook set (a profiler) is left alone for the session.
@@ -15358,17 +15727,20 @@ end
 function starter.dog.stops()
   local D = starter.dog
   if not D.hung[1] then return end
-  local list = D.hung
-  D.hung = {}
+  local list, where = D.hung, D.where
+  D.hung, D.where = {}, {}
   for _, a in ipairs(list) do
-    local ok, err = pcall(D.stop, a, list[a])
+    local ok, err = pcall(D.stop, a, list[a], where[a])
     if not ok then log('the hang watchdog: ' .. tr.why(err)) end
   end
 end
-function starter.dog.stop(a, lim)
+-- (where: the code the error first landed in, its file and the line its function starts on; none when the call ended
+-- inside a helper of mine)
+function starter.dog.stop(a, lim, where)
+  local at = where and '; it was running ' .. where or ''
   if a.of and a.on then                              -- (a callback kept on a stub's row: that one alone, starter.rat_keep)
     a.on = false
-    log(fmt('%s: the %s a mod it runs left in the game\'s globals hung (a call ran over %d s): I stopped that one', starter.boot_said(a), a.hook, lim))
+    log(fmt('%s: the %s a mod it runs left in the game\'s globals hung (a call ran over %d s): I stopped that one%s', starter.boot_said(a), a.hook, lim, at))
   elseif a.on ~= false then
     local why = fmt('it hung (a call ran over %d s)', lim)
     local name = a.name or a.owner or '?'
@@ -15381,7 +15753,7 @@ function starter.dog.stop(a, lim)
       if a.a then starter.off(a.a) else pcall(svc.forget, name) end   -- (a boot script's look-alike hooks end with it)
       starter.stopped(name, why)
     end
-    log(fmt('switched off %s for this session: %s', name, why))
+    log(fmt('switched off %s for this session: %s%s', name, why, at))
     -- (on screen a mod is named as my menu names it, another mod's boot script by the patch file it's in, as CRASH
     -- RECOVERY names them)
     local shown = starter.retry_what(name):upper()
@@ -15389,7 +15761,8 @@ function starter.dog.stop(a, lim)
   end
 end
 local function run_hook(a, hook, ...)
-  local ran = a.on and a.ran
+  -- (a paused mod gets its shutdown, and only that: what it has to save is in that copy. svc.pause)
+  local ran = (a.on or (a.paused and hook == 'shutdown')) and a.ran
   if not ran then return end
   local fn = rawget(a.module, hook)
   if not rawequal(fn, a.known[hook]) then fn = starter.hook_changed(a, hook, fn) end
@@ -15639,7 +16012,8 @@ function starter.env_for(name)
     local create, resume = co.create, co.resume
     local function hooked(f)
       local c = create(f)
-      if D.armed then pcall(D.sethook, c, D.hook, '', D.fast and 1 or 1000000) end
+      -- (every instruction only for one the mod that hung makes: another mod's, made in its callback, counts as usual)
+      if D.armed then pcall(D.sethook, c, D.hook, '', D.fast and D.owner and D.hung[D.owner] and 1 or 1000000) end
       return c
     end
     rawset(co, 'create', hooked)
@@ -16933,6 +17307,9 @@ function starter.dev_reload(list)
       if d.kind == 'Boot' then found, rows, key = found_named, boots, 'owner' end
       local at
       for i = #found, 1, -1 do if found[i].name == d.name then table.remove(found, i); at = i end end
+      -- (and from the other kind's list: one name is one mod, discover)
+      local other = found == found_addons and found_named or found_addons
+      for i = #other, 1, -1 do if other[i].name == d.name then table.remove(other, i) end end
       table.insert(found, at or #found + 1, d)
       -- (the sweep's answer for the fresh record: a host under me never reads a loose file, so one it left untouched is mine)
       if starter.rt_stub and starter.rt_host and starter.rt_mod(d) and starter.host_did(d.name) == nil then d.swept = true end
@@ -17298,7 +17675,7 @@ local function start_boots()
       log(fmt('kept off: %s (%s)', starter.retry_what(owner), off[owner].why))
     elseif n > 0 then
       boots[#boots + 1] = { owner = owner, file = top.file, env = cb, errors = 0, on = true, title = rat and starter.RAT or top.title,
-                            why = rat and starter.RAT or nil, rat = rat }
+                            why = rat and starter.RAT or nil, rat = rat, host = true }
       log(fmt('running the callbacks %s set before it started me (%d)', starter.retry_what(owner), n))
       starter.stays(owner, false)
     end
@@ -17320,7 +17697,8 @@ function starter.call_boot(b, hook, key, fn, ...)
   local t0 = clock()
   local D = starter.dog
   local po, ps, pl, pn
-  if hook ~= 'shutdown' or b.a then po, ps, pl, pn = D.enter(b, t0) end
+  -- (init comes once, at launch: start-up work, with a start's time. A late start's init is its own, with a call's.)
+  if hook ~= 'shutdown' or b.a then po, ps, pl, pn = D.enter(b, t0, hook == 'init' and D.start or nil) end
   local was = svc.ctx.boot_owner
   if not (b.a or b.rat) then svc.ctx.boot_owner = b.owner end
   -- (pcall inside the guard: an error is what raised, and a callback's own return of nil, 'text' is no error)
@@ -17357,17 +17735,22 @@ function starter.call_boot(b, hook, key, fn, ...)
   end
 end
 -- A boot row's callback: its global, else, for a boot-style mod on the HD2 Lua Runtime look-alike, its handle.on one (the
--- rule an addon's module has: run_hook)
+-- rule an addon's module has: run_hook). The boot that loaded me (b.host) has none while that callback is still the game's
+-- own global: the game calls it itself, and it's the one calling mine (a host that keeps my callbacks and runs them from
+-- its own, or one whose globals don't take what I set), so a call from me would run it twice.
 function starter.boot_fn(b, hook)
   local fn = rawget(b.env, hook)
   if fn == nil and b.rt then fn = b.rt[hook] end
+  if b.host and fn ~= nil and rawget(G, hook) == fn then return nil end
   return fn
 end
 -- (a stub's row is asked for callbacks it lost after every one of its calls, not once a frame: its mods run in those, and
 -- a callback that takes the game's update away from a render would be the last check an update pass ever made)
 local function call_boots(hook, ...)
   for _, b in ipairs(boots) do
-    if b.on then
+    -- (a paused boot-style mod still gets its shutdown as the game closes, as a paused addon does: what it has to save
+    -- is in that copy. Its kept callbacks below stay off.)
+    if b.on or (hook == 'shutdown' and b.paused) then
       starter.call_boot(b, hook, hook, starter.boot_fn(b, hook), ...)
       if b.kept then
         for _, c in ipairs(b.kept) do
@@ -17385,7 +17768,7 @@ end
 function starter.fresh(name)
   local p = name .. '|'
   for k in pairs(proven) do if sub(k, 1, #p) == p then proven[k] = nil end end
-  for k, r in pairs(tr.reads) do if sub(k, 1, #p) == p then r.ids, r.n = {}, 0 end end
+  for k, r in pairs(tr.reads) do if sub(k, 1, #p) == p then r.ids, r.n, r.more, r.m, r.old = {}, 0, {}, 0, nil end end
 end
 -- One waiting mod started, through the start loop's own steps with its kept record (the file read at launch: starting
 -- it reads nothing), or a dev reload's fresh one (how 'dev'; it stops what it replaces with its shutdown call first,
@@ -17554,7 +17937,9 @@ end
 -- A call to any of them that comes in while one of mine is running returns at once.
 function update(dt)
   if st.down or st.busy then return end        -- (the game called shutdown(): nothing runs after it)
-  if starter.begin_due then starter.init() end -- (a host that never calls my init: my mods start at its first update)
+  -- (no init call reached me before my first update: a host that never calls mine, or one whose globals don't hand back
+  -- what I set there. My init runs here, so under a hand-off my mods start now, and the boot-style mods get theirs.)
+  if not st.inited then starter.init(true) end
   st.busy = true
   if starter.handoff then pcall(starter.dog.take) end
   local ok, err = pcall(starter.update_body, dt)
@@ -17592,7 +17977,12 @@ function starter.update_body(dt)
   end
 end
 
-function init()
+-- My init, once a launch: from the game's init call, a host's, or my own first update when neither came. Mine is this
+-- field, never the global read back: under a host whose globals don't hand back what I set, that reads as the host's
+-- init or as nil. late: my first update runs it, so the game's init call went by without reaching me: it went to the
+-- boot that loaded me or to what that boot put in place of mine. Either way the init it set before it started me (its
+-- row in boots: start_boots) isn't mine to call now, so I leave it out.
+function starter.init(late)
   if st.inited then return end            -- (once: a loader that hands off can make it come twice)
   if starter.begin_due then               -- (under a hand-off my mods start here: starter.begin)
     starter.begin_due = nil
@@ -17602,6 +17992,12 @@ function init()
     if not ok then frame_error(err) end
   end
   st.inited = true
+  if late then
+    local host
+    for _, b in ipairs(boots) do if b.host and b.env.init then host = b; b.env.init = nil end end
+    log('no init call reached me before my first update, so my init runs there' .. (host and fmt(', leaving out the init %s ' ..
+      'set before it started me', starter.retry_what(host.owner)) or ''))
+  end
   if #boots > 0 and not st.busy then
     st.busy = true
     if starter.handoff then pcall(starter.dog.take) end
@@ -17611,7 +18007,8 @@ function init()
     if not ok then frame_error(err) end
   end
 end
-starter.init = init                       -- (mine: the global init is the host's again once a host has taken mine over)
+-- (the game's init: a call into mine. A host may keep it and call it later; from my first init on it does nothing.)
+function init() starter.init() end
 function starter.render()
   for _, a in ipairs(addons) do if a.born ~= frame_no then run_hook(a, 'render') end end
   if #boots > 0 then call_boots('render') end
@@ -17647,6 +18044,11 @@ function shutdown()
   pcall(svc.lang.flush, elapsed, true)
   pcall(svc.shutdown)
   pcall(svc.util.shutdown)
+  if TEST then
+    local D = starter.dog
+    pcall(log, fmt('hang watchdog (test build): the biggest gap between two counts inside a mod\'s call this session: %.3f s (%s); '
+      .. '%d gap(s) taken off', D.smax, tostring(D.swho or 'none'), D.snf))
+  end
   pcall(log, 'shutdown (clean)')
   pcall(crumb, '#### clean shutdown')
   if trace then pcall(trace.close, trace); trace = nil end
@@ -17757,7 +18159,11 @@ if blamed and tr.state_held then
   blamed = nil
 end
 if blamed and not suspect[blamed] then
-  if blamed_job then
+  if blamed == 'loader|scan' then
+    log(fmt('the last launch ended while %s was running; if the next one ends the same way, both count against my unit ' ..
+      'scan (%d counted so far), which is switched off at %d launches in a row', blamed,
+      tr.strikes[blamed] and tr.strikes[blamed].n or 0, tr.CRASH_STRIKES))
+  elseif blamed_job then
     log('the last launch ended while ' .. blamed .. ' was running; if the next one ends the same way, I skip it ' ..
       '(nothing is skipped or counted for it yet)')
   else
@@ -17766,8 +18172,9 @@ if blamed and not suspect[blamed] then
       'launch ends in it too, I skip it')
   end
   suspect = { [blamed] = true }
-  -- (a launch that may have ended in a mod's own call or job isn't one it didn't end: its count is kept, none added)
-  local owner = blamed:match('^([^|]+)|')
+  -- (a launch that may have ended in a mod's own call or job isn't one it didn't end: its count is kept, none added.
+  -- My unit scan's count is kept the same way, under its own key.)
+  local owner = blamed == 'loader|scan' and blamed or blamed:match('^([^|]+)|')
   if owner ~= 'loader' then tr.shared.struck = owner end
   blamed = nil
   save_state()
@@ -17778,23 +18185,36 @@ end
 -- (here blamed is the one suspected at the launch before: two launches in a row ended in it)
 if blamed then
   suspect = {}
-  skip[blamed] = true
-  local owner = blamed:match('^([^|]+)|')
-  log('the last launch crashed in: ' .. blamed .. ' (the launch before it ended in it too; that call is skipped from now on)')
+  -- My unit scan is counted as a mod is, under its own key (owner == blamed), and only skipped once that count turns it
+  -- off: its job is held over every frame of a scan, so a crash from anything else that lands mid-scan looks the same as
+  -- one in it, and its skip takes every mod's unit watch. (Held only around each frame's engine calls instead, it would
+  -- write two trace lines in every frame a scan runs.)
+  local owner = blamed == 'loader|scan' and blamed or blamed:match('^([^|]+)|')
+  if owner ~= blamed then
+    skip[blamed] = true
+    log('the last launch crashed in: ' .. blamed .. ' (the launch before it ended in it too; that call is skipped from now on)')
+  end
   -- (a language file's key carries its own fingerprint: skipping it is enough, no mod is turned off for it)
   if owner and owner ~= 'loader' and not blamed:match('^[^|]+|lang:%x+$') then
     -- the mod stays on (its call skipped) until it has ended tr.CRASH_STRIKES launches in a row; then it's turned off
     -- (I count it against the file that crashed, from its "f" line; without one, the next file found takes it). Both
-    -- launches count: the one it was suspected of kept the count it had, and was its crash too.
-    local s, cfp = tr.strikes[owner] or { n = 0 }, tr.crash_fps[owner] or 'pending'
+    -- launches count: the one it was suspected of kept the count it had, and was its crash too. My scan's count is
+    -- against my version.
+    local s, cfp = tr.strikes[owner] or { n = 0 }, owner == blamed and VERSION or tr.crash_fps[owner] or 'pending'
     s.n, s.fp = s.n + 2, cfp
     tr.shared.struck, tr.shared.counted = owner, true
     if s.n >= tr.CRASH_STRIKES then
       tr.strikes[owner] = nil
-      off[owner] = { fp = cfp, why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') .. ' (' .. s.n .. ' launches in a row)' }
+      if owner == blamed then skip[blamed] = true
+      else off[owner] = { fp = cfp, why = 'crashed the game in ' .. blamed:gsub('^[^|]+|', '') .. ' (' .. s.n .. ' launches in a row)' } end
     else
       tr.strikes[owner] = s
       -- (a mod's count is said once its file is read, a boot script's once it's really running: starter.stays)
+    end
+    if owner == blamed then
+      log(fmt('the last launch ended while %s was running, and so did the one before it: the unit scan %s', blamed,
+        skip[blamed] and fmt('is off from now on (%d launches in a row)', s.n) or
+        fmt('stays on (%d of the %d launches in a row that turn it off)', s.n, tr.CRASH_STRIKES)))
     end
     -- a call on one kind of unit (chef.call_kind; of my helpers only chef.lights passes the unit alone) that took only
     -- the unit is refused for every mod too, asked the same way: another mod asking it of that kind would end the game
@@ -17877,7 +18297,11 @@ if TEST then
   if ok and #err > 0 then
     for _, d in ipairs(err) do
       local list = d.kind == 'Addon' and found_addons or (d.kind == 'Boot' and found_named or found_options)
-      if d.kind ~= 'Options' then for i = #list, 1, -1 do if list[i].name == d.name then table.remove(list, i) end end end
+      -- (from both kinds' lists: an addon and a boot-style mod of one name are one mod, discover)
+      if d.kind ~= 'Options' then
+        for i = #found_addons, 1, -1 do if found_addons[i].name == d.name then table.remove(found_addons, i) end end
+        for i = #found_named, 1, -1 do if found_named[i].name == d.name then table.remove(found_named, i) end end
+      end
       list[#list + 1] = d
     end
     notices[#notices + 1] = { text = 'CHEF SHARED LOADER DEV MODE: ' .. #err .. ' FILE(S)', dur = 8 }
@@ -17959,6 +18383,9 @@ if starter.handoff then
 else
   starter.begin()
 end
+-- handed off from inside its init: the game's init call is under way, so mine runs now, as my load ends (mine, never
+-- the global read back)
+if chef_before.init_now then starter.init() end
 
 end
 end)
@@ -17966,5 +18393,23 @@ if not loader_ok then
   local ok, why = pcall(tostring, loader_err)
   why = 'failed to start: ' .. (ok and type(why) == 'string' and why or 'an error that can\'t be shown as text')
   if not (loader_log and pcall(loader_log, why)) and type(print) == 'function' then pcall(print, '[Chef Shared Loader] ' .. why) end
+  -- Nothing of mine runs on a start that broke half-way. Each of the game's four callbacks becomes a stand-in for the
+  -- one the boot that loaded me set before I replaced it (none set: it does nothing). It calls that one only while that
+  -- one isn't the game's own global (the game calls it then, and a host that keeps my callbacks and calls them from its
+  -- own would be calling itself through me), and never inside itself. So a boot that left my callbacks in the game's
+  -- globals gets its own called again, once each time, and a host that keeps mine is never handed its own.
+  local cb, busy, G0 = chef_before.cb, {}, _G
+  local rawget_, pcall_, error_, type_ = rawget, pcall, error, type
+  local function stand_in(k)
+    return function(...)
+      local f = cb[k]
+      if busy[k] or type_(f) ~= 'function' or (type_(G0) == 'table' and rawget_(G0, k) == f) then return end
+      busy[k] = true
+      local ok, err = pcall_(f, ...)
+      busy[k] = false
+      if not ok then error_(err, 0) end
+    end
+  end
+  init, update, render, shutdown = stand_in('init'), stand_in('update'), stand_in('render'), stand_in('shutdown')
+  if loader_log then pcall(loader_log, 'the game\'s callbacks are stand-ins for the ones set before me: nothing of mine runs in this launch') end
 end
-if loader_ok and chef_before.init_now then init() end

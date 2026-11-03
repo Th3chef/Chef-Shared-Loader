@@ -34,7 +34,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.5.1' }
+local M = { version = '1.5.2' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset = rawset
@@ -45,6 +45,65 @@ local s_find, s_match, s_gsub, s_sub, s_lower, s_byte, s_gmatch, s_rep = string.
 local s_format = string.format
 local t_concat = table.concat
 local real_loadstring, real_setfenv, real_getfenv = loadstring, setfenv, getfenv
+
+-- Patterns. Lua 5.1's matcher (match in lstrlib.c) has no depth limit of its own: each ?, *, + and - item recurses in C,
+-- so a long enough pattern runs the thread out of stack past any pcall, and the hang watchdog can't stop C. The depth
+-- can't pass the pattern's item count (plain characters loop, and a gsub callback runs after match has returned), so a
+-- cap on the length caps the stack. The worst case is a row of a* or .*, two C frames for two bytes: 96 to 100 bytes an
+-- item in x64 Linux's lua5.1, about 100 KB at this cap. Windows x64 adds a 32-byte shadow space to each call, and the
+-- game's own frames and stack size aren't known to me, so this is the power of two that stays under 256 KB with frames
+-- up to 2.5 times what I measured.
+local MAX_PATTERN = 2048
+M.MAX_PATTERN = MAX_PATTERN
+-- The capped find, match, gmatch, gsub and gfind, one set built here: each mod's string copy holds them (sb.env), and so
+-- do string methods (M.install). They read upvalues only, so the environment of these functions is never looked at, and
+-- a mod can't change it anyway (setfenv refuses, getfenv answers the mod's own: they're the loader's functions).
+-- Each takes ... and passes ... on, so C sees the arguments as the mod gave them (a missing one stays missing, an explicit
+-- nil stays nil).
+-- Why the pcall: a Lua tail call of a C function isn't a real one in 5.1, so my frame sits under C and C's errors (a
+-- malformed pattern, a bad argument) would name my line, and the log would blame the loader for a mod's mistake. Called
+-- from pcall C has no Lua caller, so no position at all, and back adds the mod's. The mods' errors go up through pcall
+-- places of mine that keep no stack, so this can't be mended where they're caught.
+do
+  -- the first word of each error of C's in these calls (lstrlib.c, and luaL_argerror's bad argument)
+  local C_WORDS = { bad = true, malformed = true, unbalanced = true, missing = true, invalid = true, too = true,
+                    unfinished = true }
+  -- What came out of pcall. C's own error goes out at the mod's line (1 is me, 2 the wrapper's tail call, 3 its caller),
+  -- with the name C couldn't see. Anything else comes from a gsub callback or a table's __index, and goes out as it came,
+  -- whatever it is: its own position stays, and the hang watchdog's stop is text with no position, so it isn't mistaken
+  -- for C's (the dog reads its error by text, and error(e, 0) hands back the same value).
+  local function back(name, ok, ...)
+    if ok then return ... end
+    local e = ...
+    if type(e) == 'string' and C_WORDS[s_match(e, '^%a+')] then
+      error((s_gsub(e, "'%?'", "'" .. name .. "'", 1)), 3)
+    end
+    error(e, 0)
+  end
+  local function too_long(name)
+    return s_format('string.%s: a pattern over %d bytes is off limits to Chef Shared Loader mods', name, MAX_PATTERN)
+  end
+  local function capped(name, real)
+    return function(...)
+      local _, p = ...
+      if type(p) == 'string' and #p > MAX_PATTERN then error(too_long(name), 2) end
+      return back(name, pcall(real, ...))
+    end
+  end
+  local find = string.find
+  M.capped = {
+    find = function(...)
+      local s, p, i, plain = ...
+      -- (a plain find of a string in a string, from a number or the start, has nothing C could raise, so it goes
+      -- straight to C, with no pcall: most finds a mod makes, s:find('x', 1, true))
+      if plain and type(s) == 'string' and type(p) == 'string' and (i == nil or type(i) == 'number') then return find(...) end
+      if type(p) == 'string' and #p > MAX_PATTERN and not plain then error(too_long('find'), 2) end   -- (plain never reaches match)
+      return back('find', pcall(find, ...))
+    end,
+    match = capped('match', string.match), gmatch = capped('gmatch', string.gmatch), gsub = capped('gsub', string.gsub),
+  }
+  if string.gfind then M.capped.gfind = capped('gfind', string.gfind) end   -- (stock 5.1's old name for gmatch)
+end
 
 -- the file kinds a mod may write, and the Windows device names no file may be called
 local MOD_EXT = { log = true, txt = true, json = true, csv = true, dat = true, ini = true,
@@ -424,6 +483,14 @@ function M.install(ctx)
     HD2Runtime = false, SharedLoader = false,
   }
   local string_mt = getmetatable('')
+  -- s:find(...) never sees a mod's string copy: the VM reads the one metatable all strings share, whose __index is the
+  -- game's string table (a mod's getmetatable('') only shows it string_view, below). Nothing there can tell mods apart, so
+  -- the capped five go in front of that table for all the Lua in this state, and every other name still falls through
+  -- to the real one. My patterns are far under the cap. No mod holds this table: its only way in is the metatable.
+  if type(string_mt) == 'table' and rawget(string_mt, '__index') ~= M.capped then
+    setmetatable(M.capped, { __index = rawget(string_mt, '__index') })
+    rawset(string_mt, '__index', M.capped)
+  end
   -- the engine as mods see it: stingray and the globals without the tables (and calls) that aren't for them. A table
   -- left out reads as false in a mod's globals (nil would fall through to the game's).
   local engine_off = M.engine_off
@@ -692,7 +759,10 @@ function M.install(ctx)
       if type(lib) == 'table' then env[n] = copy(lib) end
     end
     -- (string.dump only makes bytecode, which load and loadstring refuse anyway)
-    if env.string then env.string.dump = nil end
+    if env.string then
+      env.string.dump = nil
+      for k, f in pairs(M.capped) do if env.string[k] then env.string[k] = f end end
+    end
     local string_view = { __index = env.string }     -- getmetatable('') gives this, not the game's
     -- this mod's copies of the engine tables (one per table: its Unit and its stingray.Unit are the same copy), and
     -- what the game's own globals and libraries are for it (its environment, its copies)
@@ -905,8 +975,9 @@ function M.install(ctx)
         end
         return f, err, code
       end,
+      -- (no path is refused like any other that isn't a file: io.lines() would read the game's console input, a C read
+      -- the hang watchdog can't stop)
       lines = function(path)
-        if path == nil then return io_.lines() end
         local asked, moved_name = path, nil
         path, moved_name = redirect(path)
         if moved_name then
@@ -1034,7 +1105,9 @@ function M.install(ctx)
     -- debug: the traceback and getinfo (without the function itself), nothing that reaches locals or upvalues
     local d = {}
     if type(dbg) == 'table' then
-      if dbg.traceback then d.traceback = function(...) return dbg.traceback(...) end end
+      -- (the C function itself: a wrapper of mine would be its first frame, and a mod's level one off, as a Lua call of a
+      -- C function is never a real tail call in 5.1)
+      if dbg.traceback then d.traceback = dbg.traceback end
       if dbg.getinfo then
         d.getinfo = function(f, what)
           -- (a leading '>' makes lua_getinfo take a function off the stack top; given a level, that's the option string

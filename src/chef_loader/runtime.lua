@@ -73,8 +73,18 @@ local USES = { ['Gui.rects'] = { 'Gui.rect', 'Vector3', 'Vector2', 'Color' },
                ['Gui.update_rect'] = { 'Gui.update_rect', 'Vector3', 'Vector2', 'Color' },
                ['Window.ui_state'] = { 'Window.get_main_window', 'Window.has_focus', 'Window.show_cursor', 'Window.mouse_focus' },
                ['Unit.set_material_at'] = { 'Unit.set_material', 'Unit.num_meshes', 'Unit.mesh', 'Mesh.num_materials',
-                                            'Mesh.material_slot_id' },
-               ['Keyboard.pressed'] = { 'Keyboard.pressed', 'Keyboard.button_index', 'Keyboard.num_buttons' } }
+                                            'Mesh.material_slot_id', 'Application.can_get' },
+               ['Keyboard.pressed'] = { 'Keyboard.pressed', 'Keyboard.button_index', 'Keyboard.num_buttons' },
+               -- (a resource or a font is asked about with Application.can_get before it's used)
+               ['World.spawn_unit'] = { 'World.spawn_unit', 'Application.can_get' },
+               ['Material.set_texture'] = { 'Material.set_texture', 'Application.can_get' },
+               ['Gui.text'] = { 'Gui.text', 'Application.can_get', 'Vector3', 'Color' },
+               ['Gui.update_text'] = { 'Gui.update_text', 'Application.can_get', 'Vector3', 'Color' },
+               ['Gui.text_extents'] = { 'Gui.text_extents', 'Application.can_get' },
+               -- and what every binding of a namespace asks first, keyed by the namespace alone (no need is a bare
+               -- name): a live unit (Unit.alive) for a unit, a mesh or a material, a listed world for a world or a GUI
+               Unit = { 'Unit.alive' }, Mesh = { 'Unit.alive' }, Material = { 'Unit.alive' },
+               World = { 'Application.worlds' }, Gui = { 'Application.worlds' } }
 -- the engine tables only a mod the loader trusts with the lobby gets anything from
 local LOBBY = { Steam = true, Friends = true, Network = true, SteamLobby = true }
 
@@ -125,14 +135,19 @@ function M.install(ctx)
     return worlds.list
   end
   -- once-a-frame answers (a world listed, a userdata a Unit): one table each, reused and emptied when the frame
-  -- changes, so they hold only what this frame asked about
+  -- changes, so they hold only what this frame asked about. (An emptied table keeps its size, and each emptying walks
+  -- all of it: after a frame that asked about more than 1,024 units the units' table is a new one.)
   local memo = { frame = -1, listed = {}, unit = {} }
   local function memo_frame()
     local f = ctx.frame()
     if memo.frame ~= f then
       memo.frame = f
       if next(memo.listed) then for k in pairs(memo.listed) do memo.listed[k] = nil end end
-      if next(memo.unit) then for k in pairs(memo.unit) do memo.unit[k] = nil end end
+      if next(memo.unit) then
+        local n = 0
+        for k in pairs(memo.unit) do memo.unit[k] = nil; n = n + 1 end
+        if n > 1024 then memo.unit = {} end
+      end
     end
   end
   -- a world the engine lists this frame
@@ -527,7 +542,11 @@ function M.install(ctx)
       for _ in pairs(guis) do n = n + 1 end
       if n >= GUIS_PER_MOD then return refuse(rec, b, 'GUI limit reached') end
       local g = once(rec, b, w, 'scale', 1, 1)
-      if g ~= nil then guis[g] = { world = w, count = 0, instance = ctx.instance and ctx.instance() } end
+      if g ~= nil then
+        guis[g] = { world = w, count = 0, instance = ctx.instance and ctx.instance() }
+        -- (made while paused, by a function it shared: hidden like its others, and shown at the resume as it sets it)
+        if rec.paused then guis[g].hid = true; once(rec, 'Gui.set_visible', g, false) end
+      end
       return g
     end
     function N.World.destroy_gui(w, g)
@@ -1129,11 +1148,15 @@ function M.install(ctx)
     end
     return o
   end
-  -- what a mod has of a grant: 'granted' (its list entry gives it), or nil (its entry doesn't give it, or it has none)
-  local function grant_state(owner, what)
-    local t = ctx.trusted(owner)
+  -- what a mod has of a grant: 'granted' (its list entry gives it), or nil (its entry doesn't give it, or it has none).
+  -- The lobby only under the key its entry names, as the Steam calls have it (net): another key would be granted here
+  -- and then refused there.
+  local function grant_state(rec, what)
+    local t = ctx.trusted(rec.owner)
     if not t then return nil end
-    if what == 'lobby' then return t.network and 'granted' or nil end
+    if what == 'lobby' then
+      return (t.network and rec.lobby_key ~= nil and rec.lobby_key == t.lobby_key) and 'granted' or nil
+    end
     return nil
   end
   local function new_mod(o, spec)
@@ -1198,9 +1221,10 @@ function M.install(ctx)
         have = type(rec.engine[ns]) == 'table' and type(rec.engine[ns][call]) == 'function'
         -- (my wrapper is always there: what counts is what it asks of this build)
         for _, e in ipairs(have and USES[n] or {}) do if fn_of(e) == nil then have = false end end
+        for _, e in ipairs(have and USES[ns] or {}) do if fn_of(e) == nil then have = false end end
         if have and not USES[n] and fn_of(n) == nil then have = false end
-        if have and LOBBY[ns] then have = grant_state(o.name, 'lobby') ~= nil end
-      else have = grant_state(o.name, n) ~= nil end
+        if have and LOBBY[ns] then have = grant_state(rec, 'lobby') ~= nil end
+      else have = grant_state(rec, n) ~= nil end
       if not have then rec.missing[#rec.missing + 1] = n end
     end
     function handle.missing()
@@ -1215,7 +1239,7 @@ function M.install(ctx)
     function handle.request(what, why)
       if not GRANTS[what] then return nil, 'unknown request ' .. tostring(what) end
       if rec.state ~= 'active' then return nil, rec.state end
-      local state = grant_state(o.name, what)
+      local state = grant_state(rec, what)
       if state then return state end
       if not rec.said['request ' .. what] then
         rec.said['request ' .. what] = true

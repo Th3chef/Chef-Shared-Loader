@@ -22,7 +22,11 @@ local TWO32, TWO31 = 4294967296, 2147483648
 local ROUND = 6755399441055744
 
 -- I work in unsigned 0 .. 2^32-1 internally and only convert to signed on the way out.
+-- A missing value (nil, the usual mistake) is a bad argument at the mod's own line: level 3 is the caller of the bit
+-- function that called me, so the log doesn't blame my line. Only nil: a type() call on every operand costs a third
+-- more on the cheap calls, and anything else that isn't a number is rare enough to raise the arithmetic error below.
 local function tou(x)
+  if x == nil then error('bad argument to bit (number expected, got nil)', 3) end
   x = ((x + ROUND) - ROUND) % TWO32
   if x ~= x then return 0 end -- NaN and +-inf come out as 0, like LuaJIT
   return x
@@ -141,8 +145,12 @@ function bit.rol(x, n)
   return tos((u * POW[n + 1]) % TWO32 + floor(u / POW[32 - n + 1]))
 end
 
+-- (rol's sum with the shift turned around, not a call of rol: a tail call to it would leave no frame for tou's level 3,
+-- and a bad argument would come out with no line at all)
 function bit.ror(x, n)
-  return bit.rol(x, 32 - tou(n) % 32)
+  n = tou(n) % 32
+  local u = tou(x)
+  return tos((u * POW[32 - n + 1]) % TWO32 + floor(u / POW[n + 1]))
 end
 
 function bit.bswap(x)

@@ -94,15 +94,17 @@ end
 -- the menu's own key, named when drawn), and what they do. A pair is drawn whole or not at all; opt: a pair left out
 -- when the whole line doesn't fit. Each key and word is translated on its own.
 -- The keys shown are the ones the game ignores: the arrows ('<' and '>' are Left and Right, the only arrows both fonts
--- have), Delete, '/' and the menu's own key. Enter, Escape and Backspace still work in my menu but the game hears them
--- too (Enter opens its chat and the letters typed after it go there, Escape and Backspace its pause screen), so the
--- hints never offer them where another key does the same.
+-- have), Delete and the menu's own key, plus the search's keys. The game hears those too, on purpose: Enter opens its
+-- chat, which keeps the letters from its controls while I read them (a second Enter sends them), and Escape closes the
+-- chat unsent. Backspace and Escape are its pause screen when no chat is open, so the hints never offer them where
+-- another key does the same.
+-- (the typing line's order is what's left in a narrow panel: the pairs go from the end, so ENTER SENDS is the last)
 local KEY_NOW = false
 local HINTS = {
   capture_default = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'DEFAULT' } },
   capture_none = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'NONE' } },
-  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'DOWN', word = 'RESULTS' }, { 'BKSP', word = 'ERASE' },
-             { '/', word = 'EXIT' } },
+  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ENTER', word = 'SENDS' }, { 'ESC', word = 'DONE' },
+             { 'BKSP', word = 'ERASE' } },
   -- (in an entry or a search: on a key or a button, Right acts and Left goes back; value is a toggle's, a choice's, a
   -- slider's or a color's, where Left and Right change it; back is the Back row's, where both go back)
   group = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
@@ -120,7 +122,7 @@ local HINTS = {
                   { KEY_NOW, word = 'CLOSE' } },
   value = { { 'ARROWS', word = 'MOVE', opt = true }, { '<', '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
             { KEY_NOW, word = 'CLOSE' } },
-  list = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'OPEN' }, { '/', word = 'SEARCH' },
+  list = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'OPEN' }, { 'ENTER', word = 'SEARCH' },
            { KEY_NOW, word = 'CLOSE' } },
   -- (on a mod's heading, a fold: closed, Right opens it and Left goes back; open, Left closes it, FOLD so it doesn't
   -- read as the menu's own CLOSE next to it)
@@ -307,13 +309,30 @@ function M.install(ctx)
       return UNESCAPE[c] and UNESCAPE[c] .. hex
     end
     -- The file's lines into t. False and the code when the main file is there but wouldn't open: 2 is "no such file", and
-    -- a code that isn't a number tells me nothing, so neither counts.
+    -- a code that isn't a number tells me nothing, so neither counts. A .tmp that ends in save_now's last line is a
+    -- whole save that couldn't be put in place (a read-only or locked file): the newest copy there is, so it goes ahead
+    -- of the file it couldn't replace, as the crash state's does. Any other .tmp is read only when there's no file, and
+    -- one that's there but wouldn't open, with no file, counts as a file that wouldn't: it may be the only copy.
     function saving.read(t)
-      local f, _, code = ctx.open(SETTINGS_FILE, 'rb')
-      local refused = f == nil and type(code) == 'number' and code ~= 2
+      local tmp = SETTINGS_FILE .. '.tmp'
+      local f, _, tcode = ctx.open(tmp, 'rb')
+      local whole, refused, code, held = false, false, nil, SETTINGS_FILE
+      if f then
+        local oks, size = pcall(f.seek, f, 'end')
+        if oks and type(size) == 'number' and pcall(f.seek, f, 'set', max(0, size - 8)) then
+          local okr, tail = pcall(f.read, f, '*a')
+          whole = okr and type(tail) == 'string' and ('\n' .. tail):find('\nend\r?\n$') ~= nil
+        end
+        if whole then pcall(f.seek, f, 'set', 0) else pcall(f.close, f); f = nil end
+      end
+      if not f then
+        f, _, code = ctx.open(SETTINGS_FILE, 'rb')
+        refused = f == nil and type(code) == 'number' and code ~= 2
+        if not f and not refused and type(tcode) == 'number' and tcode ~= 2 then refused, code, held = true, tcode, tmp end
+      end
       -- (only the .tmp is there when the game ended between taking the old file away and putting the new one in place;
       -- only the old folder's copy when the one-time move failed this launch: M.UNMOVED)
-      f = f or ctx.open(SETTINGS_FILE .. '.tmp', 'rb') or (M.UNMOVED and M.UNMOVED['_settings.txt'] and ctx.open(M.UNMOVED['_settings.txt'], 'rb'))
+      f = f or ctx.open(tmp, 'rb') or (M.UNMOVED and M.UNMOVED['_settings.txt'] and ctx.open(M.UNMOVED['_settings.txt'], 'rb'))
       if f then
         for line in f:lines() do
           if line:sub(-1) == '\r' then line = line:sub(1, -2) end
@@ -327,7 +346,7 @@ function M.install(ctx)
         end
         f:close()
       end
-      if refused then return false, code end
+      if refused then return false, code, held end   -- (held: the file that wouldn't open, the .tmp or the main one)
       return true
     end
     -- the file again, while it's blocked: true once it read and the changes since start-up went on top of it
@@ -344,10 +363,10 @@ function M.install(ctx)
       log('the settings file reads again: its values are kept, with what changed since start-up on top')
       return true
     end
-    local ok, code = saving.read(store)
+    local ok, code, held = saving.read(store)
     if not ok then
       saving.blocked = {}
-      log(fmt('the settings in %s could not be read (error %s): this launch runs without them, and nothing is saved over the file until it reads', SETTINGS_FILE, tostring(code)))
+      log(fmt('the settings in %s could not be read (error %s): this launch runs without them, and nothing is saved over the file until it reads', held, tostring(code)))
     end
   end
   -- a number as text that reads back as the same number (tostring alone keeps 14 digits)
@@ -378,6 +397,8 @@ function M.install(ctx)
           if ok then ok = io_ok(pcall(f.write, f, m, '\t', k, '\t', ty, '\t', text, '\n')) end
         end
       end
+      -- (the last line tells a whole .tmp from one cut off, saving.read; every reader skips a line it doesn't know)
+      if ok then ok = io_ok(pcall(f.write, f, 'end\n')) end
       ok = io_ok(pcall(f.close, f)) and ok
       if ok and replace then ok = replace(tmp, SETTINGS_FILE) end
     end
@@ -455,7 +476,8 @@ function M.install(ctx)
   local function call_as(owner, what, c, ...)
     if owner == 'loader' then return pcall(c.fn, ...) end
     local p = recs[owner]
-    if p and p.paused then return true end         -- (nothing of a paused mod is called: svc.pause)
+    -- (nothing of a paused mod is called, svc.pause: of its events, emit_as lets only the game's shutdown by)
+    if p and p.paused and what ~= 'event' then return true end
     local k = c.key
     if k == nil then k = ctx.place_key(what, c.fn); c.key = k end
     if k then return svc.run_as(owner, k, c.fn, ...) end
@@ -510,11 +532,14 @@ function M.install(ctx)
     local list = subs[event]
     if not list then return 0 end
     local n = 0
+    -- (a paused mod hears the game's shutdown as the game closes, and no other event: not one a running mod's shutdown
+    -- listener emits then)
+    local wake = ctx.closing and event == 'shutdown'
     emitting = emitting + 1
     for i = 1, #list do
       local sb = list[i]
-      local p = sb and recs[sb.owner]              -- (a paused mod's listener stays, uncalled and not counted)
-      if sb and sb.on and (only == nil or sb.owner == only) and not (p and p.paused) then
+      local p = sb and recs[sb.owner]              -- (a paused mod's stays, uncalled and uncounted but by wake)
+      if sb and sb.on and (only == nil or sb.owner == only) and not (p and p.paused and not wake) then
         local ok, err = call_as(sb.owner, 'event', sb, ...)
         -- (one the crash guard skips didn't run: it isn't counted, and it's no error of its own; said once)
         local held = not ok and err == 'skipped'
@@ -824,6 +849,9 @@ function M.install(ctx)
     if not ok then log(fmt('[%s] option %s not saved: %s', row.owner, row.id, tostring(err))) end
     -- each callback runs as the mod that asked for it ({ fn, owner, on }; a mod that stops has its own switched off)
     for _, c in ipairs(row.changed) do
+      -- (a callback that set the row again, a clamp say, already ran them all with that value: the rest of this
+      -- pass is stale)
+      if row.value ~= v then break end
       if c.on then
         local p = recs[c.owner]
         c.due = p and p.paused                     -- (a paused mod hears the row's value as it's resumed: svc.resume)
@@ -832,9 +860,10 @@ function M.install(ctx)
       end
     end
   end
-  local function on_change(row, owner, fn)
+  -- (key: the crash key, for a wrapper of mine around the mod's own function: call_as)
+  local function on_change(row, owner, fn, key)
     if #row.changed >= 64 then return false end
-    row.changed[#row.changed + 1] = { fn = fn, owner = owner, on = true }
+    row.changed[#row.changed + 1] = { fn = fn, owner = owner, on = true, key = key }
     return true
   end
   -- a button pressed: its run(), then its on_change callbacks (with true), each as the mod that asked for it. Nothing
@@ -1014,7 +1043,10 @@ function M.install(ctx)
     end
     -- saved settings
     -- (keys starting with opt. are my options menu's: a mod's rows are saved under them, chef.option)
+    -- (a copy that stopped saves and sets nothing: a library's shared function can still run its code. A paused one
+    -- still does: it's the copy that carries on, and its shutdown may save)
     function chef.save(key, value)
+      if a.on == false and not a.paused then return nil, 'the mod is off' end
       if type(key) == 'string' and key:find('^opt%.') then return nil, 'keys starting with opt. are the options menu\'s' end
       if type(key) == 'string' and saving.over(owner, key, value) then return false, 'a mod saves 256 KB at most' end
       return put(owner, key, value)
@@ -1097,6 +1129,7 @@ function M.install(ctx)
     -- (a # row is mine, not the mod's: its switch and its reset are the player's. By the row, not the id: an id can be a
     -- table whose tostring reads #on)
     function chef.set(id, v)
+      if a.on == false and not a.paused then return nil, 'the mod is off' end
       local r = rows_by_id[owner .. '|' .. tostring(id)]
       if r and tostring(r.short):sub(1, 1) ~= '#' then as_caller(a, set_row, r, v); return r.value end
     end
@@ -1105,7 +1138,8 @@ function M.install(ctx)
       if r and type(fn) == 'function' and a.on ~= false then return on_change(r, owner, fn) end
       return false
     end
-    -- a button row: Right (Enter too, or a click) runs fn as this mod; text is what the row shows on its right ('RUN')
+    -- a button row: Right (the pad's confirm, or a click) runs fn as this mod; text is what the row shows on its right
+    -- ('RUN')
     function chef.button(id, label, fn, text)
       return chef.option(id, { type = 'button', label = label, run = fn, text = text })
     end
@@ -1503,7 +1537,6 @@ function M.install(ctx)
   -- the loader's own saved values that aren't a row (the language picked, by name)
   function svc.loader_get(key) return get(loader_mod, key) end
   function svc.loader_put(key, v) return put(loader_mod, key, v) end
-  function svc.menu_key_name() return menu_key.value end
   -- ---------------------------------------------- the menu's look, controller and mouse
   -- Rows of their own in the loader's group. The controller: the engine's own pads (Pad1..Pad8, the first one active,
   -- its buttons found by the names the pad lists), the D-pad moves, cross/A picks, circle/B goes back (and closes
@@ -1636,7 +1669,8 @@ function M.install(ctx)
   -- cursor axis (mouse_read asks for it; without one the camera turns while the menu is open); a mod's hold needs just
   -- the delta axis, since only svc.mouse_delta reads the cursor while it's held.
   -- on: mine; had: what I found; off: not this session; paused: not until the menu closes; ever: a cursor was read
-  -- down: the game is closing (svc.shutdown gave it back): never taken again
+  -- down: the game is closing (svc.shutdown gave it back): never taken again; nocur: no cursor was ever read, so my
+  -- menu doesn't take it this session (a mod's hold still does)
   local HOLD = 917351
   -- (clean: the looks in a row since the hold was let go that found the dead zone not mine: hold_heal)
   nav.hold = { on = false, had = nil, off = false, paused = false, other = nil, ever = false, heal_at = 0, bad = 0, clean = 0 }
@@ -1744,12 +1778,7 @@ function M.install(ctx)
       H.res_at = 0                                       -- (asked again next frame: the window may have changed size)
       return nil
     end
-    local mx, my = x * w / rw, y * h / rh
-    if ctx.TEST and (H.logs or 0) < 40 and ctx.now() >= (H.log_at or 0) then        -- (test builds: where it reads)
-      H.logs, H.log_at = (H.logs or 0) + 1, ctx.now() + 1
-      log(fmt('options menu (test): cursor %.0f, %.0f of %.0f x %.0f -> menu %.0f, %.0f of %d x %d', x, y, rw, rh, mx, my, w, h))
-    end
-    return mx, my
+    return x * w / rw, y * h / rh
   end
   -- the mouse's axes and buttons (no answer yet, the mouse not ready in the first frames on some setups: asked again
   -- every 2 s)
@@ -1785,7 +1814,7 @@ function M.install(ctx)
     nav.game_cursor = shown                             -- (then the game's own cursor is the one drawn: not mine)
     local H = nav.hold
     H.quiet = nil                                       -- (my menu has the mouse: its next give-back is logged)
-    if not shown and A.cursor then nav.hold_take() end
+    if not shown and A.cursor and not H.nocur then nav.hold_take() end
     if shown then
       if H.on then nav.hold_give() end
       local cx, cy = nav.cursor_at(w, h)
@@ -1820,8 +1849,10 @@ function M.install(ctx)
           nav.hold_give(); H.other, H.bad = nil, 0
           if H.ever then H.paused = true
           else
-            H.off = true
-            log('options menu: the mouse turns the camera while the menu is open (no cursor position)')
+            -- (my menu's own take alone: a mod's hold needs no cursor, H.off would refuse it every hold. Said once: a
+            -- mod's hold that my menu lands on comes back here at each opening)
+            if not H.nocur then log('options menu: the mouse turns the camera while the menu is open (no cursor position)') end
+            H.nocur = true
           end
         end
       end
@@ -1979,9 +2010,9 @@ function M.install(ctx)
   end
   -- the cursor: an arrow, ink edged. Not drawn while the controller is what was used last (a button pressed, or the
   -- menu opened by its hold): the mouse moving, a click or the wheel brings it back in that frame, a key too (the
-  -- hints change with them). The pad gone, it's back.
+  -- hints change with them). The pad gone, or the controller row set to Off, it's back.
   function nav.draw_cursor(top, h)
-    if not (nav.mouse and nav.mx) or nav.game_cursor or (menu.dev == 'pad' and nav.pad) then return end
+    if not (nav.mouse and nav.mx) or nav.game_cursor or (menu.dev == 'pad' and nav.pad and pad_row.value ~= 3) then return end
     local c = max(2, floor(h / 400 + 0.5))
     local x, y, col = floor(nav.mx), floor(nav.my), ctx.color
     local edge, fill = col(17, 17, 17, 255), col(255, 231, 16, 255)
@@ -2011,9 +2042,9 @@ function M.install(ctx)
     sorted_cache.ver, sorted_cache.gs = ver.layout, gs
     return gs
   end
-  -- the lines shown: the list of mods; the open mod's options; or, with a search typed after '/', every mod whose
-  -- title has it (whole) and every option whose label (or heading) has it, under its mod's title and the headings it's
-  -- under in its entry
+  -- the lines shown: the list of mods; the open mod's options; or, with a search typed, every mod whose title has it
+  -- (whole) and every option whose label (or heading) has it, under its mod's title and the headings it's under in its
+  -- entry
   local lines_cache = { ver = -1, search = nil, group = nil, out = nil }
   -- A group's rows as lines. My own rows carry a section: they're shown by section, each under its heading, in the
   -- order below (any other row of a section after those, in the order it was made).
@@ -2794,37 +2825,62 @@ function M.install(ctx)
     end
     return got
   end
-  -- the search: '/' starts typing; letters, digits and spaces go in, Backspace (or Delete) takes one off, Down or Up
-  -- (or Enter) keeps it (the list filtered by it), '/' again or Escape leaves it (the typed text comes from
-  -- Keyboard.keystrokes, through the utilities)
+  -- The search: Enter starts typing, anywhere in my menu. The game opens its chat on that same press, and the chat keeps
+  -- the letters from its controls; the search box is the chat's. I never open it or read it: the text comes from
+  -- Keyboard.keystrokes, through the utilities, so with no chat to open (the title screen, say) the search works the
+  -- same and the letters reach the game too. No call tells me the chat is open and none can stop it
+  -- sending, so menu.typing is my guess at it, kept in step by what closes it: Escape or a click close it unsent, Enter
+  -- sends what's in it (with nothing in it, it just closes). Each of those ends the typing and keeps what it found, the
+  -- cursor on the first line found (none found: the Back row; nothing typed: the whole list). A guess that goes wrong
+  -- costs a stray letter in the game until the next Escape. The arrows and the menu's key wait for that: the chat stays
+  -- open until then, and a menu closed over it would leave the text one Enter from being sent. A click counts with my
+  -- menu's mouse off too: the two buttons are read here then, only while typing, from how they stood when the typing
+  -- began (a button already down is no click, nav.tl and nav.tr). It ends the typing and presses no row.
+  -- Letters, digits and spaces go in. Backspace follows the box: one letter off for each 8 in the keystrokes, so a held
+  -- key takes them as fast as the box loses them; a press that brings no 8 still takes one. Delete takes one off too.
+  -- (one press can land in two frames, the key's edge in one and its keystroke in the next: nav.tgap is the frame after
+  -- the typing started or ended, where Enter or Escape is still that press, menu_frame asks it for Escape; nav.bs is
+  -- where last frame's Backspace came from, 'list' or 'key', so its other half takes no second letter)
   local function search_input()
-    local typed = svc.util and svc.util.typed() or ''
+    local typed, raw = '', nil
+    if svc.util then typed, raw = svc.util.typed() end
+    local same = nav.tgap
+    nav.tgap = false
     if not menu.typing then
       -- (the list is still drawn with nothing typed: line 1, line 2 is for the results under the Back row)
-      if typed:find('/', 1, true) then menu.typing, menu.search, menu.sel, menu.top, nav.drag = true, '', 1, 1, nil end
-      if menu.typing then menu.group = nil end
+      if pressed('enter') and not same then
+        menu.typing, menu.search, menu.sel, menu.top, nav.drag, menu.group = true, '', 1, 1, nil, nil
+        nav.tgap, nav.bs, nav.tl, nav.tr = true, nil, true, true
+      end
       return false
     end
     for ch in typed:gmatch('[%w ]') do
       if #menu.search < 20 then menu.search = menu.search .. ch:lower(); menu.sel, menu.top = 2, 1 end
     end
-    if pressed('delete') or pressed('backspace') then
-      menu.search = menu.search:sub(1, -2)
+    local stop, off = pressed('enter') or pressed('escape'), 0
+    for i = 1, raw and #raw or 0 do
+      local k = raw[i]
+      if k == 13 or k == 27 then stop = true elseif k == 8 then off = off + 1 end
+    end
+    local was = nav.bs
+    nav.bs = nil
+    if off > 0 then
+      nav.bs = 'list'
+      if was == 'key' then off = off - 1 end
+    elseif pressed('backspace') and was ~= 'list' then off, nav.bs = 1, 'key' end
+    if pressed('delete') then off = off + 1 end
+    if off > 0 then
+      menu.search = menu.search:sub(1, -1 - off)
       menu.sel, menu.top = menu.search == '' and 1 or 2, 1
     end
-    if pressed('enter') then menu.typing = false end
-    -- Down keeps it with the cursor on the first line found, Up on the last (none found: the Back row; nothing typed:
-    -- the list's first mod), so a search never needs Enter, which also opens the game's chat. The keys only: this
-    -- frame's press is used up here, the cursor never steps on with it
-    local d = pressed('down') and 1 or (pressed('up') and -1 or 0)
-    if d ~= 0 then
-      menu.typing, menu.sel, menu.top = false, 1, 1
-      if menu.search ~= '' then local ls = lines(); nav.step(ls, #ls, d) end
+    local click = nav.click or nav.rclick
+    if not nav.mouse then
+      local A = nav.find_axes()
+      local l, r = nav.button_down(A.l), nav.button_down(A.r)
+      click = (l and not nav.tl) or (r and not nav.tr)
+      nav.tl, nav.tr = l, r
     end
-    -- ('/' again or Escape leaves the search: the whole list back)
-    if typed:find('/', 1, true) or pressed('escape') then
-      menu.typing, menu.search, menu.sel, menu.top = false, '', 1, 1
-    end
+    if (stop and not same) or click then menu.typing, nav.tgap = false, true end
     return true
   end
   -- The search as the header draws it (word: my word for it, the full screen look's; the language translates that word
@@ -2934,20 +2990,22 @@ function M.install(ctx)
     elseif act('page down') then for _ = 1, 8 do step(ls, n, 1) end
     elseif act('page up') then for _ = 1, 8 do step(ls, n, -1) end end
     local l = ls[menu.sel]
-    -- a mod in the list: Enter (or Right) opens its options, the cursor on its first option (Back is just above it)
+    -- (nav.act.enter is the pad's confirm or a click: the keyboard's Enter is the search's, search_input)
+    -- a mod in the list: Right (or the pad's confirm, a click) opens its options, the cursor on its first option (Back is
+    -- just above it)
     if l and l.pick then
-      if act('enter') or act('right') then open_group(menu.sel, l.pick) end
+      if nav.act.enter or act('right') then open_group(menu.sel, l.pick) end
       return
     end
     -- (the Back row: on the keyboard Right goes back too, as it acts on a key or a button row)
     if l and l.back then
-      if act('enter') or act('left') or pressed('right') then go_back() end
+      if nav.act.enter or act('left') or pressed('right') then go_back() end
       return
     end
-    -- a fold (a mod's heading): Enter (the pad's confirm, a click) opens or closes it; Right opens it, or steps into it
-    -- when it's open; Left closes it, or goes back to the list when it's closed (the keyboard's, as on a key row)
+    -- a fold (a mod's heading): the pad's confirm or a click opens or closes it; Right opens it, or steps into it when
+    -- it's open; Left closes it, or goes back to the list when it's closed (the keyboard's, as on a key row)
     if l and l.fold then
-      if act('enter') or (l.open and act('left')) or (not l.open and act('right')) then
+      if nav.act.enter or (l.open and act('left')) or (not l.open and act('right')) then
         -- (the hold that opened it does no more, as open_group's: it has to be let go first)
         if not l.open then nav.rep.right = math.huge end
         nav.fold_set(l, l.open)
@@ -2960,10 +3018,10 @@ function M.install(ctx)
     local s = r.spec
     local dir = act('right') and 1 or (act('left') and -1 or 0)
     if act('delete') then set_row(r, r.default); return end
-    -- A key or a button has no value to step: on the keyboard, Right does what Enter does (a capture, a press) and Left
-    -- goes back to the list, so neither needs Enter or Backspace, which the game hears too. The controller and the
-    -- mouse keep theirs (their arrows step values only).
-    local go = act('enter')
+    -- A key or a button has no value to step: on the keyboard, Right does what the pad's confirm does (a capture, a
+    -- press) and Left goes back to the list, so neither needs Backspace, which the game hears too. The controller and
+    -- the mouse keep theirs (their arrows step values only).
+    local go = nav.act.enter
     if s.type == 'key' or s.type == 'button' then
       -- (in a fold, Left closes it with the cursor on it, as a file tree does; only then back to the list)
       if pressed('left') then
@@ -2978,7 +3036,7 @@ function M.install(ctx)
     -- (a held D-pad steps a value along, but a toggle or a two-way choice has only two: one flip a press, or a hold
     -- turns a mod off and on)
     local rep = nav.act[dir > 0 and 'right' or 'left'] == 'rep'
-    if s.type == 'toggle' and ((dir ~= 0 and not rep) or act('enter')) then set_row(r, not r.value)
+    if s.type == 'toggle' and ((dir ~= 0 and not rep) or nav.act.enter) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 and not (rep and #s.choices == 2) then
       local v = r.value + dir
       if v < 1 then v = #s.choices elseif v > #s.choices then v = 1 end
@@ -3072,12 +3130,13 @@ function M.install(ctx)
   end
   -- The selected row's hint (or what else its clashing key is bound to) as lines of its own, w wide, at most `most`,
   -- the last one cut with dots when there's more. Wrapped again only when the text, its size, its room, the font or
-  -- the language changed: nav.hw keeps the lines and how many, so a frame makes nothing new.
+  -- the language changed, or the font measures anew (nav.fk): nav.hw keeps the lines and how many, so a frame makes
+  -- nothing new.
   nav.hw, nav.nf, nav.hl = {}, {}, {}          -- (nav.nf: the full screen look's note line, as drawn; nav.hl: nav.hint)
   function nav.hwrap(s, P, px, w, fit, most)
     local c, lv = nav.hw, ctx.lang_v and ctx.lang_v() or 0
-    if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most then return c.n end
-    c.s, c.px, c.w, c.P, c.lv, c.most = s, px, w, P, lv, most
+    if c.s == s and c.px == px and c.w == w and c.P == P and c.lv == lv and c.most == most and c.fk == nav.fk then return c.n end
+    c.s, c.px, c.w, c.P, c.lv, c.most, c.fk = s, px, w, P, lv, most, nav.fk
     local cut = ctx.tr_cut
     if cut then cut(true) end
     local t, ws = P(s), nil
@@ -3387,7 +3446,7 @@ function M.install(ctx)
     -- (for what was used last, the keyboard, the mouse or the controller, as the full screen look's)
     local hy = y0 - ph + px
     local dev = menu.dev
-    if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
+    if dev == 'pad' and (not nav.pad or pad_row.value == 3 or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
     if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
     else
@@ -3776,7 +3835,7 @@ function M.install(ctx)
     -- the hints: for what was used last, the keyboard, the mouse or the controller (its buttons as pictures)
     ctx.rect(0, fh, w, b, line, top + 1)
     local dev = menu.dev
-    if dev == 'pad' and (not nav.pad or menu.capture or menu.typing) then dev = 'keys' end
+    if dev == 'pad' and (not nav.pad or pad_row.value == 3 or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
     local close_key = svc.util and svc.util.key_label(menu_key.value) or menu_key.value
     -- (a key bound more than once: the hint line says what else uses it, whatever was used last)
@@ -3785,10 +3844,11 @@ function M.install(ctx)
     -- strip has that room under its rule; the key hints stay)
     local note = clash and clash_drawn(clash, P) or (not menu.capture and not menu.typing and row_hint(ls[menu.sel]))
     if note then
-      -- (as drawn, kept on nav.nf: made again only when the note, its size, its room, the font or the language change)
+      -- (as drawn, kept on nav.nf: made again only when the note, its size, its room, the font or the language change,
+      -- or the font measures anew: nav.fk)
       local npx, nf, lv = max(2, px - 1), nav.nf, ctx.lang_v and ctx.lang_v() or 0
-      if nf.s ~= note or nf.px ~= npx or nf.w ~= w - 2 * m or nf.P ~= P or nf.lv ~= lv then
-        nf.s, nf.px, nf.w, nf.P, nf.lv, nf.t = note, npx, w - 2 * m, P, lv, fit(P(note), npx, w - 2 * m)
+      if nf.s ~= note or nf.px ~= npx or nf.w ~= w - 2 * m or nf.P ~= P or nf.lv ~= lv or nf.fk ~= nav.fk then
+        nf.s, nf.px, nf.w, nf.P, nf.lv, nf.fk, nf.t = note, npx, w - 2 * m, P, lv, nav.fk, fit(P(note), npx, w - 2 * m)
       end
       ctx.text(m, hy + rh, nf.t, npx, clash and yellow or nav.pc('hint', col), top + 2)
     end
@@ -3823,9 +3883,10 @@ function M.install(ctx)
     return s
   end
   function svc.menu_ever() return menu.ever == true end
+  -- (a whole .tmp beside the file is read ahead of it, saving.read: a hand-made line in the file needs that one gone)
   function svc.menu_key_note()
-    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt, see the README)',
-      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES))
+    log(fmt('options menu: %s (to change the key without the menu: close the game, then put the line "%s<Tab>%s<Tab>s<Tab><key>" in %s_settings.txt and delete %s_settings.txt.tmp if it\'s there, see the README)',
+      svc.menu_how(), loader_mod, menu_key.key, ctx.FILES, ctx.FILES))
   end
   -- the menu's cursor and left button, for the performance monitor to be dragged with: only on the ship, while the
   -- menu is open and has the mouse (nil otherwise)
@@ -3892,12 +3953,11 @@ function M.install(ctx)
       -- Backspace steps back too: from a mod's options (or a kept search) to the list of mods, where the cursor was
       go_back(); stepped = true
     end
-    -- (while a search is typed, a menu key that types what the search takes, a letter, a digit or a space, is part of
-    -- the search, not a close; F9 and the like still close it)
-    if not stepped and menu.open and menu.capture == nil and ((pressed('escape') and not menu.typing)
-       or (mk ~= 'off' and pressed(mk)
-           and not (menu.typing and (mk:find('^%w$') or mk == 'space' or mk:find('^numpad %d$'))))) then
-      menu.open, menu.typing, nav.drag, svc.menu_up = false, false, nil, false
+    -- (nothing closes me while a search is typed, the menu's key included: search_input ends the typing first. Escape
+    -- the frame after it ended the typing is that same press, nav.tgap)
+    if not stepped and menu.open and menu.capture == nil and not menu.typing
+       and ((pressed('escape') and not nav.tgap) or (mk ~= 'off' and pressed(mk))) then
+      menu.open, nav.drag, svc.menu_up = false, nil, false
       if menu.ask then reset_ask(menu.ask, false) end
       return
     end
@@ -3995,8 +4055,15 @@ function M.install(ctx)
   -- that's off, so the hang watchdog stops that one call and there's no mod to switch off: a hook that hung is dropped as
   -- one that raised, and the boot goes on. Not once the game closes (ctx.closing, svc.shutdown): a boot script's
   -- on_shutdown may be swapping game files, and stopped half-way it leaves a broken one. A row that hung has no time left,
-  -- so the next callback gets a new one. A boot's own callback here is that boot's as its update is (ctx.boot_owner).
-  ctx.wide = { on = false }
+  -- so the next callback gets a new one (wide_row), but not inside the call it hung in: there it stays hung, so a mod
+  -- looping around a boot script's callback that hangs every time runs out of its own time, instead of getting it back
+  -- at every hang (a hang inside a call gives its caller a fresh clock). A boot's own callback here is that boot's as
+  -- its update is (ctx.boot_owner).
+  ctx.wide = { on = false, who = 'a boot script\'s look-alike callback' }
+  local function wide_row(D)
+    if D and D.hung[ctx.wide] and not D.owner then ctx.wide = { on = false, who = ctx.wide.who } end
+    return ctx.wide
+  end
   local box = {}
   local function boxed(owner, key, fn, ...)
     box[1], box[2] = guarded(owner, key, pcall, fn, ...)
@@ -4005,7 +4072,9 @@ function M.install(ctx)
   local function run_as(owner, key, fn, ...)
     box[1], box[2] = nil, nil
     local a, u = recs[owner], svc.util
-    if a and a.paused then return true end         -- (its look-alike hooks and guards wait, none of them dropped)
+    -- (a paused mod's look-alike hooks and guards wait, none dropped. As the game closes only its shutdown comes here:
+    -- svc.shutdown's guard stops and on_shutdown hooks, and the shutdown event emit_as let by; call_as holds the rest)
+    if a and a.paused and not ctx.closing then return true end
     if a and u then u.timed(a, boxed, owner, key, fn, ...)
     else
       if ctx.color_scope then ctx.color_scope() end
@@ -4013,11 +4082,11 @@ function M.install(ctx)
       local was = ctx.boot_owner
       if owner:find('^boot:') then ctx.boot_owner = owner end
       local po, ps, pl, pn
-      if D then po, ps, pl, pn = D.enter(ctx.wide, D.clock()) end
+      if D then po, ps, pl, pn = D.enter(wide_row(D), D.clock()) end
       boxed(owner, key, fn, ...)
       if D then
         D.leave(po, ps, pl, pn)
-        if D.hung[ctx.wide] then ctx.wide = { on = false } end
+        wide_row(D)
       end
       ctx.boot_owner = was
     end
@@ -4168,6 +4237,7 @@ function M.install(ctx)
         return true
       end,
       open_log = function(name)
+        if life and not life.on then return nil, 'the mod is off' end
         if type(name) ~= 'string' or not name:match('^[%w_%-]+%.log$') or #name > 52 then
           return nil, 'log names are letters, digits, _ - and end in .log'
         end
@@ -4363,7 +4433,7 @@ function M.install(ctx)
       local p = shim.pending[id]
       if p then
         shim.pending[id] = nil
-        for _, c in ipairs(p) do on_change(r, c.owner, function(v) return c.fn(v, id) end) end
+        for _, c in ipairs(p) do on_change(r, c.owner, function(v) return c.fn(v, id) end, ctx.place_key('on_change', c.fn)) end
       end
       return true
     end
@@ -4387,7 +4457,8 @@ function M.install(ctx)
       -- (a boot script's through the game-wide set is that boot's, as its hooks are: make_bingus)
       local who = owner == 'ModOptionsMenu' and ctx.boot_owner or owner
       local r = mom_row(id)
-      if r then return on_change(r, who, function(v) return fn(v, id) end) end
+      -- (keyed by the mod's own function: my wrappers all sit in one place, and one key would skip every one of them)
+      if r then return on_change(r, who, function(v) return fn(v, id) end, ctx.place_key('on_change', fn)) end
       local p = shim.pending[id] or {}
       if #p >= 64 then return false end
       p[#p + 1] = { owner = who, fn = fn }
@@ -4749,6 +4820,8 @@ function M.install(ctx)
       end
       local handle = { status = views.statuses[name] }
       function handle.install()
+        -- (a guard a stopped copy made and kept: listed, it would run for that copy and keep its name from the next)
+        if life and not life.on then error('the mod is off', 0) end
         if g.installed then error('guard ' .. name .. ' already installed', 0) end
         if #shim.guards >= 256 then error('256 guards already installed', 0) end
         g.installed, status.installed, status.state = true, true, 'running'
@@ -4890,7 +4963,10 @@ function M.install(ctx)
       if g then g:close() end
       if type(src) == 'string' then
         local kind, mod = src:match('^%-%- HD2%-(%a+): ([%w_/%.%-]+)')
-        if mod and mod:match(ctx.ALLOW) and not mod:find('//', 1, true) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
+        if mod and mod:sub(1, 24) == 'mods/chef_shared_loader/' then
+          -- (as at discovery: a mod there would compile under my chunk name, code my hang watchdog never stops)
+          log(fmt('skipped "-- HD2-%s: %s" in %s: mods/chef_shared_loader/ is my own folder, not one for mods', kind, mod, path))
+        elseif mod and mod:match(ctx.ALLOW) and not mod:find('//', 1, true) and (kind == 'Addon' or kind == 'Boot' or kind == 'Options') then
           out[#out + 1] = { kind = kind, name = mod, file = 'dev:' .. (path:match('[^\\/]+$') or path), src = src, dev = true, path = path }
         else
           log('dev mode: ' .. path .. ' has no "-- HD2-Addon/Boot/Options: mods/<author>/<name>" first line')
@@ -5038,7 +5114,14 @@ function M.install(ctx)
     for _, c in ipairs(list) do
       -- (one that a mod stopping in an earlier callback took away is skipped)
       if not c.off then
+        -- (start-up work: a start's time on the hang watchdog, under the record the call below enters as, so it takes
+        -- this clock and limit as its own. Only here, at launch: a late start's after_startup gets a call's.)
+        local D = not ctx.closing and ctx.dog or nil
+        local r = c.owner ~= 'loader' and (recs[c.owner] or wide_row(D)) or nil
+        local po, ps, pl, pn
+        if D and r then po, ps, pl, pn = D.enter(r, D.clock(), D.start) end
         local ok, err = call_as(c.owner, 'after_startup', c)
+        if D and r then D.leave(po, ps, pl, pn) end
         if not ok then log(fmt('[%s] after_startup: %s', c.owner, err_text(err))) end
       end
     end
@@ -5050,7 +5133,8 @@ function M.install(ctx)
   -- them, and only it: right after its start the after_startup callbacks it made as it started and the startup event,
   -- then past its first update (svc.late_world, svc.late_replay) the world it finds itself in and a mission already under
   -- way. The other mods hear nothing twice. The event protection is emit's. What's left out: players (the first look only
-  -- notes the count, as at launch) and menu (the menu is closed by then, as a mod takes it).
+  -- notes the count, as at launch) and menu (the menu is closed by then, as a mod takes it; a dev reload doesn't wait
+  -- for that, so its new copy hears the menu open, or the close would be the first it hears of it).
   function svc.late_start(owner)
     local list = {}
     for i = #after, 1, -1 do
@@ -5063,6 +5147,7 @@ function M.install(ctx)
       end
     end
     emit_as(owner, 'startup')
+    if menu.told then emit_as(owner, 'menu', true) end
   end
   -- At launch a mod hears its first world after its first updates, so what a start hears of it waits for those: queued
   -- here with the world it's for, and sent at the end of the next frame (the loader's frame), past that mod's first
@@ -5085,9 +5170,13 @@ function M.install(ctx)
       if w.stable and e.world ~= nil and e.world == last_world then
         local p = e.was
         local moved = not p or p.world ~= last_world
-        if p and p.mission and (moved or not last_mission) then emit_as(e.owner, 'mission_end', w.id) end
+        if p and p.mission and (moved or not last_mission) then emit_as(e.owner, 'mission_end', p.world) end
         if moved then emit_as(e.owner, 'world', last_world, w.mission == true) end
         if last_mission and (moved or not p.mission) then emit_as(e.owner, 'mission_start', w.id) end
+      -- (a load under way: the end of the mission it was in, which the others heard while it was paused, comes now;
+      -- the next world is the live emit's once it settles)
+      elseif e.was and e.was.mission and not last_mission and e.world ~= nil and e.world == last_world then
+        emit_as(e.owner, 'mission_end', e.was.world)
       end
     end
   end
@@ -5098,7 +5187,8 @@ function M.install(ctx)
   -- that goes for the pause, and so do a look-alike's dead zones and GUIs (rt.pause). As it's resumed it gets those back
   -- and what it would have heard: a row changed meanwhile, once, with its value now, the menu's close if it heard the
   -- menu open (that frame's emit comes before the resume), and the world and mission if they moved, the way a late start
-  -- hears them (svc.late_world). Nothing else is replayed.
+  -- hears them (svc.late_world). Nothing else is replayed. Its shutdown is the one call it still gets, as the game
+  -- closes (run_hook, and here ctx.closing): what it has to save is in that copy.
   function svc.pause(a)
     a.paused, a.on = { hold = nav.holds.by[a.name], world = last_world, mission = last_mission, menu = menu.told == true }, false
     svc.hold_mouse(a.name, false)
@@ -5173,7 +5263,12 @@ function M.install(ctx)
       end
     end
     local w = ctx.world
-    if w.stable and w.id ~= last_world then last_world = w.id; emit('world', w.id, w.mission == true) end
+    if w.stable and w.id ~= last_world then
+      -- (a mission that ends with the move, the ship loaded into its world, ends first and as its own world:
+      -- mission_end, then world, as with a new main world)
+      if last_mission and not w.mission and not w.checking then last_mission = false; emit('mission_end', last_world) end
+      last_world = w.id; emit('world', w.id, w.mission == true)
+    end
     -- while the loader looks again at a mission that may have ended (w.checking), it's still the mission it was: no
     -- mission_end and mission_start for a look
     if not w.checking then
@@ -5184,15 +5279,24 @@ function M.install(ctx)
       end
     end
     -- players: the session's player count and how many are still joining, looked at once a second, only while a mod
-    -- listens (the first look only notes them: a change since then is the event)
+    -- listens (the first look only notes them: a change since then is the event). A paused mod's listener isn't called,
+    -- so with only those there's no look, and the first one after a resume only notes them, as a resume replays none.
     if subs.players and svc.util then
       if ctx.now() >= seen.at then
         seen.at = ctx.now() + 1
-        local s = svc.util.session_now()
-        local n, j = s.on and max(1, s.peers) or 1, s.on and s.joining or 0
-        local was = seen.n
-        if was and (n ~= was or j ~= seen.j) then seen.n, seen.j = n, j; emit('players', n, j, was)
-        else seen.n, seen.j = n, j end
+        local live = false
+        for _, sb in ipairs(subs.players) do
+          local p = recs[sb.owner]
+          if sb.on and not (p and p.paused) then live = true; break end
+        end
+        if not live then seen.n, seen.j = nil, nil
+        else
+          local s = svc.util.session_now()
+          local n, j = s.on and max(1, s.peers) or 1, s.on and s.joining or 0
+          local was = seen.n
+          if was and (n ~= was or j ~= seen.j) then seen.n, seen.j = n, j; emit('players', n, j, was)
+          else seen.n, seen.j = n, j end
+        end
       end
     elseif seen.n then seen.n, seen.j, seen.at = nil, nil, 0 end
     if nav.holds.n > 0 then nav.hold_mods() end
