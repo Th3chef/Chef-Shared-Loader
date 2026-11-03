@@ -179,7 +179,7 @@ Each mod's keys are its own: two mods can both save `size`.
 | Helper | What it does |
 |---|---|
 | `chef.share(name, value)`, `chef.shared(name)` | A value any mod can read by name. Use your mod's name in it (`'you.my_mod.data'`). It goes when the loader stops your mod, so nil means it isn't running; a mod started again shares it anew. Your own `handle.switch_off` isn't such a stop: `chef.share(name, nil)` first. |
-| `chef.on(event, fn)` | Calls `fn(...)` for every `emit` of `event`. Returns a function that ends the subscription (it's removed). A listener that errors 20 times is switched off, and a mod that stops loses its listeners. Once your mod has stopped, code of it that still runs (a function another mod holds) can add no new listener, `chef.on_change`, `chef.share` or `chef.after_startup`. |
+| `chef.on(event, fn)` | Calls `fn(...)` for every `emit` of `event`. Returns a function that ends the subscription (it's removed). A listener that errors 20 times is switched off, and a mod that stops loses its listeners. Once your mod has stopped, code of it that still runs (a function another mod holds) can add no new listener, `chef.on_change`, `chef.share` or `chef.after_startup`, and `chef.save` and `chef.set` give nil and `the mod is off` (a paused mod's still work). |
 | `chef.emit(event, ...)` | Calls every listener; returns how many ran. |
 | `chef.require(name, want)` | The table another addon returned (its exports), when it runs and its `version` is `want` or newer; else nil and a reason. |
 
@@ -189,10 +189,10 @@ The loader's own events:
 |---|---|---|
 | `startup` | | Once, after every mod started and the `after_startup` callbacks ran (a mod that starts late gets its own: see [Starting late](#starting-late)). |
 | `world` | world id, in a mission | A new world has settled. |
-| `mission_start`, `mission_end` | world id | A mission starts; the mission ends (extraction, quitting, a new world). |
+| `mission_start`, `mission_end` | world id | A mission starts; the mission ends (extraction, quitting, a new world). `mission_end` carries the mission's world id and comes before the `world` of the world after it. |
 | `menu` | true (it opened) or false (it closed) | The loader's options menu opened or closed (from 1.4.0, `chef.has('menu_state')`): hide your HUD while it's up, say. `chef.menu_open()` says whether it's open now. |
 | `mod_stopped` | the mod's name, why | A running mod stopped: too many errors, the hang watchdog, switched off in the menu, stopped to be tried again from CRASH RECOVERY, or a dev-mode reload (from 1.4.0, `chef.has('mod_stopped_event')`). Drop what you took from it with `chef.require`. Never for a mod that never ran (a failed start), and the stopped mod doesn't hear its own. |
-| `players` | players, joining, players before | The session's player count or the number still joining changed (someone starts joining, is in, or leaves). Looked at once a second, and only while a mod listens; the first look after you start listening only notes the count. Check `chef.has('players_event')` (from 1.4.0). |
+| `players` | players, joining, players before | The session's player count or the number still joining changed (someone starts joining, is in, or leaves). Looked at once a second, and only while a mod listens (a paused mod's listener doesn't count); the first look after you start listening only notes the count. Check `chef.has('players_event')` (from 1.4.0). |
 | `shutdown` | | The game closes. |
 
 **Requirements.** `-- HD2-Requires:` lines among the file's first lines (its first 1200 bytes, and on to the end of the
@@ -224,30 +224,33 @@ its header, in its first 4 KB. So a versioned `HD2-Requires` works on a mod on t
 
 The loader draws one menu for every mod's options, over everything, anywhere in the game. **F9** opens and
 closes it (players can change that key in the menu itself). It opens on the list of mods: the loader's own entry
-first, under a divider, then the mods in alphabetical order by title (your `chef.title`); **Up/Down** picks a mod and **Right** (or Enter) opens its options, in the
-order your mod registered them. Every screen under the list starts with a **< Back** row (Left, Right or Enter on it
+first, under a divider, then the mods in alphabetical order by title (your `chef.title`); **Up/Down** picks a mod and **Right** opens its options, in the
+order your mod registered them. Every screen under the list starts with a **< Back** row (Left or Right on it
 returns to the list, where the cursor was; **Backspace** does the same from anywhere but a search being typed, where
 it erases). In a mod's options, **Up/Down** (Page
 Up/Down) picks a row, **Left/Right** changes a toggle, a choice, a slider or a color, **Right** starts a key row's
-capture or presses a button and **Left** there goes back to the list (Enter toggles, starts a capture or presses as
-well), and **Delete** puts the default back. The menu's key (or Escape) closes the whole menu. In a key capture, any
+capture or presses a button and **Left** there goes back to the list (the controller's confirm or a click toggles,
+starts a capture or presses as well), and **Delete** puts the default back. The menu's key (or Escape) closes the whole menu. In a key capture, any
 key binds it, **Delete** sets none and **Escape** cancels. For a `chef.bind` row (and a ModBindingsMenu one), the modifiers held when the key is pressed bind the combo
 (**Ctrl+Shift+F6**), and a modifier pressed and let go with no other key binds that modifier on its own; on a
 `chef.bind` row, a controller button binds that button (while the menu's controller row isn't Off), except circle/B (cancels), square/X (sets none, as Delete
 does) and the touchpad / View (it opens the menu) (from 1.4.0). The menu's own key and a mod's own `'key'` rows still
-take one plain key. **/** starts a search across every mod: type part of a mod's or a row's name, **Backspace** (or Delete)
-takes a letter off, **Down** keeps the search with the cursor on the first row found (**Up**: the last; Enter keeps it
-too), **/** again or **Escape** leaves it. The hint lines offer only keys the game ignores (the arrows, Delete, **/**
-and the menu's key), plus **Backspace** to erase a search and **Escape** to cancel a key capture: Enter, Escape and
-Backspace work in the menu as described, but the game also opens its chat on
-Enter (the letters typed after it go there, and the next Enter sends them) and its pause screen on Escape and at
-times Backspace. While the menu is open its keys and mouse buttons
+take one plain key. **Enter** starts a search across every mod, from anywhere in the menu, and the game opens its chat
+on the same press: the chat is the search box, and it keeps the letters from the game. Type part of a mod's or a row's
+name, the list follows each letter, **Backspace** takes one off (held, it follows the chat box; Delete takes one too).
+**Escape** or a click closes the chat unsent and keeps what was found, the cursor on the first row found (nothing
+typed: the whole list); a click does that with the menu's mouse off too, and presses no row. The arrows work from
+there, and the next Escape closes the menu. **Enter** with letters in the box sends them to the other players, and
+nothing in the loader can stop that (it keeps what was found all the same); with nothing typed it just closes the box.
+The menu's key does nothing while typing: Enter, Escape or a click end the typing first. Where no chat opens (the title
+screen, say) the search works the same, and the letters reach the game too. The hint lines offer only keys the game ignores (the arrows, Delete and the menu's
+key), plus the search's keys and **Escape** to cancel a key capture; the game opens its pause screen on Escape (with
+no chat open) and at times Backspace. While the menu is open its keys and mouse buttons
 are its own: your mod's `Keyboard` / `Mouse` reads of them (`pressed`, `released`, `any_pressed`, `button`,
 `keystrokes`, through `chef.call` too), `chef.typed()`, `chef.key_down` / `chef.key_pressed` / `chef.mouse_down` (and `chef.wheel`, 0) and
 `chef.bind` keys answer nothing pressed, so a search never fires your hotkey (the
-mouse's movement and cursor still read as always). The game itself still sees the keys, in the menu and while a search is typed (so
-W walks, and Escape and Enter also reach its pause screen and chat; Delete erases and **/** leaves a search without
-that). Values are saved between launches. Every mod the loader found is listed (from 1.4.0), with its options under
+mouse's movement and cursor still read as always). The game itself still sees the keys in the menu, and the chat holds
+them back only while it's open. Values are saved between launches. Every mod the loader found is listed (from 1.4.0), with its options under
 the loader's own first row, its on/off switch, labeled with your mod's name as its entry shows it (your `chef.title`,
 even one set as your mod starts, else the last part of its name with spaces) and your `version` after it, dimmer, as
 you wrote it (none until your mod has started; it's left out when the two don't fit the row): off stops the mod at
@@ -276,10 +279,10 @@ handlers run as for a player's change. When your `version` changes between launc
 | `chef.option(id, spec)` | Adds a row and returns its current value. Ids are letters, digits, `_ . -`. `spec`: `{ type = 'toggle' \| 'choice' \| 'slider' \| 'key' \| 'button' \| 'color', label, default, ... }`. A choice has `choices` (2 to 32 strings; the value is the index; a saved choice your mod no longer has falls back to the row's default), a slider `min` < `max` (finite numbers) and optionally `step` (0 or more; values snap within the range; a value shows as a whole number when it is one, else with its step's decimals: with a 2.5 step, 7.5). A spec that doesn't fit is refused with the reason. The spec is copied when you register the row: its fields are read once (inherited ones too; `choices` and `palette` item by item), so one table can be reused for the next row, and editing `spec.label` or anything else in it afterward doesn't change the row. For text that changes, give the label or choice as a function: that stays live. A label or choice that's a table or userdata shows `?`. A row at its default isn't stored, so a new default in an update reaches players who never changed it. A label, title or choice given as a function runs as your mod, under the hang watchdog; a function that raises shows `?`. While the hang watchdog is on, a label, title or choice given as a function isn't called once your mod has stopped: the menu shows `?` and a search won't find it. |
 | `chef.get(id)`, `chef.set(id, value)` | Read or change a row. |
 | `chef.on_change(id, fn)` | `fn(value)` whenever the row changes (from the menu or `set`). Up to 64 per row; it stops when your mod stops. For a button, `fn(true)` each time it's pressed. |
-| `chef.button(id, label, fn, text)` | A button row (from 1.4.0, `chef.has('option_buttons')`): **Right** (or Enter) or a click runs `fn()` as your mod (an error in it is logged, not raised); once your mod is stopped or switched off, its buttons do nothing. `text` is what the row shows on its right (`'RUN'` by default). It saves nothing. The same as `chef.option(id, { type = 'button', label = ..., run = fn, text = ... })`. |
+| `chef.button(id, label, fn, text)` | A button row (from 1.4.0, `chef.has('option_buttons')`): **Right** (or the controller's confirm) or a click runs `fn()` as your mod (an error in it is logged, not raised); once your mod is stopped or switched off, its buttons do nothing. `text` is what the row shows on its right (`'RUN'` by default). It saves nothing. The same as `chef.option(id, { type = 'button', label = ..., run = fn, text = ... })`. |
 | Color rows | `chef.option(id, { type = 'color', label, default = 'FF8800', palette = { ... } })` (from 1.4.0, `chef.has('option_colors')`): the value is six hex digits, `'RRGGBB'` (a `#` in front is taken), shown with a swatch; **Left/Right** step through `palette` (2 to 32 colors; without one: white, the Helldivers yellow, orange, red, pink, purple, indigo, blue, sky, teal, green, brown, gray, black). A default not in the palette is kept until the player picks another. `chef.rgb(value)` gives its 0-255 red, green and blue. |
 | Headings and hints | Any row's spec can carry `heading = 'Look'` (a heading line above it; add `sub = true` for a small one, its rows indented under it until the next heading) and `hint = 'What this does'` (shown on a line of its own above the key hints while the row is selected: two lines at most in the compact panel, one in the full screen look, cut past that). 200 characters at most each (from 1.4.0, `chef.has('option_headings')`). A Mod Options Menu option's `description` is its hint. |
-| Folds | Your headings fold (from 1.4.0, `chef.has('option_folds')`; nothing to do on your side): a heading (not a `sub` one) is a line the cursor stops on, `+` and the count of its rows while it's closed, `-` while it's open, its subheadings and their rows folding with it. Right opens it (or steps into it when it's open), Left closes it (back to the list from a closed one), Enter or the controller's confirm or a click opens and closes it; Left on a key or button row inside closes it, the cursor on it. An entry with more than 20 option rows opens with every heading closed, a shorter one fully open. Your switch, the rows before your first heading and the reset button always show. What the player opens or closes is kept per heading for the session and saved for the next launch. The search always shows every row. Put `fold = false` on a heading's row (the one with `heading`) to keep that heading always open, drawn as a plain heading. |
+| Folds | Your headings fold (from 1.4.0, `chef.has('option_folds')`; nothing to do on your side): a heading (not a `sub` one) is a line the cursor stops on, `+` and the count of its rows while it's closed, `-` while it's open, its subheadings and their rows folding with it. Right opens it (or steps into it when it's open), Left closes it (back to the list from a closed one), the controller's confirm or a click opens and closes it; Left on a key or button row inside closes it, the cursor on it. An entry with more than 20 option rows opens with every heading closed, a shorter one fully open. Your switch, the rows before your first heading and the reset button always show. What the player opens or closes is kept per heading for the session and saved for the next launch. The search always shows every row. Put `fold = false` on a heading's row (the one with `heading`) to keep that heading always open, drawn as a plain heading. |
 | `chef.bind(id, default_key, label)` | A key row (key names in any case: `'F6'` is `'f6'`). Returns nil and why for an id that isn't letters, digits, `_ . -`. Returns `b` with `b.key()` (`'off'` for none), `b.pressed()` and `b.down()` for this frame. A key two rows use is marked `!` in the menu and noted in the log; with that row selected, the hint line names the other options on the key. From 1.4.0 (`chef.has('bind_combos')`) the value can be a combo, `'ctrl+shift+f6'`: the modifiers first, always in the order ctrl, shift, alt, either side's key counting (a default is taken in any case and spacing: `'Shift + Ctrl+F6'` is `'ctrl+shift+f6'`). `b.pressed()` is true in the frame the key goes down while its modifiers are held, `b.down()` while all of them are; a modifier the combo doesn't name doesn't stop it (Shift is the game's sprint), and a plain key reads as it always did, modifiers held or not, so Ctrl+F6 fires both `'ctrl+f6'` and `'f6'`. So a combo and a plain binding of its key are marked `!` as clashing, both ways, and each one's hint names the other; two combos on the same key with different modifiers (`'ctrl+f6'`, `'shift+f6'`) don't clash with each other, and a controller button clashes only with the same button. Or a controller button, `'pad:cross'` (the name the pad gives it; the other pad family's name for the same button works too: `'pad:a'` is cross on a DualSense): read from the first pad found, only while your mod asks about it (a binding not asked about for 30 frames isn't read), and false while the menu is open. The menu shows them as `CTRL+SHIFT+F6` and `PAD CROSS`; `chef.key_label` gives `Ctrl+Shift+` and the key's own name, or `Pad cross`. Read a combo or a pad button with `b.pressed()` / `b.down()`: `chef.key_pressed(b.key())` knows plain keys only. |
 
 Arsenal options (`chef.options`) still work and stay the place for what has to be chosen before the game starts (which
@@ -305,7 +308,8 @@ again is your new copy's, its label, button and other functions too; a row you d
 its functions gone (a function label says `?`, a button runs nothing). If it was running (tried again, or off and on in
 one menu session) it was stopped first, the usual way, and other mods got `mod_stopped`; with no stop callback it isn't
 started again at all, see below. The hang watchdog gives a late
-start a call's 3 s, not the 10 s of a start at launch: a mission may be under way.
+start a call's 3 s, not the 10 s of a start at launch, and so its `init` and `after_startup` callbacks: a mission may
+be under way.
 
 What a launch gives a mod once, a late start gives you too, to your mod alone, in this order. The first three come right
 after your start ends, and the last two after your first update and your first timers, as at launch:
@@ -319,7 +323,8 @@ after your start ends, and the last two after your first update and your first t
 If the world changes in that one frame, you hear the new world when it settles, the usual way, and not the old one.
 
 `players` isn't replayed (at launch too the first look only notes the count: you get the next change). The `menu` event
-isn't either: the menu is closed by then. A mod that's started late isn't told apart from one started at launch, so
+isn't either: the menu is closed by then (a dev-mode reload doesn't wait for that: with the menu open, your new copy
+hears `menu` with `true` right after `startup`). A mod that's started late isn't told apart from one started at launch, so
 keep your start the same either way. Two things are worth a thought:
 
 - **A mod with no stop callback is paused, not stopped.** The loader undoes what it knows of (timers, watches, events,
@@ -327,7 +332,8 @@ keep your start the same either way. Two things are worth a thought:
   or a scale you changed. A new copy would read what the old one left as the game's own, and keep it. So a mod with no
   `on_stop` and no `handle.on('stop')` that's switched off stays loaded and just isn't called: no hooks, timers, spread
   jobs, watch updates, event listeners, `on_change` callbacks, look-alike hooks or guards, and its buttons run nothing and
-  a function label says `?`. Everything else stays where it was: your module, environment and locals, what you shared, your
+  a function label says `?`. Only its shutdown still comes as the game closes (an addon's `shutdown` hook, the
+  `shutdown` event, a look-alike's `on_shutdown` and its guards' stop), so it can save what it has. Everything else stays where it was: your module, environment and locals, what you shared, your
   rows, and what you spawned or changed in the game, which is still in the world while you're off (a new world clears your
   spawns the usual way). Only `chef.hold_mouse` and an HD2 Lua Runtime mod's dead zones let go for the pause, so the camera
   never stays frozen, and its GUIs hide, so they don't stay on screen frozen. While you're off, `chef.hold_mouse(true)` and
@@ -430,12 +436,13 @@ README) starts on the look-alike after the boot scripts have run. On the look-al
 - **Saying what you need:** `spec.needs` lists the engine calls (`'Material.set_texture'`) and the grants (`'lobby'`;
   see Trusted mods) your mod can't do without, 64 at most. `'files'` and `'patches'` (that runtime's own files and game
   patch files) are taken as names but never given: no mod here gets them. The loader checks them when you call
-  `mod()`: whatever it lacks is in `handle.missing()` (a new list, empty when everything is there), in the log, in a
+  `mod()`, with what each call asks the engine first (`Unit.alive` for a unit, `Application.worlds` for a world or a
+  GUI, `Application.can_get` for a resource or a font): whatever it lacks is in `handle.missing()` (a new list, empty when everything is there), in the log, in a
   notice for the player and in `chef.mods()` / `chef_loader_health.txt` (`missing`). The mod still starts, so it can
   carry on without those parts and say so itself.
 - **Asking for access:** `handle.request(what, why)` with `'lobby'` and a short reason, before the work that needs
   it (`'files'` and `'patches'` are always refused). It answers `'granted'` (your mod's entry on the loader's list
-  gives it) or
+  gives it, and for `'lobby'` your `spec.lobby_key` is the key the entry names) or
   `nil, 'not given to this mod'` (the loader doesn't give it to your mod: the log and a notice say so once, so the
   player knows what to report). From 1.4.0 it never answers `'asked'`: no grant waits for the player's yes. Asking
   first means a mod never does a long job only to have its result refused.
@@ -460,8 +467,9 @@ README) starts on the look-alike after the boot scripts have run. On the look-al
   `Unit.paint_private_cape`, `Unit.restore_private_cape`) aren't in the look-alike; `handle.missing()` names any your
   mod lists in `spec.needs`. A mod built on them (HD2 Transmog and its packs) runs on its own runtime's loader.
 - **What it made is undone when it stops:** its units, its GUIs, the units it hid, the materials it swapped on the
-  game's units and the mouse dead zones it changed. Textures it set with `Material.set_texture` can't be: the engine
-  can't tell what a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
+  game's units and the mouse dead zones it changed. What it set on a material (`Material.set_texture`, and the values of
+  `set_scalar`, `set_vector2`, `set_vector3`, `set_vector4` and `set_uint_vector`) can't be: the engine can't tell what
+  a material had before. Put those back yourself in `handle.on('stop', fn)`, which the loader calls
   once when it stops your mod (20 errors, it hung, it was switched off in the menu, a running mod stopped to be tried
   again from CRASH RECOVERY, a failed start, a dev reload), before it undoes anything, while your engine
   calls still work. (`stop` is Chef Shared Loader's own; the HD2 Lua Runtime itself never calls it.) A mod that
@@ -491,8 +499,15 @@ the game's `data\` folder, no `os.remove` or `os.rename`). What an entry can giv
   engine call itself (`Application.save_render_target`, which no mod's own `Application` has); the mod hands in
   nothing but, for a depth picture, the word `'depth'`.
   - The folder is the loader's own (`%APPDATA%\Arrowhead\Helldivers2\`, where `chef.save_table` writes), and the name
-    is `<author>_<mod>_capture_<nn>.dds` (the mod's name with `mods/` dropped and other characters made `_`), `nn` going from `01` to `50` and then starting over, so the oldest picture is written over and
-    the folder never holds more than 50 of a mod's. The number carries on across launches.
+    is `<author>_2f<mod>_capture_<nn>.dds` (the mod's name with `mods/` dropped, characters other than `a-z 0-9 -`
+    written as `_` and two hex digits, as in `chef.save_table`'s names: `mods/me/my_mod` gives `me_2fmy_5fmod`, so no
+    two mods share a name), `nn` going from `01` to `50` and then starting over, so the oldest picture is written over and
+    the folder never holds more than 50 of a mod's. The number carries on across launches. Pictures saved under the
+    older name (`<author>_<mod>_capture_<nn>.dds`, `me_my_mod_...`, which two mods could share) are renamed to the new
+    one once, the first time the mod asks, and the number carries on from them. Not when that older name could be
+    another mod's (it has `_2f` in it, so it reads as a new name, or another installed mod had the same one): then
+    nothing is renamed, the number starts at `01` and the log says so once. A picture that can't be renamed (held
+    open, say) stays under its old name, and the log names it so it can be deleted.
   - One a second at most, in real seconds, so a mod that has stopped the game's time still gets its next picture: a
     call sooner answers `nil, 'one capture a second at most'`.
   - It returns the file's name (not its path), or `nil, why`: `'not available to this mod'` for every mod whose
@@ -513,7 +528,7 @@ the game's `data\` folder, no `os.remove` or `os.rename`). What an entry can giv
       confirmed in game yet.
     - It's kept apart from the screen pictures: a depth save that ends the game skips depth and leaves `chef.capture()`
       working, it has its own one a second (a picture of each can be taken on the same frame) and its own number across
-      launches, and its names are `<author>_<mod>_depth_<nn>.dds`.
+      launches, and its names are `<author>_2f<mod>_depth_<nn>.dds`.
     - Only 2 are kept (`nn` is `01` or `02`, the older written over), so read the file the call just named.
     - The file is a 148-byte DDS header (DX10, DXGI format 41, `R32_FLOAT`, Texture2D, 1 mip, width and height the render
       resolution, pitch width * 4), then the pixels: 148 + width * height * 4 bytes in all. The format is right as
@@ -641,10 +656,10 @@ return {
   starts empty.
 - **Lines the menu puts together** (the hint for a key two options use: `F7 ALSO USED BY: SOME MOD (TOGGLE)`) are
   made from texts translated one by one (`ALSO USED BY:`, the mods' titles and labels), so they need no pattern.
-- **The menu's hint lines** are drawn as pairs, each key (`ARROWS`, `DOWN`, `/`, `ESC`, `DEL`, `BKSP`, `CLICK`, `<`
+- **The menu's hint lines** are drawn as pairs, each key (`ARROWS`, `ENTER`, `ESC`, `DEL`, `BKSP`, `CLICK`, `<`
   `>` (the Left and Right arrows, and the mouse's arrows on a row), `RIGHT CLICK`, `WHEEL`, the menu key) a light chip
-  followed by what it does (`MOVE`, `OPEN`, `CHANGE`, `SEARCH`, `RESULTS`, `CLOSE`, `BACK`, `DEFAULT`, `CANCEL`,
-  `NONE`, `ERASE`, `EXIT`, `PICK`, `SCROLL`, and `PRESS A KEY` / `TYPE TO SEARCH` on their own), each key and word
+  followed by what it does (`MOVE`, `OPEN`, `CHANGE`, `SEARCH`, `SENDS`, `DONE`, `CLOSE`, `BACK`, `DEFAULT`, `CANCEL`,
+  `NONE`, `ERASE`, `PICK`, `SCROLL`, and `PRESS A KEY` / `TYPE TO SEARCH` on their own), each key and word
   translated on its own: translate the pieces, not the whole line (since 1.2.2). A pair that doesn't fit is left out
   whole (the arrows' first). The full screen look's `RIGHT ARROW OPENS` (beside a mod's preview) is one text.
 - **Renamed texts:** when the loader renames one of its own texts, a language's entry for the old text still
@@ -673,7 +688,7 @@ scripts keep their global `render`.
 the menu, a running mod stopped to be tried again from CRASH RECOVERY, a dev-mode reload), before it forgets your timers, watches and events: put back what only you know there, such as
 textures you set on the game's materials (the engine can't tell the loader what a material had before). Without one,
 its switch pauses a mod that ran instead of stopping it, and the same copy carries on when it's switched back on
-([Starting late](#starting-late)). A start that
+([Starting late](#starting-late)); paused, it still gets its `shutdown` as the game closes. A start that
 raises never returns the table, so there's no `on_stop` to call: `pcall` your risky start code, or use
 `handle.on('stop')`. It's
 breadcrumbed as `<mod>|on_stop`; one that ends the game is skipped from then on. (An HD2 Lua Runtime mod's
@@ -683,9 +698,15 @@ may not have settled yet (`chef.world()` is nil then).
 **The hang watchdog** (from 1.4.0; `chef.has('hang_watchdog')` is true while it watches, false when it's off this
 session: another script set a Lua debug hook, or the game has none). Any call into your mod (your start, `update`,
 `render`, a timer, a spread job, an event listener, a look-alike hook) that runs on for more than 3 s (10 s for your
-start at launch) is stopped with the error "stopped by the hang watchdog: it ran over 3 s (an endless loop?)", and the loader
+start-up work at launch: your start, an `HD2-Boot` mod's `init`, and the `after_startup` callbacks run then; one made
+later, or a start in the same launch from the options menu, gets 3 s) is stopped with the error "stopped by the hang
+watchdog: it ran over 3 s (an endless loop?)", and the loader
 switches the mod off for the session at the next frame, as after 20 errors: the log says `switched off <mod> for this
-session: it hung`, a notice tells the player, and `chef.mods()` / the health file say `stopped`. An endless loop no
+session: it hung`, with the file and function your code was running then (`...; it was running mods/you/mod, the
+function on line 12`), a notice tells the player, and `chef.mods()` / the health file say `stopped`. A start that hangs is
+a start that failed instead: the log says `could not start <mod>: stopped by the hang watchdog ...` (an `HD2-Boot` mod:
+`<mod> failed to run: stopped by the hang watchdog ...`), no notice shows, and `chef.mods()` / the health file say
+`not started`. An endless loop no
 longer freezes the game for good. The error comes back on every instruction of your code until the call ends, so a
 loop around your own `pcall` stops too, and a mod that hung gets no fresh time on its other calls before it's switched
 off. Coroutines you make with `coroutine.create` / `coroutine.wrap` are watched too (the error ends the coroutine). A
@@ -693,12 +714,17 @@ function handler you give `xpcall` isn't run for this error (a handler that loop
 loader's reads of your module count as your code: its hooks and version as it starts (under the start's limit), its
 `on_stop` as it stops, so an `__index` that loops is stopped the same way. An options file that runs on past 3 s is
 stopped too: the log says why, your mod starts without that table, and each launch loses those 3 s until the file
-changes. A single long engine call (a package load,
-say) isn't mistaken for a loop: a call only counts as hung once Lua keeps running past the limit. If that Lua is one of
+changes. Time no Lua ran in isn't counted: the watchdog checks after every million instructions (milliseconds), so a
+gap of over 0.5 s between two checks is an engine call, a slow C function or the game stalling, and it comes off the
+clock of every call running then (yours, and the call that ran yours). The first such gap comes off whole, however
+long (the PC slept), and the rest up to twice the limit in all: 6 s for a call, 20 s for start-up work at launch. That
+budget is shared by every call inside one outer call: your listener's gaps come out of the budget of the mod that sent
+the event, and your timer's out of its own. A loop around a slow engine call is still stopped, a limit after the
+budget ran out. A listener called right after a long engine call of the sender's gets its full 3 s from its own
+start, no more. Real Lua that keeps running past the limit is a hang. If that Lua is one of
 the loader's helpers the error waits for your own code, and your mod is switched off even if the call then ends clean.
 It can't stop a stuck engine call (no Lua runs while one does), and it can't stop a string pattern that backtracks hard
-(`('a?'):rep(32) .. ('a'):rep(32)`): patterns run in C, no hook runs there, and the crash guard doesn't help. A very
-long pattern of `?` on a very long text can also run out of C stack past any `pcall`, which may end the game. Keep
+(`('a?'):rep(32) .. ('a'):rep(32)`): patterns run in C, no hook runs there, and the crash guard doesn't help. Keep
 patterns short and simple, above all on text you didn't write. Long work belongs in `chef.spread` or a timer, a little
 a frame, anyway.
 
@@ -773,11 +799,11 @@ one-shot) is dropped from the list and never destroyed again, and units the game
 
 | Helper | What it does |
 |---|---|
-| `chef.spawn(id, x, y, z)` | Spawns a unit (its resource id as hex, or a name); nil and a reason when it isn't loaded. |
+| `chef.spawn(id, x, y, z)` | Spawns a unit (its resource id as hex, or a name); nil and a reason when it isn't loaded, or when the position isn't finite numbers (`nil, 'x, y, z: finite numbers'`; a missing one is 0). |
 | `chef.despawn(u)` | Destroys one you spawned. |
 | `chef.link(child, parent, node, child_node)` | Links child (node 1 by default) to parent's node (a name or an index). |
 | `chef.unlink(child)` | Unlinks it. |
-| `chef.particles(id, x, y, z)` / `chef.stop_particles(h)` | A particle effect, and stopping it (only while it's still playing). |
+| `chef.particles(id, x, y, z)` / `chef.stop_particles(h)` | A particle effect (a position that isn't finite numbers is refused, as for `chef.spawn`), and stopping it (only while it's still playing). |
 | `chef.lights(u)` / `chef.light(u, i)` | How many lights a unit has; light `i` with `set_color(r, g, b)` (0-255), `set_intensity(v)`, `set_enabled(on)`, `set_falloff(start, end)`, `set_shadows(on)`. |
 
 Ship the unit or effect in your patch (or use one the game has loaded). `chef.spawn` asks `Application.can_get` first and answers nil and why for one that isn't loaded; `chef.particles` doesn't ask.
@@ -986,7 +1012,7 @@ their computer. Your mod has:
   `string.fn(s)` (`s:fn()` raises), and one you replace there applies to `string.fn(s)` only. `require` gives your own
   `package.loaded` / `package.preload` first (a mod bundled as modules), then those, plus `table.new` and `table.clear`.
 - **`os`:** `clock`, `time`, `date`, `difftime` and `getenv`.
-- **`io.open` / `io.lines`:**
+- **`io.open` / `io.lines`:** (`io.lines()` with no file is refused: it would read the game's console input)
   - **Reading:** your own files in the loader's folder (`chef.log_directory`, which is also the game's settings
     folder), never the loader's own files (`chef_loader*`), another mod's saved tables (`chef_data_*`) or a `.log` you
     don't hold this launch; below it only `saves\<id>_user_settings.config`. And the game's `data\` folder.
@@ -1023,6 +1049,11 @@ read of `..\something`; the other refusals here, `dofile`, `io.popen` and the re
   nil finds nothing behind it.
 - **Climbing out:** the rest of `debug`, `setmetatable` on your environment, and `getfenv`/`setfenv` on the game's,
   the loader's or another mod's functions.
+- **Very long patterns:** `find`, `match`, `gmatch`, `gsub` and `gfind` raise an error on a pattern over 2048 bytes,
+  from `string` or as a method on a string. A `find` with `plain` true has no limit. The check runs these calls in a
+  `pcall`, so an error raised in a `gsub` callback reaches your `xpcall` handler after `gsub` has returned: the error
+  text keeps its own line, but a `debug.traceback` there shows a frame of the loader's and then your `gsub` call, not
+  your callback.
 - **Engine tables that aren't for mods** (in `stingray` and the globals alike; a table left out reads as `false` in
   the globals and `nil` in `stingray`):
   - `PluginManager` (native code), `Http` and `WebSocket`, and the `Localizer` (it ends the game);
@@ -1097,9 +1128,10 @@ Then whichever of the two the game runs, every Chef Shared Loader mod keeps runn
   named in the log as one (`a changed copy of my start-up stub`), and nothing promises it keeps starting the loader. The
   stub is frozen: a stub that has to change gets a new core name (`core_2`) and ships as a new file, so the copies in
   mods stay as they are.
-- **Don't write your own boot that loads the loader.** It works (the loader doesn't run that boot a second time, and
-  runs the callbacks it set before the loader replaced them), but code in it runs with the game's whole Lua, before any
-  crash guard, and nothing in it is locked down. Ship the stub and a `-- HD2-Boot:` mod instead.
+- **Don't write your own boot that loads the loader.** It works (the loader doesn't run that boot a second time, runs
+  the callbacks it set before the loader replaced them, and runs its own `init` at its first `update` when nothing called
+  it before), but code in it runs with the game's whole Lua, before any crash guard, and nothing in it is locked down.
+  Ship the stub and a `-- HD2-Boot:` mod instead.
 - **Two mods with the stub:** any number of mods may carry it; the game runs the copy in the highest patch, and the
   loader logs the others as not run.
 
@@ -1136,12 +1168,23 @@ end
 - `from` is your loader's name and version, 60 characters at most. The log says "started by My Loader 1.0, which handed
   off to me", and your `boot` (the game already ran it) isn't run again or reported as a loader it didn't run.
 - If your `boot` must run the game's own boot first, do that, then hand off: `init`, `update`, `render` and `shutdown`
-  set before the hand-off are kept and run after the loader's own each frame, crash-guarded.
+  set before the hand-off are kept and run after the loader's own each frame, crash-guarded. One that is the game's own
+  global again when the loader would call it (your loader put it back, or runs the loader in an environment of its own)
+  is left to the game, which calls it already: the loader never runs one of yours a second time.
 - Handing off from inside your `init` (the game has called it already): add `phase = 'init'` to the note. The loader then
   calls its own `init` once it's loaded, and doesn't call yours again.
 - The loader's mods start at its first `init` call, not while your `boot` loads it, so a crash in a mod's start doesn't
   land in your load, and until then nothing of theirs is marked in `package.loaded`. If your loader keeps the callbacks
-  and runs them itself, call that `init` once; without it the mods start at the first `update`.
+  and runs them itself, call that `init` once; without it the mods start at the first `update`, and the loader leaves
+  out the `init` you set before the hand-off (the game's init call went to your loader, not to it). A call to its `init`
+  after that does nothing.
+- Your loader may load it in an environment of its own, even one where the globals it sets don't read back: it never
+  reads its own callbacks back from the globals. With a note or without one, its `init` runs at its first `update` when
+  nothing called it before.
+- If the loader fails to start (its log says `failed to start:`), nothing of the loader's runs in that launch. Its four
+  callbacks become stand-ins for the ones set before it loaded: each calls yours when the game calls it, and does
+  nothing while yours is the game's own global again (your loader keeps the loader's callbacks and put its own back, or
+  runs it in an environment of its own). So your callbacks keep running, none of them twice, and none calls itself.
 - The loader runs once per Lua state: a second hand-off, or a second copy of it, does nothing.
 
 ### Not starting a mod twice

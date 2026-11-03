@@ -333,7 +333,7 @@ function ChefIndex.conflicts() end
 ---The helpers each mod gets.
 ---@class Chef
 ---@field loader string                 the loader's name, 'Chef Shared Loader'
----@field loader_version string         the loader's version, e.g. '1.5.1'
+---@field loader_version string         the loader's version, e.g. '1.5.2'
 ---@field api integer                   the helper level (3); it only goes up when something is added
 ---@field name string                   your mod's name, 'mods/<author>/<name>'
 ---@field options table                 your merged Arsenal options ({} when none is ticked)
@@ -644,7 +644,7 @@ function Chef.set(id, value) end
 ---@return boolean
 function Chef.on_change(id, fn) end
 
----A button row (from 1.4.0): Right (or Enter) or a click runs fn() as your mod (nothing once your mod is stopped or
+---A button row (from 1.4.0): Right (or the controller's confirm) or a click runs fn() as your mod (nothing once your mod is stopped or
 ---switched off). The same as
 ---chef.option(id, { type = 'button', label = label, run = fn, text = text }).
 ---@param id string
@@ -750,8 +750,8 @@ function Chef.ray_box(from, dir, box, extents) end
 
 -- ---------------------------------------------------------------- spawning, with clean-up
 
----Spawns a unit (its resource id as hex, or a name); nil and why when it isn't loaded. It's destroyed for you when
----the world changes or your mod stops.
+---Spawns a unit (its resource id as hex, or a name); nil and why when it isn't loaded or the position isn't finite
+---numbers (a missing one is 0). It's destroyed for you when the world changes or your mod stops.
 ---@param id string
 ---@param x number?
 ---@param y number?
@@ -780,7 +780,7 @@ function Chef.link(child, parent, parent_node, child_node) end
 ---@return string? why
 function Chef.unlink(child) end
 
----A particle effect at a point; nil and why when it can't be made.
+---A particle effect at a point; nil and why when it can't be made (a position that isn't finite numbers included).
 ---@param id string
 ---@param x number?
 ---@param y number?
@@ -974,12 +974,12 @@ function Chef.load_table(name) end
 
 ---Saves a picture of the screen (1.4.0). Only a mod whose TRUSTED entry grants `capture`; every other mod gets
 ---nil, 'not available to this mod'. The loader picks the render target and the file, in its own folder, named
----<author>_<mod>_capture_<nn>.dds with nn 01 to 50, then over again (the oldest written over).
+---<author>_2f<mod>_capture_<nn>.dds (the name written as chef.save_table writes it) with nn 01 to 50, then over again (the oldest written over).
 ---One a second at most. The engine's render target name and file format aren't confirmed on HD2 7.2 yet.
 ---
 ---chef.capture('depth') saves the scene's depth instead, under the same grant; any other value answers nil and why,
 ---with no engine call. It has its own crash record, one a second and number, and its own names,
----<author>_<mod>_depth_<nn>.dds with nn 01 or 02 (only 2 kept: read the one just named). The render target
+---<author>_2f<mod>_depth_<nn>.dds with nn 01 or 02 (only 2 kept: read the one just named). The render target
 ---(linear_depth) and the file aren't confirmed in game: a 148-byte DDS header (DX10, DXGI format 41, R32_FLOAT, 1 mip,
 ---the render resolution, pitch width * 4), then little-endian float32 pixels, row-major, top-left origin: linear view
 ---depth in meters, the sky 0, NaN or inf. 148 + width * height * 4 bytes in all, when it's whole.
