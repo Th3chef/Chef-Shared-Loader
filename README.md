@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.5.1.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.5.2.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -36,7 +36,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.5.1
+- **Version:** 1.5.2
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -163,16 +163,18 @@ end are all taken):
 - **Options menu (F9):** the loader's own entry first (under a divider), then the mods in alphabetical order; Right
   opens one mod's options, under a < Back row (Left or Right on it goes back); Left/Right change an option, and on a
   key or a button Right sets the key or presses it and Left goes back to the list; Delete puts an option's default
-  back; F9 closes the menu. **/** searches: type, then Down (or Up) to go into what it found, Backspace erases, **/**
-  again leaves it (a menu key that's a letter doesn't close the menu while you type a search; F9 still does). The game
-  itself still sees every key (while it's open, mods read no key presses, mouse buttons, wheel or typed text, so a
-  search never fires a mod's hotkey), and it opens its chat on Enter and its pause screen on Escape
-  (Backspace too, at times), so the menu never needs them: the hint line offers only keys the game ignores, except
-  Backspace to erase a search and Escape to cancel a key capture. They still work in it: Enter opens a mod, opens or
-  closes a heading, goes back from the < Back row, flips a toggle, starts a key's capture, presses a button and keeps a
-  search being typed (a choice, a slider or a color takes Left/Right only); Backspace goes back to the list (in a
-  search being typed it erases); Escape closes the menu (in a search being typed it leaves the search, in a key
-  capture it cancels). The hint line shows each key as a chip with what it does (`<` and `>`: Left and Right); in
+  back; F9 closes the menu. **Enter** searches, from anywhere in the menu: the game opens its chat on that press, and
+  the chat is the search box (it keeps the letters from the game). Type, and the list follows; Backspace erases;
+  Escape or a click closes the chat unsent and keeps what it found (a click works with the menu's mouse off too, and
+  presses no row), and the arrows take it from there. **Enter with letters in the box sends them to the other
+  players**: the loader can't stop that. With nothing typed it just closes the box. Where no chat opens the search
+  works the same and the letters reach the game too. The menu's key does nothing while you type a search, so the chat
+  is never left open behind a closed menu: end the typing first.
+  The game itself still sees every key (while it's open, mods read no key presses, mouse buttons, wheel or typed text,
+  so a search never fires a mod's hotkey), and it opens its pause screen on Escape with no chat open (Backspace too,
+  at times): the hint line offers only keys the game ignores, except the search's keys and Escape to cancel a key
+  capture. Backspace goes back to the list (in a search being typed it erases); Escape closes the menu (in a search
+  being typed it ends the typing, in a key capture it cancels). The hint line shows each key as a chip with what it does (`<` and `>`: Left and Right); in
   both looks it follows what you used last, the keys, the mouse or the controller, and shows that one's hints. On
   the ship it's a full screen look (the mods on the left, the picked mod's options on the right, a title picture at the
   top); in a mission, or with "Menu look" set to Compact, a panel ("Menu position": left, center or right; "Menu
@@ -181,23 +183,25 @@ end are all taken):
   look under it) and Crash recovery. A key two options use is marked `!`; with
   that row selected, the hint line names the other options on the key. A mod's headings fold: `+` and the count of its
   rows while closed, `-` while open; Right opens one (or steps into it), Left closes it (on a closed one: back to the
-  list), Enter, cross/A or a click opens and closes it, and Left on a key or button row inside closes it. A mod with
+  list), cross/A or a click opens and closes it, and Left on a key or button row inside closes it. A mod with
   more than 20 options opens with them all closed; what you open or close is remembered, the next launch too. The
   search always shows everything.
   - **Controller:** the D-pad moves, cross/A picks, circle/B goes back (and closes at the list of mods), square/X
     puts the default back, L1/R1 a page. On the ship, holding the touchpad / View button for two seconds opens it.
     A button already down when the menu opens does nothing until it's let go. Row: "Controller in this menu".
     While the controller is what you used last, the menu's mouse cursor is hidden; moving the mouse brings it back.
+    With the row on Off, the cursor and the keyboard's hints show at once.
   - **If F9 does nothing:** something else has the key before the game sees it. On many laptops the F row does
     volume, brightness and the like unless Fn is held (or Fn-lock is on), so try Fn+F9; an app with a global F9
     hotkey takes it too. The log says which key opens the menu at every start (`options menu: F9 ...`), and the status
     lines repeat it until the menu has opened once that launch. To pick another key without the menu, close the game
     and put this line (tabs between the four parts) in `%APPDATA%\Arrowhead\Helldivers2\chef_loader_settings.txt`
     (make the file if it isn't there), replacing an `opt.menu_key` line if there is one: `_loader	opt.menu_key	s	f8`.
-    Type the tabs with the Tab key; a copy from this page turns them into spaces. The key is its name in the game in
+    If `chef_loader_settings.txt.tmp` is there too, delete it: a whole one is read ahead of the file. Type the tabs
+    with the Tab key; a copy from this page turns them into spaces. The key is its name in the game in
     lower case (`f7`, `f8`, ...); Escape, Enter (either one), Backspace, Delete, the arrows and Page Up/Down are the
     menu's own keys and give F9 back. A controller opens it too (the touchpad / View held two seconds on the ship).
-    Once it's open, the row is Chef Shared Loader > Open this menu: Right (or Enter), then the new key.
+    Once it's open, the row is Chef Shared Loader > Open this menu: Right, then the new key.
   - **Mouse:** hover, click, right click to go back, the wheel (one row a notch), and dragging a slider. On the ship
     by default. While the menu has the mouse the camera stays still: the mouse's delta axis gets a dead zone no
     movement reaches (the one it had is put back when the menu closes, and at shutdown), and the menu's cursor follows
@@ -227,7 +231,11 @@ end are all taken):
   - **Unit scan:** spread over frames at 1,500 units a frame. It runs only while a mod watches unit kinds. Once the
     lookup by resource is trusted it's used instead, and while a mission has none of the watched kinds it answers too,
     with a full scan every 30 s for each watch. A game that dies twice in a row in that lookup (`loader|lookup`)
-    loses only the lookup and the full scan carries on; one that dies twice in a row in the scan (`loader|scan`) stops it.
+    loses only the lookup and the full scan carries on.
+  - **Scan crashes:** the scan's job (`loader|scan`) is held for every frame a scan takes, so a crash from anything
+    else that lands mid-scan looks the same as one in the scan. It's counted the way a mod's crashes are: the scan
+    stops only after 4 launches in a row end while it runs, and a launch it doesn't end starts the count over. An
+    update of the loader drops the count and any suspicion of the scan, and tries a stopped scan again.
 
 ## Security model
 
@@ -311,9 +319,9 @@ Source: `src/chef_loader/sandbox.lua`.
   the mod, in the lobby this player is in (never a friend's).
 - **No files:** a trusted mod's files are every mod's (above): nothing in `data\`, no `os.remove` or `os.rename`.
 - **Screenshots** (`capture` in the entry, from 1.4.0): `chef.capture()`. The loader makes the engine call
-  itself and saves the picture in its own folder as `<author>_<mod>_capture_01.dds` to `_50` (the oldest
+  itself and saves the picture in its own folder as `<author>_2f<mod>_capture_01.dds` to `_50` (the oldest
   written over), one a second at most. `chef.capture('depth')`, under the same grant, saves the scene's depth as
-  `<author>_<mod>_depth_01.dds` or `_02` (its render target isn't confirmed in game); see Trusted mods in
+  `<author>_2f<mod>_depth_01.dds` or `_02` (its render target isn't confirmed in game); see Trusted mods in
   [docs/MODDING.md](docs/MODDING.md).
 - **Getting on the list:** see [How a mod gets on the list](docs/MODDING.md#how-a-mod-gets-on-the-list) in
   docs/MODDING.md.
@@ -352,26 +360,28 @@ Some engine calls end the game with a native fault (a null read on a stale handl
   - **A first call that never returned, or a per-frame job that was open** (and started within 60 s), is only
     suspected the first time (`suspect:` in the state): nothing is skipped, no crash is counted against the mod and
     nothing is refused for every mod. The log names it and says so. The suspicion goes after a launch that doesn't end
-    in it.
+    in it. A suspicion of the loader's own call or job (`loader|...`) also goes when the loader changes, as its skips do.
   - **The next launch ending in the same call or job** is a crash: it is skipped from then on, and both launches count
     against the mod that made it. The mod stays on until the count reaches 4, so at least 4 launches in a row; then it
     is turned off. Launches only ever count in those twos, so a mod that crashes the game in one call after another is
     turned off at its 4th crash in a row (2 calls, each suspected once, then skipped), one launch later than if a single
     crash were enough. A launch it doesn't end starts the count over; a launch only suspected of ending in its call
-    keeps the count as it was.
+    keeps the count as it was. The loader's unit scan (`loader|scan`) is counted the same way, as if it were a mod, and
+    skipped only when its count reaches 4.
   - **A mod whose start code ends the game** (`<mod>|start`) twice in a row isn't started from then on, until its file
     changes. It doesn't wait for 4 in a row.
   - **A launch that reached `shutdown()`** is never blamed. The game often crashes by itself after a menu quit.
 - **State** (`chef_loader_state.txt`):
   - `rule: 3`
   - `version: <loader version>`, `build: <game build>`
-  - `test: <n>` (a Test build's number: a different one drops the loader's own skips, as a new version does)
+  - `test: <n>` (a Test build's number: a different one drops the loader's own skips, suspicions and scan count, as a
+    new version does)
   - `trace: stale` (the crash trace wouldn't open, so its lines aren't read again until it does)
   - `skip: <owner|call>`
   - `suspect: <key>`
   - `off: <mod> <fingerprint> <reason>`
   - `strikes: <mod> <launches in a row> <fingerprint>` (kept at 0 while the mod has skipped calls, so an update of it
-    tries them again)
+    tries them again); `strikes: loader|scan <launches in a row> <loader version>` is the unit scan's count
   - `end`, the last line. A `.tmp` that ends in it is a whole save that couldn't be put in place, and is read ahead of
     the state file; any other `.tmp` is read only when there's no state file.
 - **Coming back on:** a mod turned off comes back on by itself when its source changes (an update: the fingerprint
@@ -460,7 +470,8 @@ A mod that ships its own `boot` (instead of `HD2-Boot`) would normally replace t
     so an endless loop there no longer freezes the game.
   - **Callbacks:** each of its callbacks is called after the loader's own, crash-guarded, and switched off after 20
     errors. The hang watchdog covers them too (one that runs on past 3 s is stopped and the boot script switched off
-    for the session), except its `shutdown`, which may take its time: the file-mod installer swaps game files there.
+    for the session; its `init` at launch gets a start's 10 s), except its `shutdown`, which may take its time: the
+    file-mod installer swaps game files there.
   - **Identical copies** (fingerprint) run once.
   - **Rat's Shared Loader's boot stub** (its first line starts `-- HD2 Shared Loader boot stub`) is one of these, on
     purpose: it starts Rat's Shared Loader under this one. The log, CRASH RECOVERY, the health file and the performance
@@ -548,7 +559,7 @@ All in `%APPDATA%\Arrowhead\Helldivers2\`.
 | `chef_loader.old.log` | The launches from before the log last started fresh, oldest first: the newest whole launches (each from its `==== Chef Shared Loader ... starting` line) within 4 MB; one launch over 4 MB on its own is kept whole. If it can't be written (in use, disk full), the log starts fresh as before and its second line says why. `.tmp` and `.bak` files next to it exist only while it's being replaced. |
 | `chef_loader_state.txt` | The crash state (see Crash guard). |
 | `chef_loader_trace.txt` | This launch's breadcrumbs (written again with only what's open whenever it passes 200 KB). |
-| `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. In a string, `\\`, `\n` and `\t` stand for those bytes and `\xHH` for any other control byte. A file that's there but can't be read at launch (locked) isn't replaced: that launch runs without its values and nothing is saved over the file until it reads. The loader's own lines are `_loader`'s: its options (`opt.<id>`), each mod's version at the last launch (`ver.<author>.<mod>`, for the update notices) and a mod's headings opened or closed against their default (`fold.<mod>.<heading>`, with characters other than letters, digits and `_ . -` written as `_`: `fold.mods_you_my_mod.Look`). |
+| `chef_loader_settings.txt` | Saved settings and options-menu values: `<mod>\t<key>\t<b\|n\|s>\t<value>` per line. In a string, `\\`, `\n` and `\t` stand for those bytes and `\xHH` for any other control byte. The last line is `end`: a `chef_loader_settings.txt.tmp` that ends in it is a whole save that couldn't be put in place (a read-only or locked file), and is read ahead of the file; any other `.tmp` is read only when there's no file. A file that's there but can't be read at launch (locked) isn't replaced: that launch runs without its values and nothing is saved over the file until it reads; the same goes for a `.tmp` that can't be read when there's no file. The loader's own lines are `_loader`'s: its options (`opt.<id>`), each mod's version at the last launch (`ver.<author>.<mod>`, for the update notices) and a mod's headings opened or closed against their default (`fold.<mod>.<heading>`, with characters other than letters, digits and `_ . -` written as `_`: `fold.mods_you_my_mod.Look`). |
 | `chef_loader_health.txt` | Every mod found, with its state and why, its time a frame, how long its start took (`start_ms`), how much Lua memory it added then (`start_kb`, approximate: the game shares that memory) and how many of its calls the crash guard skips (`skipped`) and its errors in timers and spread jobs (`timer_errors`) (tab-separated; written after start-up, after changes and at shutdown, only when its text changed: the times are looked at once a minute). |
 | `chef_loader_lang_missing.txt` | While a language is on: the texts it has no entry for, as lines ready for its `text` table. |
 | `chef_loader_stub.txt` | Only after a launch whose start-up stub couldn't load the core: that one line (removed once it's logged). |
@@ -570,7 +581,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.5.1 starting`
+- `==== Chef Shared Loader 1.5.2 starting`
 - When the log had passed 1 MB: `the last log passed 1 MB, so this one starts fresh; its launches are now at the end of
   chef_loader.old.log (N KB: ...)`, or `couldn't keep the last log's launches in chef_loader.old.log (<why>); this log
   starts fresh as before`.
@@ -588,7 +599,7 @@ The old place keeps a trace:
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
 - `options menu: F9, or the controller's touchpad / View held 2 s on the ship (to change the key without the menu: ...)`
   (the controller part only while "Controller in this menu" is on its first choice).
-- `mods run locked down: ... (sandbox 1.5.1)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.5.2)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`; `set aside in %LOCALAPPDATA% ...` when a file there differed from the one in the new
   place; `the log could not open in %APPDATA%\Arrowhead\Helldivers2 ...` on a launch that logs in the old place.
 - `hang watchdog: on (a mod's call over 3 s, or its start at launch over 10 s, is stopped and the mod switched off)`, or
@@ -604,10 +615,13 @@ The old place keeps a trace:
 - `not started: <mod> <why>`, such as `not started: <mod> (switched off in the options menu)`
 - `kept off: <mod> (...)`
 - `blocked: <mod> tried to open ...` (`tried to read ...` for `io.lines`)
-- `switched off <mod> for this session: it hung (a call ran over 3 s)` (another mod's boot script is named
-  `boot:<fingerprint>`)
-- `<mod> stopped after 20 errors`, an `HD2-Boot` mod by its name, another mod's boot script as `the boot script in
-  <patch file>`; either way a notice names it on screen
+- `switched off <mod> for this session: it hung (a call ran over 3 s); it was running <file>, the function on line N`
+  (another mod's boot script is named `boot:<fingerprint>`; `<file>, its main chunk` for code outside any function;
+  the part after `;` is left out when the call ended inside one of the loader's helpers). A test build also logs
+  `hang watchdog (test build): <mod> marked|hung at ...` with the call's time, counts, biggest gap and the gaps taken
+  off, and at shutdown the biggest gap a mod's call had that session.
+- `switched off <mod> for this session after 20 errors` for an addon; `<mod> stopped after 20 errors` for an `HD2-Boot`
+  mod by its name, another mod's boot script as `the boot script in <patch file>`; either way a notice names it on screen
 - `switched off <mod> in the options menu (and at the next launches)` and
   `<mod> switched on in the options menu: it starts when this menu closes`. For a mod that can't start now the end
   says what comes of it: `it starts at the next launch`, `the crash guard holds it (CRASH RECOVERY in this menu can try it again)`, `it's left to another loader, so I don't start it`, or, for a package's part whose main mod isn't coming,
@@ -717,7 +731,7 @@ ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the 
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.5.1 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.5.2 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build
@@ -756,11 +770,14 @@ Lua 5.1's limit of 200 active locals (about a dozen free), so new start-up code 
   every engine table (and of the tables inside them, three levels down), so a function a mod replaces there is
   replaced for that mod only.
 - **Time and memory:** the hang watchdog (from 1.4.0) stops a mod's call that runs on past 3 s (10 s for its
-  start at launch) and switches the mod off for the session, but it can't stop a stuck engine call, and it's off for the
-  session when another script has set a Lua debug hook. A mod can still allocate without limit.
+  start at launch, its `init` and its `after_startup` callbacks then) and switches the mod off for the session. Time
+  no Lua ran in (an engine call, a stall of the game: a gap of over 0.5 s between two of its checks) isn't counted: the
+  first such gap whole, the rest up to twice the limit (6 s, 20 s at launch), one budget shared by a call and every
+  call inside it (a listener's gaps come out of its sender's), so a loop around a slow engine call still stops. It
+  can't stop a stuck engine call, and it's off for the session when another script has set a Lua debug hook. A mod can
+  still allocate without limit.
 - **String patterns** run in C, where no hook runs: one that backtracks hard (`('a?'):rep(32) .. ('a'):rep(32)`) freezes
-  the game past the watchdog, and the crash guard doesn't help. A very long pattern of `?` on a very long text can run
-  out of C stack past any `pcall`, which may end the game (seen on plain Lua 5.1, not checked in the game).
+  the game past the watchdog, and the crash guard doesn't help.
 - **Bingus-style hooks:** a mod that hooks the frame by replacing `update` in its globals (keeping the one it found)
   has its function run as that mod's hook, guarded and timed. It never replaces the game's own `update`.
 - **HD2 Lua Runtime mods** get that runtime's API, not its programs or Desktop writes: a runtime mod's buttons that

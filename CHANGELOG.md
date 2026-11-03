@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.5.2
+
+**Users**
+- The F9 menu's search moved from `/` to Enter. Press Enter (ENTER SEARCH) and the game's chat box opens: that's the
+  search box now, and the list follows as you type. Backspace erases.
+- To finish, press Escape (ESC DONE) or click: the chat box closes without sending, the results stay, and the arrows
+  take it from there. Enter with text in the box (ENTER SENDS) sends that text to the other players as a chat message,
+  and the loader can't stop that. With nothing typed, Enter just closes the box. F9 does nothing until you finish
+  typing, and `/` does nothing now.
+- On the keyboard, Right now does every row's job: it opens a mod, flips a toggle, starts a key capture and presses a
+  button. Enter on a row starts a search instead. The controller and the mouse work as before.
+- The loader's unit scan (what Treasure Radar finds loot with) now switches off only after 4 launches in a row crash
+  while it runs, not 2, so crashes from something else don't turn it off so easily. If 1.5.1 switched it off, this
+  update turns it back on.- The hang watchdog no longer stops a healthy mod because the game stalled during its call (a slow engine call, the PC
+  hitching): time with no Lua running is left out, within a limit, so a real endless loop is still stopped. The log now
+  names the file and function a hung mod was running.
+- Two copies of a mod with the same name, one an addon and one boot-style, no longer both run: only the one deployed
+  last does.
+- Options you change while `chef_loader_settings.txt` is read-only or locked are no longer lost at the next launch.
+- A mod you switch off in the menu still gets to save when the game closes.
+- With "Controller in this menu" set to Off, the menu shows the keyboard's hints and the mouse cursor right away.
+- When the menu can't find the mouse cursor, other mods can still hold the mouse.
+- Speed: a mod that refreshes its unit watch every frame no longer keeps the unit scan running back to back, a mod that
+  reads a lot of game objects no longer writes a crash-trace line on every read, and a few smaller speed and memory
+  fixes.
+
+**Modders**
+- `chef.button` rows take Right, the controller's confirm or a click. The keyboard's Enter no longer presses one.
+- While the menu is open, in a search too, your mod's key and mouse reads and `chef.typed()` still answer nothing, so a
+  search never fires your hotkey.
+- Another loader can now host the core in an environment of its own. The core runs its own `init` at its first
+  `update` when nothing called it, never runs the host's callbacks twice, and if its start fails, the host's own
+  callbacks keep running. Thanks to MCTimeRL for the report and the suggested fix (issue 16).
+- When the ship loads into the mission's world, `mission_end` now comes before the `world` event and carries the
+  mission's world id, in a late start's replay too.
+- A paused mod (switched off, with no `on_stop`) still gets its shutdown as the game closes: the `shutdown` hook and
+  event, a look-alike's `on_shutdown` and its guards' stop, so it can save.
+- A stopped copy's `chef.save` and `chef.set` answer `nil, 'the mod is off'`, and its BingusRuntime guard and
+  `open_log` are refused.
+- When an `on_change` callback sets its own row again, the callbacks after it hear only the new value. Each
+  ModOptionsMenu `on_change` callback has its own crash key, so a crash skips only that one.
+- `chef.spawn` and `chef.particles` refuse a position that isn't finite numbers (`nil, 'x, y, z: finite numbers'`).
+- `chef.units_near` with a negative radius finds nothing, `chef.arc` with no angle draws nothing, and `chef.key_label`
+  hands back a name over 64 bytes as it is.
+- `debug.traceback` starts at your own code, and a nil passed to a `bit` function is a "bad argument" at your line.
+- HD2 Lua Runtime mods: a GUI made while the mod is paused stays hidden until it's back on, and `handle.missing()` also
+  names the calls a need depends on.
+- A dev-mode reload with the menu open sends the new copy the `menu` event with `true`.
+- Hang watchdog: a gap of over 0.5 s between its checks (no Lua ran) comes off the clock of the call and its callers.
+  The first gap comes off whole, then up to twice the call's limit in all (6 s, 20 s at launch), one budget shared by
+  every call inside it. An `HD2-Boot` mod's or boot script's `init` and the `after_startup` callbacks at launch get the
+  start's 10 s. A listener run inside a call that hung is no longer slowed into a hang of its own, and a mod looping on
+  a hung boot script's callback is stopped now.
+- README and MODDING fixes: the log line for an addon stopped after 20 errors, what happens when a start hangs, and
+  that material values aren't undone on stop.
+- Language files: the menu's hints use SENDS and DONE now, and no longer draw RESULTS or EXIT.
+
 ## 1.5.1
 
 **Users**
