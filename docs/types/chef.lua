@@ -44,7 +44,7 @@
 ---| 'mission_end'    # (world_id): the mission ends (extraction, quitting, a new world)
 ---| 'players'        # (players, joining, players_before): the player count or the number still joining changed (from 1.4.0)
 ---| 'menu'           # (open): the loader's options menu opened (true) or closed (false) (from 1.4.0)
----| 'mod_stopped'    # (name, why): a running mod stopped: errors, the hang watchdog, switched off, tried again, a dev reload (from 1.4.0)
+---| 'mod_stopped'    # (name, why): a running mod stopped: errors, the hang watchdog, switched off, retried, a dev reload (from 1.4.0)
 ---| 'shutdown'       # the game closes
 ---| string           # any event a mod emits with chef.emit
 
@@ -328,12 +328,12 @@ function ChefIndex.conflicts() end
 ---@field update fun(dt: number)?  every frame
 ---@field render fun()?           every frame, after the game's render
 ---@field shutdown fun()?         when the game closes
----@field on_stop fun()?          once, when the loader stops your mod (errors, the hang watchdog, switched off in the menu, tried again from CRASH RECOVERY, a dev reload; not a start that raised, which never returned this table: pcall risky start code, or use handle.on('stop')): put back what only you know. After a hang a new world may not have settled yet
+---@field on_stop fun()?          once, when the loader stops your mod (errors, the hang watchdog, switched off in the menu, retried from CRASH RECOVERY, a dev reload; not a start that raised, which never returned this table: pcall risky start code, or use handle.on('stop')): put back what only you know. After a hang a new world may not have settled yet
 
 ---The helpers each mod gets.
 ---@class Chef
 ---@field loader string                 the loader's name, 'Chef Shared Loader'
----@field loader_version string         the loader's version, e.g. '1.5.2'
+---@field loader_version string         the loader's version, e.g. '1.5.3'
 ---@field api integer                   the helper level (3); it only goes up when something is added
 ---@field name string                   your mod's name, 'mods/<author>/<name>'
 ---@field options table                 your merged Arsenal options ({} when none is ticked)

@@ -191,7 +191,7 @@ The loader's own events:
 | `world` | world id, in a mission | A new world has settled. |
 | `mission_start`, `mission_end` | world id | A mission starts; the mission ends (extraction, quitting, a new world). `mission_end` carries the mission's world id and comes before the `world` of the world after it. |
 | `menu` | true (it opened) or false (it closed) | The loader's options menu opened or closed (from 1.4.0, `chef.has('menu_state')`): hide your HUD while it's up, say. `chef.menu_open()` says whether it's open now. |
-| `mod_stopped` | the mod's name, why | A running mod stopped: too many errors, the hang watchdog, switched off in the menu, stopped to be tried again from CRASH RECOVERY, or a dev-mode reload (from 1.4.0, `chef.has('mod_stopped_event')`). Drop what you took from it with `chef.require`. Never for a mod that never ran (a failed start), and the stopped mod doesn't hear its own. |
+| `mod_stopped` | the mod's name, why | A running mod stopped: too many errors, the hang watchdog, switched off in the menu, stopped to be retried from CRASH RECOVERY, or a dev-mode reload (from 1.4.0, `chef.has('mod_stopped_event')`). Drop what you took from it with `chef.require`. Never for a mod that never ran (a failed start), and the stopped mod doesn't hear its own. |
 | `players` | players, joining, players before | The session's player count or the number still joining changed (someone starts joining, is in, or leaves). Looked at once a second, and only while a mod listens (a paused mod's listener doesn't count); the first look after you start listening only notes the count. Check `chef.has('players_event')` (from 1.4.0). |
 | `shutdown` | | The game closes. |
 
@@ -206,11 +206,12 @@ line that crosses them, 1456 bytes at most; a line that starts later isn't read,
 
 Required mods start first. A mod whose requirement is missing, too old or in a circle isn't started, and the log says
 why (for example `not started: mods/you/my_mod needs mods/you/my_lib 1.2 or newer (1.1.0 is installed)`, or `needs
-mods/you/my_lib (not installed)`, or `(deployed, but off)`).
+mods/you/my_lib (not installed)`, or `(deployed, but off)`, or `(switched off in <loader>)` when another loader's
+player switched it off there: see [Not starting a mod twice](#not-starting-a-mod-twice)).
 `chef-loader` works as the loader's name too.
 
 A requirement another loader runs (see [Mods written for the HD2 Lua Runtime](#mods-written-for-the-hd2-lua-runtime))
-counts as met once that loader really has it: a mod waiting for one that runs below this loader is tried again after
+counts as met once that loader really has it: a mod waiting for one that runs below this loader is retried after
 that loader has run, and a chain of such mods starts in order. A version is checked against the `-- @version` line in
 that mod's header. Its module stays that loader's: `chef.require` gives `nil` and `<name> is not running`.
 
@@ -242,6 +243,7 @@ name, the list follows each letter, **Backspace** takes one off (held, it follow
 typed: the whole list); a click does that with the menu's mouse off too, and presses no row. The arrows work from
 there, and the next Escape closes the menu. **Enter** with letters in the box sends them to the other players, and
 nothing in the loader can stop that (it keeps what was found all the same); with nothing typed it just closes the box.
+So the typing hints offer only `ESC DONE` and `BKSP ERASE`, never Enter.
 The menu's key does nothing while typing: Enter, Escape or a click end the typing first. Where no chat opens (the title
 screen, say) the search works the same, and the letters reach the game too. The hint lines offer only keys the game ignores (the arrows, Delete and the menu's
 key), plus the search's keys and **Escape** to cancel a key capture; the game opens its pause screen on Escape (with
@@ -301,11 +303,11 @@ end
 ### Starting late
 
 Your mod may start after the launch's start-up: when the player switches it on in the options menu (it was saved off,
-or they just switched it off), or presses **Try again now** in CRASH RECOVERY. It starts when the menu closes, once a
+or they just switched it off), or presses **RETRY** on its row in CRASH RECOVERY. It starts when the menu closes, once a
 world that's loading has settled, a mod it requires first. It's the same start as at launch: a fresh copy of your file
 from the top, a new environment, a new `chef`, the options you registered back with their values. Each row you register
 again is your new copy's, its label, button and other functions too; a row you don't register again stays listed with
-its functions gone (a function label says `?`, a button runs nothing). If it was running (tried again, or off and on in
+its functions gone (a function label says `?`, a button runs nothing). If it was running (retried, or off and on in
 one menu session) it was stopped first, the usual way, and other mods got `mod_stopped`; with no stop callback it isn't
 started again at all, see below. The hang watchdog gives a late
 start a call's 3 s, not the 10 s of a start at launch, and so its `init` and `after_startup` callbacks: a mission may
@@ -348,9 +350,10 @@ keep your start the same either way. Two things are worth a thought:
   hears them at a world change), `menu` with `false` if you heard the menu open, an `on_change` with the row's value if
   the player changed it, and `done(false)` for a spread job a new world ended. A timer that came due meanwhile runs once;
   other events are gone. A mouse hold and your dead zones come back, and your GUIs show as you last set them. Other mods
-  aren't told: there's no event for it. The next launch goes by the saved switch, as always. CRASH RECOVERY shows **Try again next launch** for a
-  mod with no stop callback that ran in this launch, running or paused, as a try again has to start it fresh. To restart in
-  the same launch instead, add `on_stop` and put back what you changed. A mod that hasn't run in this launch (saved off, or
+  aren't told: there's no event for it. The next launch goes by the saved switch, as always. CRASH RECOVERY's **RETRY**
+  on a mod with no stop callback that ran in this launch, running or paused, doesn't start it fresh either: the same
+  copy carries on, its skipped calls allowed again (a call only its start makes comes back at the next launch). To have
+  RETRY start it fresh in the same launch instead, add `on_stop` and put back what you changed. A mod that hasn't run in this launch (saved off, or
   its start held back) has left nothing behind and starts late as usual, and a dev-mode reload starts a new copy all the
   same: that one's your own test.
 - **Other mods don't hear about it.** A mod that took your exports with `chef.require` at its own start keeps the old
@@ -359,11 +362,11 @@ keep your start the same either way. Two things are worth a thought:
 
 A mod stopped in this launch by its errors, a hang or its own `switch_off` stays stopped until the next launch, whatever
 the switch says, and the menu says it starts then. A mod the crash guard holds stays held: the switch says so and points
-to CRASH RECOVERY, whose **Try again now** brings it back (an update of the mod does too). A mod left to another loader
+to CRASH RECOVERY, whose **RETRY** brings it back (an update of the mod does too). A mod left to another loader
 is that loader's: the switch says so and starts nothing. A mod left not started by a requirement or a start that failed
-can try again: off, then on, and it starts when the menu closes, through every check a start goes through. Nothing does
+can start again: off, then on, and it starts when the menu closes, through every check a start goes through. Nothing does
 that by itself: a requirement that comes up later doesn't start the mods that need it. The one exception is a package's
-mods left waiting on each other: **Try again now** on one of them brings the others left down by it, the main mod and its
+mods left waiting on each other: **RETRY** on one of them brings the others left down by it, the main mod and its
 parts. A part of a package doesn't start alone: while the package's main mod is stopped, the part waits. If the game quits while a start is waiting, nothing
 starts; the saved switch starts your mod at the next launch.
 
@@ -630,7 +633,7 @@ return {
   file, 64 files in all (the highest patches), about 2 s of reading at start-up (files past that, the highest patches,
   are left out, every launch while it lasts); a file that takes over 5 s to read is skipped from the next launch on
   until it changes. It runs once at start-up with nothing to reach; a file that ends the game is skipped from the next
-  launch on (a changed file is tried again). Texts are checked (1 to 300 bytes, a translation up to 300; 20,000 texts
+  launch on (a changed file is read again). Texts are checked (1 to 300 bytes, a translation up to 300; 20,000 texts
   at most), and so are patterns (200 at most); the first 5 things left out of each file are named in the log. 31
   languages at most. A translation that is itself another entry's English text is translated again where it's drawn:
   keep them apart.
@@ -658,7 +661,7 @@ return {
   made from texts translated one by one (`ALSO USED BY:`, the mods' titles and labels), so they need no pattern.
 - **The menu's hint lines** are drawn as pairs, each key (`ARROWS`, `ENTER`, `ESC`, `DEL`, `BKSP`, `CLICK`, `<`
   `>` (the Left and Right arrows, and the mouse's arrows on a row), `RIGHT CLICK`, `WHEEL`, the menu key) a light chip
-  followed by what it does (`MOVE`, `OPEN`, `CHANGE`, `SEARCH`, `SENDS`, `DONE`, `CLOSE`, `BACK`, `DEFAULT`, `CANCEL`,
+  followed by what it does (`MOVE`, `OPEN`, `CHANGE`, `SEARCH`, `DONE`, `CLOSE`, `BACK`, `DEFAULT`, `CANCEL`,
   `NONE`, `ERASE`, `PICK`, `SCROLL`, and `PRESS A KEY` / `TYPE TO SEARCH` on their own), each key and word
   translated on its own: translate the pieces, not the whole line (since 1.2.2). A pair that doesn't fit is left out
   whole (the arrows' first). The full screen look's `RIGHT ARROW OPENS` (beside a mod's preview) is one text.
@@ -685,7 +688,7 @@ it isn't run (your old hook stays and the log says so), so one mod can't wrap an
 scripts keep their global `render`.
 
 `on_stop()` in the table is called once when the loader stops your mod (20 errors, it hung, it was switched off in
-the menu, a running mod stopped to be tried again from CRASH RECOVERY, a dev-mode reload), before it forgets your timers, watches and events: put back what only you know there, such as
+the menu, a running mod stopped to be retried from CRASH RECOVERY, a dev-mode reload), before it forgets your timers, watches and events: put back what only you know there, such as
 textures you set on the game's materials (the engine can't tell the loader what a material had before). Without one,
 its switch pauses a mod that ran instead of stopping it, and the same copy carries on when it's switched back on
 ([Starting late](#starting-late)); paused, it still gets its `shutdown` as the game closes. A start that
@@ -874,7 +877,8 @@ whatever this loader's options menu says: such a mod has no switch there, only a
 (mods in one patch file share the main mod's row, and each keeps its own entry here),
 and the core has no row at all, as it's part of that loader.
 With no such loader running, or when it never came up, the core is `not started` and those mods run on this loader's
-look-alike) or, for a boot
+look-alike. It's also the state of a mod another loader's player switched off in that loader's own menu, when `why` is
+`switched off in <loader>`: see [Not starting a mod twice](#not-starting-a-mod-twice)) or, for a boot
 entry, `handed off`
 (the loader that handed the game to this one). `ms_avg` / `ms_max` are its time
 a frame over the last status minute (nil before the first). `skipped` is how many of its calls the crash guard skips
@@ -924,8 +928,8 @@ Two header lines say what your mod expects:
 ### The loader's own settings (options menu, Chef Shared Loader group)
 
 The rows sit under three headings: Menu (with the subheadings Compact look and Controls), Performance (with the
-subheading Monitor look) and Crash recovery (a "Try again now" or "Try again next launch" button for each mod the
-crash state holds back). A subheading is drawn indented and in a dimmer yellow, its rows indented with it. These headings don't fold
+subheading Monitor look) and Crash recovery (a row for each mod the crash state holds back, its name with a RETRY
+button). A subheading is drawn indented and in a dimmer yellow, its rows indented with it. These headings don't fold
 (the mods' headings do).
 
 | Row | What it does |
@@ -968,14 +972,14 @@ crash state holds back). A subheading is drawn indented and in a dimmer yellow, 
     timer's stays on until a run from that place has finished, a spread's until a job from there has.
   - A crash in your mod's start code (the file running before it returns) is different: once two launches in a row
     end in it, your mod isn't started from then on, until its file changes.
-  - Updating the mod turns it back on, and the calls that crashed are tried again.
+  - Updating the mod turns it back on, and the calls that crashed are retried.
   - A call on one kind of unit (`chef.call_kind`) made with only the unit, that crashed, is refused for every mod on
-    that kind: yours gets `nil, 'skipped'` and stays on. It is tried again after a loader or game update. (A call with
+    that kind: yours gets `nil, 'skipped'` and stays on. It is retried after a loader or game update. (A call with
     arguments of your own, a node index say, is only skipped for your mod.) Only `chef.call_kind` and `chef.lights`
     take part: `chef.call`, your own `stingray` and the HD2 Lua Runtime look-alike's calls don't ask about it, and a
     crash in one of those isn't shared.
   - Testers can add `-- HD2-Keep-On-Crash: yes` in the file's first lines (as far as `HD2-Requires` is read) to stay on (only the crashing call is skipped).
-    The skipped calls stay skipped until the mod is updated; then they're tried again.
+    The skipped calls stay skipped until the mod is updated; then they're retried.
 - **Engine values live one frame.** `Color`, `Vector3` and the like only last the frame they're made in: make them
   in the frame that uses them.
 - **Handles belong to one world.** Units, GUIs and cameras belong to the world they came from. When
@@ -1047,6 +1051,11 @@ read of `..\something`; the other refusals here, `dofile`, `io.popen` and the re
 - **The game's globals:** `require` of anything but the libraries above, `dofile`, `loadfile` and `module`. A name your
   environment makes its own (`io`, `os`, `debug`, `require`, `loadstring`, `getfenv`, `_G`, the libraries ...) set to
   nil finds nothing behind it.
+- **Other loaders' own tables in the game's globals:** `__boot_mod_loader`, `SharedLoader`, `ChefSharedLoaderHandoff`,
+  and MDL3's `MDL3`, `HD2Data` and `MDL3Handoff` read as `false`, whether that loader set them before Chef Shared
+  Loader started or later, and `chef.call` doesn't reach them (`nil, 'missing'`). `HD2Runtime` and the look-alikes of
+  `CowboyBingusModLoader`, `HD2ModLoader`, `ModOptionsMenu`, `ModBindingsMenu` and `BingusRuntime` are your mod's own,
+  never another loader's. A boot script with full access still sees what other loaders set.
 - **Climbing out:** the rest of `debug`, `setmetatable` on your environment, and `getfenv`/`setfenv` on the game's,
   the loader's or another mod's functions.
 - **Very long patterns:** `find`, `match`, `gmatch`, `gsub` and `gfind` raise an error on a pattern over 2048 bytes,
@@ -1192,10 +1201,23 @@ end
 - **Mods it starts:** every mod Chef Shared Loader starts is marked in the game's `package.loaded[name]` (a marker, never
   the mod's own table). A loader that starts mods with `require(name)` therefore skips them by itself; a loader that
   starts them another way can check `package.loaded[name] ~= nil` first.
-- **Mods you start:** before it starts a mod, Chef Shared Loader looks for it in `package.loaded`, in Boot Mod Loader's
-  `__boot_mod_loader.mods`, and in the `modules` table of a Bingus-style `CowboyBingusModLoader` / `HD2ModLoader`
-  (`'loaded'`, `'loading'` or `'load failed: ...'`). A mod found there isn't started again; the log and `chef.mods()`
-  say which loader has it.
+- **Mods you start:** before it starts a mod, Chef Shared Loader looks for it in Boot Mod Loader's
+  `__boot_mod_loader.mods` (an entry whose `state` is `'loaded'`), in the `modules` table of a Bingus-style
+  `CowboyBingusModLoader` / `HD2ModLoader` (`'loaded'` or `'loading'`), and in `package.loaded` (any entry but
+  `require`'s own placeholder, which a load that failed leaves). A mod found there isn't started again; the log and
+  `chef.mods()` say which loader has it. Any other state (`'load failed: ...'`, say) means nothing: Chef Shared Loader
+  starts that mod itself.
+- **Mods you switched off:** a mod your loader's own menu has switched off can say so in those same lists: a
+  `modules[name]`, or a `__boot_mod_loader.mods` entry's `state`, that's a string starting with `disabled`
+  (`'disabled'`, or `'disabled by user'` as MDL3 writes it). Chef Shared Loader then leaves the mod to your loader and
+  doesn't start it either: not at launch, and not from its own options menu or CRASH RECOVERY later in that launch,
+  while that state stands. Its log says `<mod>: switched off in <your loader>: left to it, not started here`,
+  `chef.mods()` and the health file say `left to its loader` (`switched off in <your loader>`), and its F9 list shows
+  the mod as one read-only row, `Left to <your loader>, switched off there`. A start counts first: a mod started in any
+  of the places above isn't started again, whatever another list says. A mod with `-- HD2-Requires:
+  chef-shared-loader` is started here even when a list has it switched off. The lists are the tables your loader put in
+  the game's globals before Chef Shared Loader started (as when it hands off); what's in them is read each time it
+  decides.
 
 ### Mods made for Chef Shared Loader
 
