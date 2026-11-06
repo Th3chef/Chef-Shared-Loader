@@ -2,7 +2,7 @@
 
 ![Chef Shared Loader](media/gallery.png)
 
-**Download:** `Chef-Shared-Loader-1.5.2.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
+**Download:** `Chef-Shared-Loader-1.5.3.zip` from the [latest release](https://github.com/Th3chef/Chef-Shared-Loader/releases/latest) (not the source code). **Mod makers:** [docs/MODDING.md](docs/MODDING.md).
 
 **Install:** add the zip in your mod manager and enable it, **give it the highest priority** so it wins over every other
 mod (in Arsenal with "First mod highest priority", put it at the top of the list; with "Last mod highest priority", at
@@ -36,7 +36,7 @@ It replaces the game's `boot` script, finds every loader mod in the deployed pat
 own locked-down environment with crash guarding, shared services and drawing helpers. Any mod author can target it.
 The guide for mod makers is [docs/MODDING.md](docs/MODDING.md).
 
-- **Version:** 1.5.2
+- **Version:** 1.5.3
 - **Game:** Steam build 25988413 (2026-10-20) and later, while the game keeps loading `boot` from a patch as source
   and its `require` finds Lua resources in the deployed patches (the start-up stub's way in)
 - **Runtime:** Lua 5.1 only (`goto`, `\x` escapes and `LL` literals are not used anywhere)
@@ -167,7 +167,8 @@ end are all taken):
   the chat is the search box (it keeps the letters from the game). Type, and the list follows; Backspace erases;
   Escape or a click closes the chat unsent and keeps what it found (a click works with the menu's mouse off too, and
   presses no row), and the arrows take it from there. **Enter with letters in the box sends them to the other
-  players**: the loader can't stop that. With nothing typed it just closes the box. Where no chat opens the search
+  players**: the loader can't stop that, so the typing hints show only ESC DONE and BKSP ERASE, never Enter. With
+  nothing typed, Enter just closes the box. Where no chat opens the search
   works the same and the letters reach the game too. The menu's key does nothing while you type a search, so the chat
   is never left open behind a closed menu: end the typing first.
   The game itself still sees every key (while it's open, mods read no key presses, mouse buttons, wheel or typed text,
@@ -385,26 +386,35 @@ Some engine calls end the game with a native fault (a null read on a stale handl
   - `end`, the last line. A `.tmp` that ends in it is a whole save that couldn't be put in place, and is read ahead of
     the state file; any other `.tmp` is read only when there's no state file.
 - **Coming back on:** a mod turned off comes back on by itself when its source changes (an update: the fingerprint
-  differs), and the calls of its that crashed are tried again. `-- HD2-Keep-On-Crash: yes` in a mod's first lines
-  keeps it on, with only the crashing call skipped. It keeps its skipped calls, and they're tried again when it's
+  differs), and the calls of its that crashed are retried. `-- HD2-Keep-On-Crash: yes` in a mod's first lines
+  keeps it on, with only the crashing call skipped. It keeps its skipped calls, and they're retried when it's
   updated. The crash is counted against the file that was running (the trace names each mod's fingerprint), so an
   update installed after the crash but before the next launch counts as a change too.
-- **Trying a mod again from the menu** (from 1.4.0): F9 > Chef Shared Loader > **CRASH RECOVERY** lists every mod
+- **Retrying a mod from the menu** (from 1.4.0): F9 > Chef Shared Loader > **CRASH RECOVERY** lists every mod
   the crash state holds back (kept off, crashes counted in a row, skipped calls, suspected calls; the row's hint says
-  which), each with a RETRY button. A mod held off, or running with calls skipped, has **Try again now**: pressed,
-  its lines leave the state file at once and it starts when the menu closes, in the same launch, its skipped calls
-  tried again (a running mod is stopped first, its `on_stop` runs, and it starts fresh). If it ends the game again
-  it's blamed at the next launch as any mod, its count starting over. With the mod's switch off its lines go and
-  it doesn't start: switching it on then starts it. The other rows are **Try again next launch**: another mod's boot
-  script that the loader runs (each named by the patch file it's in, by its fingerprint when that file isn't
-  deployed), a mod left to another loader, one whose file isn't found, one stopped in this launch (by errors, a hang
-  or itself), one that didn't start for another reason (a missing requirement, say), a running mod with nothing
-  skipped, or a mod with no `on_stop` that ran in this launch (a try again has to start it fresh, on top of what it changed). A row whose mod started in this launch with nothing left against it (its file changed, say) reads
-  **Nothing held back** and does nothing. Pressed, a next-launch row's lines leave the state file: the next launch
-  starts it if nothing else stops it and tries its
-  skipped calls again, a call only suspected of the last crash is a first suspicion again (skipped
-  only if two launches in a row end in it), and nothing changes in the launch you press it in.
-- **Trying a mod again by hand:** delete `chef_loader_state.txt` (and `chef_loader_state.txt.tmp` if it's there)
+  which), each row the mod's name with a **RETRY** button. Pressed, its lines leave the state file at once, and the
+  button says what comes of it. A mod held off, or running with calls skipped and an `on_stop`, runs again when the
+  menu closes, in the same launch, its skipped calls with it (a running mod is stopped first, its `on_stop` runs, and
+  it starts fresh): **AFTER MENU CLOSES**, then **RUNNING** once it runs. A mod in the game now with no `on_stop`, or
+  with only a suspected call, carries on where it is and gets its skipped calls back right away: **RUNNING** (a call
+  that can't come back in this launch, such as one only its start makes or a language or options file, waits for the
+  next launch, and the row's hint says how many). If it ends the game again it's blamed at the next launch as any mod,
+  its count starting over. With the mod's switch off its lines go and it doesn't start: **WHEN SWITCHED ON**, and
+  switching it on starts it (or resumes a paused one). Pressed while a world is still loading, the row of a mod in the
+  game now reads **SHORTLY**, and the press is done once the world settles. The other rows' press is for the next
+  launch, **NEXT LAUNCH**: another mod's boot script that the loader runs (each named by the patch file it's in, by
+  its fingerprint when that file isn't deployed), a mod left to another loader, one whose file isn't found, one
+  stopped in this launch (by errors, a hang or itself), one that didn't start for another reason (a missing
+  requirement, say), a part of a package whose main mod is down with no way back in this launch, or a mod in the game
+  now whose skipped calls can only come back at the next launch. After the press the button follows the mod: switched
+  off it reads WHEN SWITCHED ON, and a start that doesn't come after all reads NEXT LAUNCH: at once for a mod stopped
+  meanwhile (by errors, a hang or itself), with the menu still open, and as the menu closes for one left to another
+  loader. The notice and the log say why. A row whose mod started in this launch with nothing left against it (its
+  file changed, say) reads **Nothing held back** and does nothing. Pressed, a next-launch row's lines leave the state
+  file: the next launch starts it if nothing else stops it and tries its skipped calls again, a call only suspected of
+  the last crash is a first suspicion again (skipped only if two launches in a row end in it), and nothing changes in
+  the launch you press it in.
+- **Retrying a mod by hand:** delete `chef_loader_state.txt` (and `chef_loader_state.txt.tmp` if it's there)
   with the game closed. It clears every mod's skipped calls and crash counts. Use it if the last launch before 1.3.1
   crashed and a fixed update of the mod was installed before relaunching (that launch's trace names no files).
 - **Switching a mod off** (from 1.4.0): every mod's options in F9 start with its on/off switch, which shows the
@@ -413,18 +423,18 @@ Some engine calls end the game with a native fault (a null read on a stale handl
   world that's loading has settled). A mod that ran in this launch and has no `on_stop` can't put back what it changed,
   and a new copy on top of that can break things, so off only pauses it: it stops running, what it changed or spawned
   stays until you switch it back on, and on, the same copy carries on when the menu closes. A mod left not
-  started by a requirement or a start that failed tries again the same way: off, then on, and it starts when the menu
+  started by a requirement or a start that failed is retried the same way: off, then on, and it starts when the menu
   closes if it can by then. A mod that can't start now says what comes of it: one stopped in this launch by errors, a
   hang or itself starts at the next launch; one the crash guard holds says it's held and points to CRASH RECOVERY
-  (**Try again now** there brings it back, the switch doesn't, and neither does a next launch); one left to another
+  (**RETRY** there brings it back, the switch doesn't, and neither does a next launch); one left to another
   loader says so, and nothing here starts it. A part of a package waits for its main mod: while that's stopped the
   part doesn't start alone, and the log says so.
   Mods with no options of their own are listed for this row too. Searching for a mod's name finds it. A mod another
-  loader runs is listed too, with one read-only row and no switch or reset: "Run by <that loader>", or "Left to <that
-  loader>, not running" when that loader blocked it or never started it. The HD2 Lua Runtime core such a loader bundles
-  (`mods/hd2rt/core`) is part of that loader, so it isn't listed. Mods another loader runs from one patch file share
-  one such row, named for the main mod (one whose name isn't a generic one such as `core`, one with an `@name` first,
-  else the first by name); the log, the health file and `chef.mods()` still name each of them.
+  loader runs is listed too, with one read-only row and no switch or reset: `Run by <that loader>`, or
+  `Left to <that loader>, not running` when that loader blocked it or never started it. The HD2 Lua Runtime core such
+  a loader bundles (`mods/hd2rt/core`) is part of that loader, so it isn't listed. Mods another loader runs from one
+  patch file share one such row, named for the main mod (one whose name isn't a generic one such as `core`, one with
+  an `@name` first, else the first by name); the log, the health file and `chef.mods()` still name each of them.
   Mods deployed in one patch file (a mod and the helpers it ships) are one package: one entry with one switch, the
   main mod's (the one with options or a title of its own, else the one whose name isn't a generic one such as `core`
   or `main`, else the first by name); its other parts are listed under INCLUDED with their state, their options
@@ -447,7 +457,7 @@ Some engine calls end the game with a native fault (a null read on a stale handl
 - **Shared with every mod:** a call on one kind of unit that took only the unit (`chef.call_kind(call, kind, unit)`,
   or `chef.lights`) and ended the game is refused for every mod, not only the one that found it
   (`skip: shared|Unit.<call>:<unit kind>`). Other mods get `nil, 'skipped'` for that same call on that kind and stay
-  on. It is tried again when the loader or the game's build changes. This covers `chef.call_kind` and `chef.lights`
+  on. It is retried when the loader or the game's build changes. This covers `chef.call_kind` and `chef.lights`
   only: `chef.call`, a mod's own `stingray` and the HD2 Lua Runtime look-alike's calls don't ask about it, and a crash
   in one of those isn't shared.
 - **Refused centrally:** engine calls known to end the game are refused before they reach the engine.
@@ -581,7 +591,7 @@ The old place keeps a trace:
 ## Log reference
 
 **At start-up:**
-- `==== Chef Shared Loader 1.5.2 starting`
+- `==== Chef Shared Loader 1.5.3 starting`
 - When the log had passed 1 MB: `the last log passed 1 MB, so this one starts fresh; its launches are now at the end of
   chef_loader.old.log (N KB: ...)`, or `couldn't keep the last log's launches in chef_loader.old.log (<why>); this log
   starts fresh as before`.
@@ -599,7 +609,7 @@ The old place keeps a trace:
 - `the start-up stub could not start me before: <the line from chef_loader_stub.txt>`
 - `options menu: F9, or the controller's touchpad / View held 2 s on the ship (to change the key without the menu: ...)`
   (the controller part only while "Controller in this menu" is on its first choice).
-- `mods run locked down: ... (sandbox 1.5.2)`, and on the first launch after the move,
+- `mods run locked down: ... (sandbox 1.5.3)`, and on the first launch after the move,
   `moved from %LOCALAPPDATA% ...`; `set aside in %LOCALAPPDATA% ...` when a file there differed from the one in the new
   place; `the log could not open in %APPDATA%\Arrowhead\Helldivers2 ...` on a launch that logs in the old place.
 - `hang watchdog: on (a mod's call over 3 s, or its start at launch over 10 s, is stopped and the mod switched off)`, or
@@ -624,22 +634,28 @@ The old place keeps a trace:
   mod by its name, another mod's boot script as `the boot script in <patch file>`; either way a notice names it on screen
 - `switched off <mod> in the options menu (and at the next launches)` and
   `<mod> switched on in the options menu: it starts when this menu closes`. For a mod that can't start now the end
-  says what comes of it: `it starts at the next launch`, `the crash guard holds it (CRASH RECOVERY in this menu can try it again)`, `it's left to another loader, so I don't start it`, or, for a package's part whose main mod isn't coming,
+  says what comes of it: `it starts at the next launch`, `the crash guard holds it (CRASH RECOVERY in this menu can retry it)`, `it's left to another loader, so I don't start it`, or, for a package's part whose main mod isn't coming,
   `it waits for <main mod>, the main mod of its package, and doesn't start alone`
-- `starting <mod> in this launch (switched on)` or `(tried again)`, then its usual `started` line
+- `starting <mod> in this launch (switched on)` or `(retried)`, then its usual `started` line
 - `resumed <mod> in this launch (switched on): the same copy carries on`: a mod with no `on_stop` that was only paused
 - `<mod>: not started in this launch after all (<why>)`: something moved between the switch or the button and the menu
   closing (switched off again, stopped, it stopped itself, left to another loader, its package's main mod didn't start)
-- `crash recovery: stopping <mod> to start it again`: a running mod tried again, as the menu closes
-- `<part> starts with <main>, the main mod of its package, when this menu closes`: Try again now on a main mod brings
+- `crash recovery: stopping <mod> to start it again`: a running mod retried, as the menu closes
+- `<part> starts with <main>, the main mod of its package, when this menu closes`: RETRY on a main mod brings
   the parts left waiting for it, their switches on
-- `<mod> starts with <part>, a part of its package, when this menu closes`: Try again now on a part brings the main mod
+- `<mod> starts with <part>, a part of its package, when this menu closes`: RETRY on a part brings the main mod
   and the other parts that part left waiting. A part whose main mod still isn't coming doesn't start: the `not started in
-  this launch after all` line above, the notice `<PART> WAITS FOR <MAIN>`, and Try again now on that main mod brings it
-- `crash recovery: <mod> is tried again in this launch (<what held it back>)`,
-  `crash recovery: <mod> is no longer held back (<what held it back>); it starts when it's switched on`, or
-  `crash recovery: <mod> is tried again at the next launch (<what held it back>)` (a boot script named by its patch
-  file, Rat's boot stub as Rat's Shared Loader)
+  this launch after all` line above, the notice `<PART> WAITS FOR <MAIN>`, and RETRY on that main mod brings it
+- `crash recovery: <mod> will run again after the menu closes (<what held it back>)`,
+  `crash recovery: <mod> is running again (<what held it back>)` for a mod in the game now, then
+  `, <n> skipped call(s) allowed again now` for the calls it gets back at once (one paused by its switch and switched
+  on again says it will run again after the menu closes),
+  `crash recovery: <mod>'s crash record is cleared (<what held it back>), nothing of it was skipped` for a running mod
+  held back only by its crash count or a suspected call, with no calls skipped,
+  `crash recovery: <mod> will run again when it's switched on (<what held it back>)`, or
+  `crash recovery: <mod> will run again at the next launch (<what held it back>)` (a boot script named by its patch
+  file, Rat's boot stub as Rat's Shared Loader). Skipped calls that only the next launch brings back are counted too
+  (`, 1 skipped call(s) at the next launch`)
 - `options reset to defaults: <mod> (<n> row(s))`
 
 **Other boots:**
@@ -731,7 +747,7 @@ ending with `| options menu not opened yet: F9 ...` from 3 minutes in until the 
 ## Test builds and release builds
 
 `tools/build.py --test N` sets the loader's `TEST` line to N. Only a test build has dev mode (`chef_loader_dev.txt`)
-and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.5.2 Test N starting`. A release
+and the probe's 200k-step Lua timing loop, and its log starts `Chef Shared Loader 1.5.3 Test N starting`. A release
 build (no `--test`) leaves `TEST` nil: no dev mode, no timing loop. Everything else is the same code.
 
 ## Source layout and build

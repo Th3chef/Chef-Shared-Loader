@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.5.3
+
+**Users**
+- Holding an arrow key in the F9 menu now keeps it moving, as the controller's D-pad does: one step at once, then a
+  steady run after a short wait. A held Right still opens a mod or a fold, presses a button or starts a key capture
+  only once, and a held D-pad Right into an open fold no longer changes its first option.
+- A short press on the D-pad no longer jumps several steps in the F9 menu while another mod speeds up the game's
+  clock (for example a mod that skips the drop's zoom), and the sped-up clock no longer shortens the 2-second
+  touchpad / View hold that opens the menu.
+- In F9 > CRASH RECOVERY, RETRY on a running mod that couldn't be restarted now gives it its skipped calls back at
+  once, instead of at the next launch. Each row now shows the mod's name with RETRY, and after the press what's
+  happening: AFTER MENU CLOSES, RUNNING, WHEN SWITCHED ON or NEXT LAUNCH, or SHORTLY when it's pressed while a world
+  is still loading (it's done once the world settles).
+- The hint words at the bottom of the F9 menu (MOVE, OPEN, CLOSE and the rest) are yellow now, to match the menu's
+  headings. The keys and the controller's buttons next to them look as before. The note above the hints that warns
+  of a key clash is orange now, not yellow. The search's typing hints no longer show Enter, which sends the text to
+  the game's chat.
+
+**Modders**
+- While a player holds an arrow key on your slider, choice or color row, its `on_change` can now fire about 10 times
+  a second, as it already could with a held D-pad.
+- Another loader can now tell Chef Shared Loader that its player switched a mod off there: a `modules` entry of its
+  `CowboyBingusModLoader` / `HD2ModLoader`, or a `__boot_mod_loader.mods` state, that starts with `disabled` (MDL3
+  writes `disabled by user`). Chef Shared Loader then leaves that mod to that loader instead of starting it, and F9
+  lists it as `Left to <loader>, switched off there`. See "For other loaders" in MODDING.md.
+- Three `why` texts in `chef.mods()`, the health file and `mod_stopped` changed: `tried again when this menu closes`
+  is now `will run again after the menu closes`, `tried again from the options menu` is now
+  `retried from the options menu`, and `needs <mod> (left to <loader>, which starts after this: tried again then)`
+  is now `needs <mod> (left to <loader>, which starts after this: retried then)`.
+
 ## 1.5.2
 
 **Users**
@@ -13,7 +43,8 @@
   button. Enter on a row starts a search instead. The controller and the mouse work as before.
 - The loader's unit scan (what Treasure Radar finds loot with) now switches off only after 4 launches in a row crash
   while it runs, not 2, so crashes from something else don't turn it off so easily. If 1.5.1 switched it off, this
-  update turns it back on.- The hang watchdog no longer stops a healthy mod because the game stalled during its call (a slow engine call, the PC
+  update turns it back on.
+- The hang watchdog no longer stops a healthy mod because the game stalled during its call (a slow engine call, the PC
   hitching): time with no Lua running is left out, within a limit, so a real endless loop is still stopped. The log now
   names the file and function a hung mod was running.
 - Two copies of a mod with the same name, one an addon and one boot-style, no longer both run: only the one deployed

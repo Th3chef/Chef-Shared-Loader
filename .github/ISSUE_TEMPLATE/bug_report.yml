@@ -10,7 +10,7 @@ body:
     attributes:
       label: Loader version
       description: The newest start line in chef_loader.log (the last one reading "==== Chef Shared Loader ... starting") says it.
-      placeholder: 1.5.2
+      placeholder: 1.5.3
     validations:
       required: true
   - type: input
