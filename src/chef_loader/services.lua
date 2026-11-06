@@ -91,20 +91,21 @@ local function fit_cells(s, px, maxw)
 end
 
 -- The menu's hint lines, made once, as pairs: the keys, each drawn as a light chip like the option rows' keys (false:
--- the menu's own key, named when drawn), and what they do. A pair is drawn whole or not at all; opt: a pair left out
--- when the whole line doesn't fit. Each key and word is translated on its own.
+-- the menu's own key, named when drawn), and what they do, in the headings' yellow. A pair is drawn whole or not at
+-- all; opt: a pair left out when the whole line doesn't fit. Each key and word is translated on its own.
 -- The keys shown are the ones the game ignores: the arrows ('<' and '>' are Left and Right, the only arrows both fonts
 -- have), Delete and the menu's own key, plus the search's keys. The game hears those too, on purpose: Enter opens its
 -- chat, which keeps the letters from its controls while I read them (a second Enter sends them), and Escape closes the
 -- chat unsent. Backspace and Escape are its pause screen when no chat is open, so the hints never offer them where
 -- another key does the same.
--- (the typing line's order is what's left in a narrow panel: the pairs go from the end, so ENTER SENDS is the last)
+-- (the typing line offers no Enter: with text in the box, Enter sends it to the game's chat, to the other players, and
+-- no Lua call can stop that; Escape is the way out. Its order is what's left in a narrow panel: the pairs go from the
+-- end, so ESC DONE is the last)
 local KEY_NOW = false
 local HINTS = {
   capture_default = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'DEFAULT' } },
   capture_none = { { word = 'PRESS A KEY' }, { 'ESC', word = 'CANCEL' }, { 'DEL', word = 'NONE' } },
-  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ENTER', word = 'SENDS' }, { 'ESC', word = 'DONE' },
-             { 'BKSP', word = 'ERASE' } },
+  typing = { { word = 'TYPE TO SEARCH', opt = true }, { 'ESC', word = 'DONE' }, { 'BKSP', word = 'ERASE' } },
   -- (in an entry or a search: on a key or a button, Right acts and Left goes back; value is a toggle's, a choice's, a
   -- slider's or a color's, where Left and Right change it; back is the Back row's, where both go back)
   group = { { 'ARROWS', word = 'MOVE', opt = true }, { '>', word = 'CHANGE' }, { 'DEL', word = 'DEFAULT' },
@@ -1501,7 +1502,7 @@ function M.install(ctx)
                   -- (the status's fixed words, on an entry's title bar: nav.status)
                   'RUNNING', 'OFF', 'CRASH GUARD', 'STOPPED', 'NOT STARTED', 'ON AGAIN AT THE NEXT LAUNCH',
                   'HELD, SEE CRASH RECOVERY', 'LEFT TO ANOTHER LOADER',
-                  'STARTS WHEN THIS MENU CLOSES', 'TRIED AGAIN WHEN THIS MENU CLOSES', 'CALL SKIPPED, STILL RUNNING',
+                  'STARTS WHEN THIS MENU CLOSES', 'WILL RUN AGAIN AFTER THE MENU CLOSES', 'CALL SKIPPED, STILL RUNNING',
                   'CALLS SKIPPED, STILL RUNNING', 'SWITCHED OFF', 'STARTED IN', 'LAST ERROR:', 'LINE', 'ERRORS:',
                   -- (the fixed reasons a mod doesn't start for, drawn as they are after the head)
                   'ITS START ENDED THE GAME', 'THE LOCKED-DOWN SPACE FOR MODS COULD NOT BE SET UP',
@@ -1555,7 +1556,7 @@ function M.install(ctx)
     choices = { 'On the ship', 'Always', 'Off' }, default = 1, section = 'controls' })
   local pad_row = add_row('loader', loader_mod, ctx.LOADER, 'menu_pad', { type = 'choice', label = 'Controller in this menu',
     choices = { 'On, hold touchpad / View 2 s to open', 'On', 'Off' }, default = 1, section = 'controls' })
-  local nav = { pad = nil, look_at = 0, pr_at = 0, ix = {}, held = {}, rep = {}, act = {}, ps = false,
+  local nav = { pad = nil, look_at = 0, pr_at = 0, ix = {}, held = {}, rep = {}, act = {}, ps = false, krep = {}, kix = {},
                 mx = nil, my = nil, moved = false, wheel = 0, mouse = false, axes = nil, lmb = true, rmb = true,
                 click = false, rclick = false, hits = {}, nhits = 0, ltop = 1, binds = {} }
   local PAD_NAMES = { up = { 'd_up', 'up', 'dpad_up' }, down = { 'd_down', 'down', 'dpad_down' },
@@ -1616,13 +1617,24 @@ function M.install(ctx)
     end
     return true
   end
-  -- this frame's presses into nav.act (the D-pad repeats while held); nav.held[a]: since when a button is down
+  -- The repeat's clock (the D-pad's and the arrow keys'): real seconds, svc.util.clock, so a mod that makes the game's
+  -- time step jump doesn't turn a short press into a run of steps; the game's clock only when there's no real one
+  -- (it answers 0), as for chef.capture's limit
+  function nav.real()
+    local c = svc.util and svc.util.clock and svc.util.clock()
+    if type(c) == 'number' and c > 0 then return c end
+    return ctx.now()
+  end
+  -- this frame's presses into nav.act (the D-pad repeats while held); nav.held[a]: since when a button is down, and
+  -- nav.rep[a]: its next step, both on nav.real's clock (the touchpad / View's 2 s hold reads the first, so a mod that
+  -- changes the game's time step can't shorten or stretch it)
   -- (closed: the touchpad / View only, read ten times a second by menu_frame: its live check and one button)
   -- (fno: the frame number; the pad's live check is shared with the pad bindings through nav.pf, so a frame that reads
   -- both asks the engine once)
+  -- (now: the clock, asked only once a button reads down, so a read with nothing held asks it nothing)
   function nav.pad_read(closed, fno)
     if not nav.pad then nav.pad_find(); if not nav.pad then return end end
-    local C, now = nav.calls, ctx.now()
+    local C, now = nav.calls, nil
     if nav.pf ~= fno then
       nav.pf = fno
       if not nav.pad_live() then return end
@@ -1634,6 +1646,7 @@ function M.install(ctx)
       local v = false
       if not closed or a == 'touch' then v = eng(C.button, i) end
       if v == true or (type(v) == 'number' and v > 0.5) then
+        now = now or nav.real()
         if seed and not nav.held[a] then
           nav.held[a] = now; nav.rep[a] = math.huge
         elseif not nav.held[a] then
@@ -1643,6 +1656,41 @@ function M.install(ctx)
       else nav.held[a] = nil end
     end
   end
+  -- The keyboard's arrows held step on as the D-pad does, on its clock (nav.real) and with its 'rep' in nav.act, so
+  -- every line takes a held key as it takes a held D-pad: the press acts at once (act, through pressed), then a step
+  -- 0.4 s on and one every 0.09 s after. Only the four arrows' held state is read, and only while my menu is open and
+  -- takes them (menu_frame: no search typed, no key capture waiting). nav.kheld[a]: since when a key is down;
+  -- nav.krep[a]: its next step. nav.kheld nil: the first read since my menu opened, or since the typing or a capture let
+  -- go of the arrows; a key down then is held, not pressed, and never repeats (unless it was pressed in that very
+  -- frame). The arrows' indexes are asked once (nav.kix), and at that first read again for one the game had none for.
+  function nav.key_rep()
+    local H, R, K, now = nav.kheld, nav.krep, nav.kix, nav.real()
+    local seed = H == nil
+    if seed then H = {}; nav.kheld = H end
+    for a in pairs(PAD_REPEAT) do
+      local i = K[a]
+      if i == nil or (seed and not i) then
+        i = eng('Keyboard.button_index', a)
+        if type(i) ~= 'number' then i = false end
+        K[a] = i
+      end
+      local v = i and eng('Keyboard.button', i)
+      if v == true or (type(v) == 'number' and v > 0.5) then
+        if not H[a] then
+          H[a] = now
+          R[a] = (seed and not ctx.key_pressed(a)) and math.huge or now + 0.4
+        elseif now >= R[a] then
+          R[a] = now + 0.09
+          -- (the D-pad's press this frame stays a press; and while the D-pad holds the same way with its own repeat
+          -- running, its steps are the only ones, so the two held together step no faster than either alone)
+          if nav.act[a] == nil and not (nav.held[a] and nav.rep[a] ~= math.huge) then nav.act[a] = 'rep' end
+        end
+      else H[a] = nil end
+    end
+  end
+  -- A hold that did its one thing (opened a mod or a fold, stepped into a fold, went back, pressed a button) does no
+  -- more until it's let go: the D-pad's and the keyboard's alike (their next press starts the clock again)
+  function nav.let_go(a) nav.rep[a], nav.krep[a] = math.huge, math.huge end
   -- On the ship (or the title screen), told by what I know, never guessed: a settled world, not being looked at again,
   -- not a mission, and with a level count (the ship's few or none), else no bigger than the ship (about 3800 units; the
   -- smallest missions are about 4800). Anything else counts as a mission: a world still loading, a small mission not
@@ -2163,9 +2211,11 @@ function M.install(ctx)
   -- notice (the notices' red, brighter than the state red: it stands alone on a plate over the game). rule (the
   -- separators, the scroll tracks and a live slider's track) goes in as it is: a faint line, not text. nav.pc: one of
   -- them from col at alpha a.
+  -- head: the headings' yellow, as it is (both looks' titles and section headings, and the hint words, the keys' and
+  -- the controller's alike, so the hints always match the headings)
   nav.pal = { gray = { nav.tone(146, 154, 147) }, dim = { nav.tone(126, 133, 127) }, sub = { nav.tone(175, 160, 115) },
               hint = { nav.tone(163, 170, 164) }, err = { nav.tone(150, 24, 16) }, notice = { nav.tone(250, 100, 80) },
-              rule = { 37, 42, 38 } }
+              rule = { 37, 42, 38 }, head = { 255, 231, 16 } }
   svc.pal = nav.pal
   function nav.pc(k, col, a)
     local t = nav.pal[k]
@@ -2544,7 +2594,7 @@ function M.install(ctx)
       why = (not r.value and 'SWITCHED OFF') or (ctx.pending and ctx.pending[r.mod] and 'STARTS WHEN THIS MENU CLOSES')
         or (held == 'guard' and 'HELD, SEE CRASH RECOVERY') or (held == 'left' and 'LEFT TO ANOTHER LOADER')
         or 'ON AGAIN AT THE NEXT LAUNCH'
-    elseif why == 'tried again when this menu closes' then why = 'TRIED AGAIN WHEN THIS MENU CLOSES'
+    elseif why == 'will run again after the menu closes' then why = 'WILL RUN AGAIN AFTER THE MENU CLOSES'
     elseif why == 'failed to run: skipped' then why = 'its start ended the game' end
     r.st_h, r.st_y, r.st_t, r.st_m, r.st_e = tr(head), (type(why) == 'string' and why ~= '') and ': ' .. tr(why) or '', '', '', ''
     -- (running with calls skipped: how many, the number outside the language's text)
@@ -2763,7 +2813,7 @@ function M.install(ctx)
   -- (a key pressed: the hints show the keys)
   local function pressed(name) local v = ctx.key_pressed(name); if v then menu.dev = 'keys' end; return v end
   -- a menu action this frame: its key, or the controller's button or the mouse standing in for it
-  -- (nav.act: true for a press, 'rep' for the D-pad's repeat)
+  -- (nav.act: true for a press, 'rep' for the repeat of a held D-pad or arrow key)
   local function act(name) return nav.act[name] ~= nil or pressed(name) end
   local function capture_key(combos)
     -- any key pressed this frame, by its engine name (Escape cancels, Delete clears); for a row that takes combos,
@@ -2894,7 +2944,7 @@ function M.install(ctx)
   -- a mod opened (from the list's line `back`): the cursor on its first row, past any heading
   local function open_group(back, g)
     menu.back, menu.group, menu.search, menu.top, nav.drag = back, g, '', 1, nil
-    nav.rep.right = math.huge                  -- (the hold that opened it does no more: it has to be let go first)
+    nav.let_go('right')                        -- (the hold that opened it does no more: it has to be let go first)
     local ls, i = lines(), 2
     while ls[i] and ls[i].head do i = i + 1 end
     menu.sel = ls[i] and i or 1
@@ -2902,6 +2952,7 @@ function M.install(ctx)
   -- back to the list of mods, where its cursor was (the Back row, or Backspace)
   local function go_back()
     nav.drag = nil
+    nav.let_go('right')                        -- (a Right held on the Back row doesn't open the mod again)
     if menu.group then menu.sel, menu.top = menu.back, 1 else menu.sel, menu.top = 1, 1 end
     menu.group, menu.search = nil, ''
   end
@@ -3007,9 +3058,10 @@ function M.install(ctx)
     if l and l.fold then
       if nav.act.enter or (l.open and act('left')) or (not l.open and act('right')) then
         -- (the hold that opened it does no more, as open_group's: it has to be let go first)
-        if not l.open then nav.rep.right = math.huge end
+        if not l.open then nav.let_go('right') end
         nav.fold_set(l, l.open)
-      elseif act('right') then step(ls, n, 1)
+      -- (and the hold that stepped in does no more: it would change the first row, or step into the next fold)
+      elseif act('right') then step(ls, n, 1); nav.let_go('right')
       elseif pressed('left') then go_back() end
       return
     end
@@ -3033,8 +3085,8 @@ function M.install(ctx)
       end
       go = go or pressed('right')
     end
-    -- (a held D-pad steps a value along, but a toggle or a two-way choice has only two: one flip a press, or a hold
-    -- turns a mod off and on)
+    -- (a held D-pad or arrow key steps a value along, but a toggle or a two-way choice has only two: one flip a press,
+    -- or a hold turns a mod off and on)
     local rep = nav.act[dir > 0 and 'right' or 'left'] == 'rep'
     if s.type == 'toggle' and ((dir ~= 0 and not rep) or nav.act.enter) then set_row(r, not r.value)
     elseif s.type == 'choice' and dir ~= 0 and not (rep and #s.choices == 2) then
@@ -3043,7 +3095,8 @@ function M.install(ctx)
       set_row(r, v)
     elseif s.type == 'slider' and dir ~= 0 then set_row(r, r.value + dir * ((s.step or 0) > 0 and s.step or (s.max - s.min) / 20))
     elseif s.type == 'key' and go then menu.capture = r
-    elseif s.type == 'button' and go then press(r)
+    -- (the hold that pressed a button does no more, whatever line its press leaves under the cursor)
+    elseif s.type == 'button' and go then press(r); nav.let_go('right')
     elseif s.type == 'color' and dir ~= 0 then step_color(r, dir) end
   end
   -- ("Menu opacity (%)": menu_col scales the alpha of the compact panel's backgrounds by it, menu_op set each frame
@@ -3054,7 +3107,8 @@ function M.install(ctx)
   local menu_op = 1
   local function menu_col(r, g, bl, a) return ctx.color(r, g, bl, floor(a * menu_op + 0.5)) end
   -- The look: a dark panel in a yellow frame, the title on a yellow bar, the
-  -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line.
+  -- picked row lit with a yellow edge, values in green (OFF in gray), keys as light chips, the hints under a thin line,
+  -- their words in the headings' yellow.
   -- a text's y, to sit centered in a row from y up, hgt high, at size p (the pixel font's 7 rows; the game's font is
   -- placed the same)
   function nav.midy(y, hgt, p) return y + floor((hgt - 7 * p) / 2) end
@@ -3285,7 +3339,7 @@ function M.install(ctx)
     for i = menu.top, menu.top + shown - 1 do if ls[i].sep then ph = ph - rh + sh end end
     menu_op = (menu_alpha and tonumber(menu_alpha.value) or 100) / 100
     local col, bg = ctx.color, menu_col        -- (bg: the backgrounds, faded; col: everything else)
-    local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
+    local yellow, ink = nav.pc('head', col), col(17, 17, 17, 255)
     local white, green, gray = col(232, 232, 226, 255), nav.st_c(1, col), nav.pc('gray', col)
     local subc = nav.pc('sub', col)            -- a subheading: a muted gold, well under the headings' yellow
     local orange = nav.st_c(2, col)            -- a reset button asking SURE?
@@ -3434,10 +3488,11 @@ function M.install(ctx)
     if menu.top > 1 or #ls > visible then
       nav.sbar(x0 + pw - b - px, y0 - hb - gap, y + rh, menu.top, visible, #ls, px, top + 3, nav.pc('rule', bg), col(255, 231, 16, 150))
     end
-    -- the hints under a thin line: the note's lines (dim gray; a clash in yellow), then the key hints
+    -- the hints under a thin line: the note's lines (dim gray; a clash in the warning orange, apart from the hint words'
+    -- yellow under it), then the key hints: their words in the headings' yellow, the keys light chips
     local fy = y0 - ph + rh + 2 * px + nh
     ctx.rect(x0 + b, fy, pw - 2 * b, max(1, floor(px / 2)), bg(255, 231, 16, 70), top + 1)
-    local nc = clash and yellow or nav.pc('hint', col)
+    local nc = clash and orange or nav.pc('hint', col)
     for k = 1, nl do
       local s = nav.hw[k]
       if ctx.tr_keep then ctx.tr_keep(s) end
@@ -3448,13 +3503,13 @@ function M.install(ctx)
     local dev = menu.dev
     if dev == 'pad' and (not nav.pad or pad_row.value == 3 or menu.capture or menu.typing) then dev = 'keys' end
     if dev == 'mouse' and not nav.mouse then dev = 'keys' end
-    if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
+    if dev == 'pad' then nav.pad_hints(x0 + tx, x0 + tx + inner, hy, rh, px, P, col, yellow, top + 2, ls[menu.sel])
     else
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
         or ((menu.group or menu.search ~= '') and nav.entry_hints(ls[menu.sel])) or HINTS.list
       nav.hint(segs, x0 + tx, hy, rh, px, x0 + tx + inner,
-        svc.util and svc.util.key_label(menu_key.value) or menu_key.value, white, white, ink, top + 2, P)
+        svc.util and svc.util.key_label(menu_key.value) or menu_key.value, yellow, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
   end
@@ -3562,7 +3617,7 @@ function M.install(ctx)
     local tpx = max(px + 1, floor(px * 1.6 + 0.5))
     local top = ctx.TOP + 950
     local col = ctx.color
-    local yellow, ink = col(255, 231, 16, 255), col(17, 17, 17, 255)
+    local yellow, ink = nav.pc('head', col), col(17, 17, 17, 255)
     local white, green, gray, dim = col(232, 232, 226, 255), nav.st_c(1, col), nav.pc('gray', col), nav.pc('dim', col)
     local rule = nav.pc('rule', col)           -- (the separators and the tracks)
     local panel, line, glow = col(17, 21, 19, 255), col(255, 231, 16, 70), col(255, 231, 16, 42)
@@ -3850,14 +3905,17 @@ function M.install(ctx)
       if nf.s ~= note or nf.px ~= npx or nf.w ~= w - 2 * m or nf.P ~= P or nf.lv ~= lv or nf.fk ~= nav.fk then
         nf.s, nf.px, nf.w, nf.P, nf.lv, nf.fk, nf.t = note, npx, w - 2 * m, P, lv, nav.fk, fit(P(note), npx, w - 2 * m)
       end
-      ctx.text(m, hy + rh, nf.t, npx, clash and yellow or nav.pc('hint', col), top + 2)
+      -- (a clash in the warning orange, apart from the hint words' yellow under it)
+      ctx.text(m, hy + rh, nf.t, npx, clash and orange or nav.pc('hint', col), top + 2)
     end
-    if dev == 'pad' then nav.pad_hints(m, w - m, hy, rh, px, P, col, white, top + 2, ls[menu.sel])
+    -- (the hint words, the keys' and the controller's, in the headings' yellow; the keys are light chips with the ink
+    -- on them, the controller's buttons light pictures)
+    if dev == 'pad' then nav.pad_hints(m, w - m, hy, rh, px, P, col, yellow, top + 2, ls[menu.sel])
     else
       local segs = menu.capture and (menu.capture.spec.menu and HINTS.capture_default or HINTS.capture_none)
         or (menu.typing and HINTS.typing) or (dev == 'mouse' and HINTS.mouse)
         or ((menu.group or menu.search ~= '') and nav.entry_hints(ls[menu.sel])) or HINTS.list
-      nav.hint(segs, m, hy, rh, px, w - m, close_key, white, white, ink, top + 2, P)
+      nav.hint(segs, m, hy, rh, px, w - m, close_key, yellow, white, ink, top + 2, P)
     end
     nav.draw_cursor(top, h)
   end
@@ -3906,20 +3964,21 @@ function M.install(ctx)
     -- (a new world: nothing held from the last one carries over)
     local wk = (ctx.world.instance or 0) * 65536 + (ctx.world.id or 0)
     if wk ~= nav.wk then nav.wk = wk; if next(nav.held) then nav.held, nav.seed = {}, true end end
-    -- (closed, the hold is read ten times a second: a 2 s hold needs no frame of its own, and the held time is the
-    -- clock's, so it still opens within a tenth of a second of the 2 s)
+    -- (closed, the hold is read ten times a second on the game's clock: a 2 s hold needs no frame of its own. The held
+    -- time is real seconds (nav.real, which a closed read asks only while the touchpad / View is down: nav.pad_read and
+    -- the check below), so it opens 2 s after the first read that finds it down, whatever the game's time step does)
     if pv ~= 3 and (menu.open or (pv == 1 and not in_mission)) then
       if menu.open then nav.pad_read(false, fno)
       elseif ctx.now() >= nav.pr_at or ctx.now() < nav.pr_at - 1 then nav.pr_at = ctx.now() + 0.1; nav.pad_read(true, fno) end
     elseif next(nav.held) then nav.held = {} end   -- (no reads: no hold kept from before, it would open the menu by itself)
     local combo = pv == 1 and not in_mission and nav.held.touch
     if menu.open and combo then nav.combo = true end   -- (held while I'm open: closing me with it down is no reopening)
-    if not menu.open and combo and not nav.combo and ctx.now() - combo >= 2 then
+    if not menu.open and combo and not nav.combo and nav.real() - combo >= 2 then
       nav.combo = true
       menu.open, menu.group, menu.search, menu.sel, menu.top, menu.typing = true, nil, '', 1, 1, false
       nav.opened()
       nav.drag = nil
-      nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed = true, true, 'pad', 0, true
+      nav.lmb, nav.rmb, menu.dev, nav.nhits, nav.seed, nav.kheld = true, true, 'pad', 0, true, nil
       menu.ever = true
       log('options menu opened (controller)')
     end
@@ -3967,8 +4026,8 @@ function M.install(ctx)
         menu.open, menu.group, menu.search, menu.sel, menu.top = true, nil, '', 1, 1
         nav.opened()
         nav.drag = nil
-        -- (a mouse button or pad button already down when it opens is no press; no old boxes)
-        nav.lmb, nav.rmb, nav.nhits, nav.seed = true, true, 0, true
+        -- (a mouse button, pad button or arrow key already down when it opens is no press; no old boxes)
+        nav.lmb, nav.rmb, nav.nhits, nav.seed, nav.kheld = true, true, 0, true, nil
         menu.ever = true
         if not menu.said then menu.said = true; log('options menu opened') end
       else
@@ -3983,7 +4042,11 @@ function M.install(ctx)
     local ls = lines()
     if #ls == 0 and menu.search == '' then return end
     local g0, s0, f0 = menu.group, menu.search, ver.fold
-    if not typing and not stepped then menu_input(ls) end
+    -- (the arrows held on the keyboard, nav.key_rep: not read while a search is typed or a capture waits, and a key
+    -- still down after either is held, not pressed. menu.typing: from the frame Enter starts the search too, where
+    -- search_input says false: a held key's or the D-pad's step there would land on the list under the search)
+    if typing or menu.typing or menu.capture then nav.kheld = nil else nav.key_rep() end
+    if not typing and not menu.typing and not stepped then menu_input(ls) end
     nav.nhits = 0
     -- (the lines again when what was picked this frame opened a mod, went back or opened or closed a fold: both looks
     -- draw the new screen in this same frame, so the compact panel's size and hint line never trail it by a frame)
@@ -4144,6 +4207,11 @@ function M.install(ctx)
         local ok, err = run_as(h.owner, h.key, h.fn, ...)
         if not ok and what == 'on_update' then
           if L.hooks[id] == h then L.hooks[id], L.stale = nil, true end
+          -- (one the crash guard skips is gone for this launch: a CRASH RECOVERY press can't bring it back, svc.revive)
+          if err == 'skipped' then
+            shim.lost = shim.lost or {}
+            shim.lost[h.owner .. '|' .. h.key] = true
+          end
           log(err == 'skipped' and fmt('[%s] on_update "%s" skipped (it crashed the game)', h.owner, id)
             or fmt('[%s] on_update "%s" dropped after an error: %s', h.owner, id, err_text(err)))
         elseif not ok then
@@ -5100,7 +5168,43 @@ function M.install(ctx)
     if svc.util then svc.util.forget(owner) end
     if svc.runtime then svc.runtime.forget(owner) end
     shim.forget(owner)
+    if shim.lost then                          -- (a copy started later sets its own hooks)
+      local p = owner .. '|'
+      for k in pairs(shim.lost) do if k:sub(1, #p) == p then shim.lost[k] = nil end end
+    end
     svc.hold_mouse(owner, false)               -- (its hold of the mouse ends: the camera never stays frozen)
+  end
+  -- A skipped key let go again (CRASH RECOVERY on a mod in the game now, the loader's starter.clear_now): true when what
+  -- the skip held back runs from its next call on, false when some of it can't come back before the next launch: a
+  -- look-alike on_update hook dropped for it (its mod set it once; only its next start sets it again), a call a start
+  -- makes once (a boot-style mod's init, an after_startup, a startup listener: the copy that carries on never gets one
+  -- again; a listener that hears another event too is back with that one), or a timer, spread job or job's done the
+  -- utilities can't switch back on (util.revive). peek: only asked, nothing changed.
+  function svc.revive(key, peek)
+    if shim.lost and shim.lost[key] then
+      if not peek then shim.lost[key] = nil end
+      return false
+    end
+    local i = key:find('|', 1, true)
+    local owner, what = key:sub(1, (i or 1) - 1), i and key:sub(i + 1) or ''
+    if what == 'init' or what:find('^after_startup:') then return false end
+    if what:find('^event:') then
+      local once = false
+      for event, list in pairs(subs) do
+        for _, sb in ipairs(list) do
+          if sb.on and sb.owner == owner then
+            if sb.key == nil then sb.key = ctx.place_key('event', sb.fn) end
+            if sb.key == what then
+              if event ~= 'startup' then return true end
+              once = true
+            end
+          end
+        end
+      end
+      if once then return false end
+    end
+    if svc.util and svc.util.revive then return svc.util.revive(key, peek) end
+    return true
   end
 
   -- ---------------------------------------------------------------- the loader's hooks

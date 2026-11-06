@@ -34,7 +34,7 @@
 -- me. Those run unrestricted (see loader.lua, "other mods' boot scripts").
 -- Plain Lua 5.1 (no goto, no bit ops), like the rest of the loader.
 
-local M = { version = '1.5.2' }
+local M = { version = '1.5.3' }
 
 local type, pairs, ipairs, error, tostring, select, rawget, pcall = type, pairs, ipairs, error, tostring, select, rawget, pcall
 local rawset = rawset
@@ -481,6 +481,10 @@ function M.install(ctx)
     -- (a loader that bundles the HD2 Lua Runtime sets these two, in either deploy order, and a mod handle of its gives the
     -- real stingray: a mod's own look-alike HD2Runtime goes on top of this, and nothing reaches the real ones)
     HD2Runtime = false, SharedLoader = false,
+    -- (and another loader that keeps its API, its game data and its hand-off note in the game's globals: those are its
+    -- own mods' and its own reach, past this space. Set before I install or after, they read as false here; a boot
+    -- script with full access still sees them)
+    MDL3 = false, HD2Data = false, MDL3Handoff = false,
   }
   local string_mt = getmetatable('')
   -- s:find(...) never sees a mod's string copy: the VM reads the one metatable all strings share, whose __index is the
@@ -575,6 +579,17 @@ function M.install(ctx)
       local lib = rawget(G, n)
       if type(lib) == 'table' then is_engine[lib] = false end
       if n == 'package' and type(lib) == 'table' and type(rawget(lib, 'loaded')) == 'table' then is_engine[lib.loaded] = false end
+    end
+    -- (another loader's own tables, hidden by name in base, are nothing under any other name too: a lower case global,
+    -- a field of a table a mod gets a copy of, or a capitalized global that's the same one. Only a value with an
+    -- identity goes this way (a table, a function, a userdata): a plain one there (true, 2, a string) is hidden by its
+    -- name alone, or every field and global holding that same value would read false or nothing in every mod)
+    for _, k in ipairs({ 'MDL3', 'HD2Data', 'MDL3Handoff' }) do
+      local v = rawget(G, k)
+      if type(v) == 'table' then is_engine[v] = false
+      elseif type(v) == 'function' or type(v) == 'userdata' then as_seen[v] = false
+      else v = nil end
+      if v ~= nil then for n, e in pairs(engine_names) do if rawequal(e, v) then base[n] = false end end end
     end
     local level = {}
     for t, e in pairs(is_engine) do if e then level[#level + 1] = t end end

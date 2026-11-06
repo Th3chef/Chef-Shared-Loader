@@ -41,7 +41,7 @@ TAGLINE = 'One Lua mod loader for Helldivers 2, and one F9 menu for every mod.'
 # README.md says (the section it comes from after it).
 FEATURES = [
     ('Switch mods on, no restart', 'A mod you switch on in F9 starts when the menu closes, if it can', 'ON WITH NO RESTART'),  # Crash guard > Switching a mod off
-    ('Try Again Now in Crash Recovery', 'A held mod starts again in the same launch', 'TRY AGAIN NOW'),         # Crash guard > Trying a mod again from the menu
+    ('Retry in Crash Recovery', 'A held mod runs again in the same launch', 'RETRY NOW'),                      # Crash guard > Retrying a mod from the menu
     ("Works beside Rat's Shared Loader", 'In either deploy order', "RAT'S SHARED LOADER"),                     # intro, and its section on working beside another loader
     ('Safer saved data', 'Mod settings survive odd bytes and locked files', 'SAFER SAVED DATA'),               # Files on the player's computer
     ('Smarter crash guard + hang watchdog', 'Learns crashes in more calls, stops more endless loops', 'SMARTER CRASH GUARD'),  # Crash guard, Known limits

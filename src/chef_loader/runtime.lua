@@ -1211,7 +1211,18 @@ function M.install(ctx)
       ctx.mod_log(o.name, concat(parts, '\t'))
     end
     function handle.state() return rec.state end
-    function handle.switch_off(why) return switch_off(rec, 'by itself: ' .. tostring(why)) end
+    -- (the loader hears of a stop the mod makes itself, ctx.self_stopped: what it shows of the mod can change with it.
+    -- That's my code inside the mod's own call, so it runs protected: an error of mine there is logged as mine, never
+    -- counted against the mod.)
+    function handle.switch_off(why)
+      local was = rec.state
+      local ok = switch_off(rec, 'by itself: ' .. tostring(why))
+      if was == 'active' and ctx.self_stopped then
+        local fine, err = pcall(ctx.self_stopped, o.name)
+        if not fine then log(fmt('[%s] %s switched itself off; my menu\'s update for it failed: %s', rec.owner, rec.id, tostring(err))) end
+      end
+      return ok
+    end
     -- what of spec.needs I can't give, as a new list (empty when everything is there)
     rec.missing = {}
     for _, n in ipairs(needs) do

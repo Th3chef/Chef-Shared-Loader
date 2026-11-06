@@ -933,7 +933,30 @@ function M.install(ctx, L)
   -- New timers and jobs wait in `incoming` until the next frame (a timer can make timers while the list is walked).
   -- The timers are only walked when one is due (or one was canceled), each list compacted in place.
   local timers, jobs, incoming, incoming_jobs = {}, {}, {}, {}
-  local tsched = { next_at = math.huge, dirty = false }
+  -- (held: the timers and spread jobs the crash guard skipped in this launch, by their crash key, so a CRASH RECOVERY
+  -- press can switch them back on, util.revive. seen on one: its mod's handle read it inactive while it was held, so the
+  -- mod knows it stopped, and one that makes a new copy then (a new timer once its last one went inactive) has replaced
+  -- it: a seen copy never comes back, and goes from the list at the key's next hold. One its mod never asked about stays,
+  -- as each of the timers a mod makes one per unit from the same line does. hn: the holds so far; a timer's or job's made
+  -- is that count when its mod made it, its hn its own hold's number. lost on a key: the hold number of one that can't
+  -- come back in this launch (a job whose done already heard it ended, one past 64 of a key, a job a new world ended),
+  -- until a copy made after it replaces that one too.)
+  local tsched = { next_at = math.huge, dirty = false, held = {}, hn = 0 }
+  function tsched.hold(h, key, lost)
+    if not key then return end
+    tsched.hn = tsched.hn + 1
+    h.hn = tsched.hn
+    local l = tsched.held[key]
+    if not l then l = {}; tsched.held[key] = l end
+    local made, j = h.made or 0, 0
+    for i = 1, #l do
+      local e = l[i]
+      l[i] = nil
+      if not e.seen then j = j + 1; l[j] = e end
+    end
+    if l.lost and l.lost <= made then l.lost = nil end
+    if lost or #l >= 64 then l.lost = h.hn else l[#l + 1] = h end
+  end
   -- (ctx.mod_ms: every mod's time so far, for the status line's own share of the loader)
   local function account(a, ms)
     a.ms = (a.ms or 0) + ms
@@ -1069,6 +1092,17 @@ function M.install(ctx, L)
     -- a new world inside the same engine world (the ship loaded into the mission's): what mods made is destroyed; a new
     -- engine world: it's simply forgotten
     drop_made(function() return true end, true)
+    -- (a held job ends with its world, as a running one does, so no press can bring it back: it goes now, its list
+    -- with it, and its key says so, unless its mod had canceled it or seen it stopped)
+    for _, l in pairs(tsched.held) do
+      local k = 0
+      for i = 1, #l do
+        local h = l[i]
+        l[i] = nil
+        if not h.list or h.keep then k = k + 1; l[k] = h
+        elseif not (h.gone or h.seen) then l.lost = max(l.lost or 0, h.hn) end
+      end
+    end
     for _, j in ipairs(incoming_jobs) do jobs[#jobs + 1] = j end
     incoming_jobs = {}
     local keep = {}
@@ -1104,7 +1138,7 @@ function M.install(ctx, L)
           -- (an after timer is done before it runs: a raise can't make it run twice)
           if not t.every then t.on = false end
           local ok = run(t, t.a, t.every and 'every' or 'after', t.fn)
-          if ok == nil then t.on = false
+          if ok == nil then t.on = false; tsched.hold(t, t.key)        -- (skipped: kept for a CRASH RECOVERY press)
           elseif not ok then t.errors = t.errors + 1 end
           if t.every then
             if t.errors < 20 then t.at = max(t.at + t.every, now)
@@ -1124,6 +1158,57 @@ function M.install(ctx, L)
     tsched.next_at = nxt
   end
   function util.timers_look() tsched.dirty = true end
+  -- (a key's place among the timers and jobs its mod has going now -> the newest one's made, or nil. Asked through
+  -- util.revive while a key holds a lost copy, only for a CRASH RECOVERY press: by starter.can_retry through
+  -- starter.skip_split, at the press and in starter.clear_queued, and as the press lets the key go (starter.clear_now).
+  -- A timer or job that hasn't run yet gets its key here, the one its first run would build.)
+  function tsched.live(key)
+    local n
+    for _, list in ipairs({ timers, incoming, jobs, incoming_jobs }) do
+      for _, h in ipairs(list) do
+        if h.on and (not n or h.made > n) then
+          if place(h, h.a, (h.list and 'spread') or (h.every and 'every' or 'after'), h.fn) == key then n = h.made end
+        end
+      end
+    end
+    return n
+  end
+  -- A skipped key let go again (a CRASH RECOVERY press, through services' svc.revive): the timers and spread jobs held
+  -- for it switched back on, as new ones are, through incoming: a timer from now (an every timer's next run a period
+  -- away, an after timer's at once), a job where it stopped. Only the copies that are still the mod's own: not one it
+  -- canceled meanwhile (gone), nor one of a mod that stopped, nor one its mod read inactive while it was held (seen:
+  -- replaced, or left stopped). A timer comes back only while the 512 timers have room: past that it stays held, and
+  -- counts for the next launch. A skipped spread job's done has nothing held, and nothing of it is lost: the press lets
+  -- the next done from that place run, a running job's at its end or one the mod starts later.
+  -- -> true when all of it is back (or nothing was dropped), false when some of it can't come back in this launch.
+  -- peek: only asked, nothing changed.
+  function util.revive(key, peek)
+    local l = tsched.held[key]
+    if not l then return true end
+    local all = not (l.lost and l.lost > (tsched.live(key) or -1))
+    local room, kept = 512 - #timers - #incoming, nil
+    local now = ctx.now()
+    for _, h in ipairs(l) do
+      if not (h.gone or h.seen) and (h.a.on or h.a.paused) then
+        if h.list then
+          if not peek then h.on = true; incoming_jobs[#incoming_jobs + 1] = h end
+        elseif room > 0 then
+          room = room - 1
+          if not peek then
+            h.on, h.at = true, now + (h.every or 0)
+            incoming[#incoming + 1] = h
+            tsched.dirty = true
+          end
+        else
+          all = false
+          kept = kept or {}
+          kept[#kept + 1] = h
+        end
+      end
+    end
+    if not peek then tsched.held[key] = kept end
+    return all
+  end
   -- (the item is read inside the pcall too: a mod's list that raises is one failed item, not a batch left open)
   local function spread_item(fn, list, x) return fn(list[x], x) end
   local function jobs_frame()
@@ -1144,6 +1229,7 @@ function M.install(ctx, L)
         if open and L.skip[key] then
           skipped(key)
           j.on = false
+          tsched.hold(j, key, j.done ~= nil)         -- (one whose done hears it ended can't come back)
           if j.done then run(j, j.a, 'spread done', j.done, false) end
         end
       end
@@ -1262,13 +1348,17 @@ function M.install(ctx, L)
   function util.shutdown()
     drop_made(function() return true end, false)
     timers, jobs, incoming, incoming_jobs = {}, {}, {}, {}
+    tsched.held = {}
   end
-  -- a mod that stopped (the loader calls this through services' forget): its timers, jobs and spawned things go
+  -- a mod that stopped (the loader calls this through services' forget): its timers, jobs and spawned things go, the
+  -- skipped ones held for a press too (a copy started later makes its own)
   function util.forget(owner)
     drop_made(function(m) return m.owner == owner end, true)
     for _, list in ipairs({ timers, incoming, jobs, incoming_jobs }) do
       for _, t in ipairs(list) do if t.a.name == owner then t.on = false end end
     end
+    local p = tostring(owner) .. '|'
+    for k in pairs(tsched.held) do if k:sub(1, #p) == p then tsched.held[k] = nil end end
     tsched.dirty = true
   end
 
@@ -2109,10 +2199,13 @@ function M.install(ctx, L)
     local function timer(delay, every, fn)
       if type(fn) ~= 'function' or type(delay) ~= 'number' then return nil end
       if #timers + #incoming >= 512 then once('timers:' .. owner, fmt('[%s] timers: 512 running already (all mods together); no more', owner)); return nil end
-      local t = { a = a, at = ctx.now() + max(0, delay), every = every and max(0.0, delay) or nil, fn = fn, on = true, errors = 0 }
+      local t = { a = a, at = ctx.now() + max(0, delay), every = every and max(0.0, delay) or nil, fn = fn, on = true, errors = 0,
+                  made = tsched.hn }
       incoming[#incoming + 1] = t
-      return { cancel = function() if t.on then t.on = false; tsched.dirty = true end end,
-               active = function() return t.on end }
+      -- (gone: canceled by its mod, so a CRASH RECOVERY press never switches it back on; seen: read inactive by its mod
+      -- while the crash guard held it, which keeps it off at a press too, tsched.hold)
+      return { cancel = function() t.gone = true; if t.on then t.on = false; tsched.dirty = true end end,
+               active = function() if t.hn and not t.on then t.seen = true end return t.on end }
     end
     function chef.after(s, fn) return timer(s, false, fn) end
     function chef.every(s, fn) return timer(s, true, fn) end
@@ -2122,9 +2215,10 @@ function M.install(ctx, L)
       if type(list) ~= 'table' or type(fn) ~= 'function' then return nil end
       local j = { a = a, list = list, per = max(1, floor(tonumber(per_frame) or 50)), fn = fn,
                   done = type(done) == 'function' and done or nil, i = 0, on = true, errors = 0,
-                  keep = type(opts) == 'table' and opts.keep == true }
+                  keep = type(opts) == 'table' and opts.keep == true, made = tsched.hn }
       incoming_jobs[#incoming_jobs + 1] = j
-      return { cancel = function() j.on = false end, active = function() return j.on end,
+      return { cancel = function() j.gone, j.on = true, false end,
+               active = function() if j.hn and not j.on then j.seen = true end return j.on end,
                progress = function() return j.i, #j.list end }
     end
     function chef.budget(ms) if type(ms) == 'number' and ms > 0 then a.budget = ms end return a.budget or util.default_budget() end

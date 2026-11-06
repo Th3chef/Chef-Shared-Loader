@@ -27,7 +27,7 @@ import re
 # the version comes from the loader itself, so the zip, the manifest and the log always agree
 VERSION = re.search(r"^local VERSION = '([^']+)'", open(os.path.join(HERE, 'src', 'loader.lua'), encoding='utf-8').read(), re.M).group(1)
 GUID = '2d6f0b8e-91c4-4a37-b5e2-7c0a94f13d58'      # Chef Shared Loader's mod id (fixed: mod managers match updates by it)
-ZIP_DATE = (2026, 11, 1, 0, 0, 0)
+ZIP_DATE = (2026, 11, 6, 0, 0, 0)
 # The start-up stub is frozen: mods ship it byte for byte as their own boot, and the loader tells it from a changed copy
 # by its fingerprint (scan.STUB in loader.lua). A new stub is a new core name (core_2) and a new release of both.
 STUB_SHA256 = '7da502fea32b041b320bc7b14b7cf6d24b0334860fced8832e8ca2b3910477e1'
